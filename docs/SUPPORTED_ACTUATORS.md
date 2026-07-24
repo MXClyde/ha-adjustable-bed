@@ -62,7 +62,7 @@ Several bed brands use Okin-based BLE controllers. While they share common roots
 |----------|---------------|--------------|------------------|-----------|
 | [Okimat](beds/okimat.md) | 6-byte (32-bit cmd) | UUID `62741525-...` | ✅ Yes | Name patterns or fallback |
 | [Okin 64-bit](beds/okin-64bit.md) | 10-byte (64-bit cmd) | Nordic UART or UUID | ❌ No | `NORA_CON` / `NORACON`, manual selection |
-| [Leggett & Platt Okin](beds/leggett-platt.md) | 6-byte (32-bit cmd) | UUID `62741525-...` | ✅ Yes | Name patterns |
+| [Leggett & Platt Okin](beds/leggett-platt.md) | 6-byte (32-bit cmd) | UUID `62741525-...` | ✅ Yes | `LP BED...` or Leggett name patterns |
 | [Nectar](beds/nectar.md) | 7-byte (32-bit cmd) | UUID `62741525-...` without response | ❌ No | Name contains "nectar" or generic `OKIN-*` disambiguation |
 | [DewertOkin](beds/dewertokin.md) | 6-byte (32-bit cmd) | UUID `62741525-...` | ❌ No | Name patterns |
 | [Mattress Firm 900](beds/mattressfirm.md) | 7-byte (32-bit cmd) | Nordic UART | ❌ No | Name starts with "iflex" |
@@ -83,11 +83,13 @@ Several bed brands use Okin-based BLE controllers. While they share common roots
 
 **Detection priority** (for beds with Okin service UUID):
 1. Name contains "nectar" → Nectar
-2. Name contains "leggett", "l&p", or "adjustable base" → Leggett & Platt Okin
+2. Name begins `LP BED` or contains "leggett" / "l&p" → Leggett & Platt Okin
 3. Name contains "okimat", "okin rf", or "okin ble" → Okimat
 4. Name starts with `OKIN-` → prompt for Okin-family protocol (confirmed Nectar bases can advertise this way)
 5. Name is `OKIN-Receiver` / `OKIN - Receiver` → prompt for Okin-family protocol
-6. Connected GATT has `62741525-...` plus CSS `90311625-...` and Nordic DFU `00001530-...` → Okin CST
+6. Connected GATT has `62741525-...` plus CSS `90311625-...` and Nordic DFU
+   `00001530-...` → Okin CST, unless the Leggett / `LP BED` identity above
+   identifies LP Control's 6-byte Okin path
 7. Connected GATT has `62741525-...` plus CSS `90311625-...` without Nordic DFU → OKIN Smart Remote / RF ECO BT
 8. Fallback → Okimat (with warning logged)
 

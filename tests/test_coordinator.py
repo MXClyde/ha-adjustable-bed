@@ -3176,6 +3176,87 @@ class TestRuntimeBedTypeCorrection:
             == "retry_with_pairing_after_protocol_correction"
         )
 
+    async def test_lp_control_dual_stack_recovers_persisted_cst_entry(
+        self,
+        hass: HomeAssistant,
+        mock_bleak_client: MagicMock,
+        mock_coordinator_connected: None,
+        mock_async_ble_device_from_address: MagicMock,
+    ):
+        """Issue #368: a bonded LP BED entry must select the 6-byte controller."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="LP BED CONTROL",
+            data={
+                CONF_ADDRESS: TEST_ADDRESS,
+                CONF_NAME: "LP BED CONTROL",
+                CONF_BED_TYPE: BED_TYPE_OKIN_CST,
+                CONF_MOTOR_COUNT: 4,
+                CONF_HAS_MASSAGE: True,
+                CONF_DISABLE_ANGLE_SENSING: False,
+                CONF_PREFERRED_ADAPTER: "auto",
+                CONF_BLE_BOND_ESTABLISHED: True,
+            },
+            unique_id=TEST_ADDRESS,
+            entry_id="test_entry_lp_bed_cst_recovery",
+        )
+        entry.add_to_hass(hass)
+        mock_async_ble_device_from_address.return_value.name = "LP BED CONTROL"
+
+        gatt_services = [
+            SimpleNamespace(
+                uuid=OKIMAT_SERVICE_UUID,
+                characteristics=[
+                    SimpleNamespace(
+                        uuid=OKIMAT_WRITE_CHAR_UUID,
+                        properties=["read", "write"],
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                uuid=OKIN_SMART_REMOTE_CSS_SERVICE_UUID,
+                characteristics=[
+                    SimpleNamespace(
+                        uuid=OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID,
+                        properties=["read", "write"],
+                    )
+                ],
+            ),
+            SimpleNamespace(uuid=NORDIC_DFU_SERVICE_UUID, characteristics=[]),
+        ]
+        mock_bleak_client.services = MagicMock()
+        mock_bleak_client.services.__iter__ = lambda self: iter(gatt_services)
+        mock_bleak_client.services.__len__ = lambda self: len(gatt_services)
+        mock_bleak_client.services.get_service = MagicMock(return_value=None)
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.coordinator.discover_services",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.read_ble_device_info",
+                new_callable=AsyncMock,
+                return_value=("DewertOkin GmbH", "CU170"),
+            ),
+            patch.object(
+                AdjustableBedCoordinator,
+                "_async_verify_bonded",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            coordinator = AdjustableBedCoordinator(hass, entry)
+            result = await coordinator.async_connect()
+
+        assert result is True
+        assert coordinator.bed_type == BED_TYPE_LEGGETT_OKIN
+        assert coordinator.controller.__class__.__name__ == "LeggettOkinController"
+        assert coordinator.disable_angle_sensing is True
+        assert entry.data[CONF_BED_TYPE] == BED_TYPE_LEGGETT_OKIN
+        assert entry.data[CONF_DISABLE_ANGLE_SENSING] is True
+
 
 
 class TestDeviceInfoCache:

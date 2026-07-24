@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
@@ -127,6 +127,25 @@ class TestLeggettOkinController:
         assert command[:2] == bytes([0x04, 0x02])
         # Command 0x1 in big-endian
         assert command[2:] == bytes([0x00, 0x00, 0x00, 0x01])
+
+    async def test_motor_uses_configured_lp_control_cadence(self):
+        """Motor repeats use the APK-derived 200ms default through coordinator settings."""
+        coordinator = MagicMock()
+        coordinator.motor_pulse_count = 5
+        coordinator.motor_pulse_delay_ms = 200
+        controller = LeggettOkinController(coordinator)
+        controller.write_command = AsyncMock()
+
+        await controller.move_head_up()
+
+        move_call, stop_call = controller.write_command.await_args_list
+        assert move_call.args == (bytes.fromhex("040200000001"),)
+        assert move_call.kwargs == {
+            "repeat_count": 5,
+            "repeat_delay_ms": 200,
+        }
+        assert stop_call.args == (bytes.fromhex("040200000000"),)
+        assert stop_call.kwargs["cancel_event"].is_set() is False
 
 
 class TestLeggettGen2CommandFormat:

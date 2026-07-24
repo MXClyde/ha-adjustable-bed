@@ -1948,6 +1948,7 @@ class AdjustableBedCoordinator:
                     self._client.services,
                     self._protocol_variant,
                     ble_model,
+                    device.name,
                 )
                 corrected_bed_type = refine_dewertokin_star_protocol_from_name(
                     corrected_bed_type,

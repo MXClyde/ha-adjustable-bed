@@ -909,7 +909,10 @@ class BLEDiagnosticRunner:
         gatt_services: list[ServiceInfo] | None = None,
     ) -> dict[str, Any]:
         """Build a detection reasoning section."""
-        gatt_detection = detect_bed_type_from_gatt_services(gatt_services)
+        gatt_detection = detect_bed_type_from_gatt_services(
+            gatt_services,
+            getattr(service_info, "name", None),
+        )
         if gatt_detection.bed_type is not None:
             return {
                 "bed_type": gatt_detection.bed_type,

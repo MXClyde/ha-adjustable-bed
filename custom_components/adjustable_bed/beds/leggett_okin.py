@@ -8,13 +8,14 @@ Protocol details:
     Service UUID: 62741523-52f9-8864-b1ab-3b3a8d65950b (shared with Okimat/Nectar)
     Write characteristic: 62741525-52f9-8864-b1ab-3b3a8d65950b
     Command format: 6-byte binary [0x04, 0x02, <4-byte-command-big-endian>]
-    Motor timing: 15 pulses at 100ms intervals for continuous movement
+    Motor timing: the LP Control app repeats held commands every 200ms
     Position feedback: Not supported
     Pairing: Required before first use; handled by coordinator
 
 Note: This shares the same BLE service UUID with Okimat and Nectar beds.
-Detection uses device name patterns ("leggett", "l&p") to distinguish between these
-bed types. See okin_protocol.py for the shared binary protocol specification.
+Detection uses device name patterns ("leggett", "l&p", "lp bed") to distinguish
+between these bed types. See okin_protocol.py for the shared binary protocol
+specification.
 """
 
 from __future__ import annotations
@@ -186,10 +187,11 @@ class LeggettOkinController(BedController):
 
         try:
             if command:
+                pulse_count, pulse_delay_ms = self.motor_pulse_settings()
                 await self.write_command(
                     self._build_command(command),
-                    repeat_count=15,
-                    repeat_delay_ms=100,
+                    repeat_count=pulse_count,
+                    repeat_delay_ms=pulse_delay_ms,
                 )
         finally:
             self._motor_state = {}
