@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -353,6 +354,45 @@ class TestOctoPinAuth:
         await controller.send_pin()
 
         mock_bleak_client.write_gatt_char.assert_not_called()
+
+    async def test_send_pin_redacts_command_diagnostics(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """PIN packets should be written but redacted from traces and logs."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        await coordinator.async_connect()
+
+        controller = cast(OctoController, coordinator.controller)
+        controller._has_pin = True
+        controller._pin_locked = True
+        coordinator._command_trace.clear()
+        mock_bleak_client.write_gatt_char.reset_mock()
+        caplog.set_level(logging.DEBUG, logger="custom_components.adjustable_bed.beds.base")
+        caplog.clear()
+
+        await coordinator.async_execute_controller_command(
+            lambda active: cast(OctoController, active).send_pin()
+        )
+
+        expected_packet = controller._build_packet([0x20, 0x43], [1, 2, 3, 4])
+        mock_bleak_client.write_gatt_char.assert_called_once_with(
+            OCTO_CHAR_UUID,
+            expected_packet,
+            response=False,
+        )
+        assert len(coordinator.command_trace) == 1
+        assert coordinator.command_trace[0]["payload"] == {
+            "hex": "**REDACTED**",
+            "length": len(expected_packet),
+            "ascii_preview": None,
+        }
+        assert expected_packet.hex() not in caplog.text
+        assert "**REDACTED**" in caplog.text
 
 
 class TestOctoCommands:

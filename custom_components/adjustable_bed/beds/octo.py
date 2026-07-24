@@ -199,6 +199,16 @@ class OctoController(BedController):
         # Build final packet with unescaped delimiters
         return bytes([OCTO_PACKET_CHAR, *escaped_payload, OCTO_PACKET_CHAR])
 
+    def _format_command_trace_payload(self, command: bytes) -> dict[str, object] | None:
+        """Redact PIN authentication packets from logs and support bundles."""
+        if command[:3] == bytes((OCTO_PACKET_CHAR, 0x20, 0x43)):
+            return {
+                "hex": "**REDACTED**",
+                "length": len(command),
+                "ascii_preview": None,
+            }
+        return super()._format_command_trace_payload(command)
+
     def _parse_response_packet(self, message: bytes) -> dict[str, list[int]] | None:
         """Parse a response packet from the bed.
 

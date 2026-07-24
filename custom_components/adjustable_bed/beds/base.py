@@ -297,6 +297,10 @@ class BedController(ABC):
         This is the BLE characteristic that accepts motor/preset commands.
         """
 
+    def _format_command_trace_payload(self, command: bytes) -> dict[str, Any] | None:
+        """Return a safe diagnostic representation of a command."""
+        return format_payload(command)
+
     async def _write_gatt_with_retry(
         self,
         char_uuid: str,
@@ -339,12 +343,14 @@ class BedController(ABC):
             raise ConnectionError("Not connected to bed")
 
         effective_cancel = cancel_event or self._coordinator.cancel_command
+        payload = self._format_command_trace_payload(command)
+        logged_command = str(payload.get("hex", "**REDACTED**")) if payload else "**REDACTED**"
 
         _LOGGER.debug(
             "GATT write to %s (%s): %s (response=%s, repeat=%d, delay=%dms)",
             self._coordinator.address,
             char_uuid,
-            command.hex(),
+            logged_command,
             response,
             repeat_count,
             repeat_delay_ms,
@@ -365,7 +371,6 @@ class BedController(ABC):
         if caller_frame is not None and caller_frame.f_back is not None:
             command_origin = caller_frame.f_back.f_code.co_name
 
-        payload = format_payload(command)
         if payload is not None:
             self._coordinator.record_command_trace(
                 payload=payload,
@@ -396,13 +401,13 @@ class BedController(ABC):
                 if log_errors:
                     _LOGGER.exception(
                         "Failed to write command %s to %s",
-                        command.hex(),
+                        logged_command,
                         char_uuid,
                     )
                 else:
                     _LOGGER.debug(
                         "Suppressed write failure for %s to %s",
-                        command.hex(),
+                        logged_command,
                         char_uuid,
                         exc_info=True,
                     )
