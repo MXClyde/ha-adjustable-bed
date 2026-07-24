@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
@@ -18,6 +19,7 @@ from custom_components.adjustable_bed.const import (
     BED_TYPE_KEESON,
     BED_TYPE_LEGGETT_GEN2,
     BED_TYPE_LEGGETT_OKIN,
+    BED_TYPE_LEGGETT_PLATT,
     BED_TYPE_LINAK,
     BED_TYPE_MALOUF_LEGACY_OKIN,
     BED_TYPE_MALOUF_NEW_OKIN,
@@ -40,8 +42,12 @@ from custom_components.adjustable_bed.const import (
     CONF_MOTOR_PULSE_DELAY_MS,
     CONF_PASSIVE_POSITION_RECONCILIATION,
     CONF_PREFERRED_ADAPTER,
+    CONF_PROTOCOL_VARIANT,
     CONF_RICHMAT_REMOTE,
+    DEFAULT_MOTOR_PULSE_COUNT,
+    DEFAULT_MOTOR_PULSE_DELAY_MS,
     DOMAIN,
+    LEGGETT_VARIANT_OKIN,
     NORDIC_DFU_SERVICE_UUID,
     OKIMAT_SERVICE_UUID,
     OKIMAT_WRITE_CHAR_UUID,
@@ -2763,6 +2769,77 @@ class TestRuntimeBedTypeCorrection:
             coordinator.motor_pulse_delay_ms,
         ) == new_okin_defaults
 
+    async def test_existing_leggett_okin_migrates_persisted_generic_pulse_defaults(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+    ):
+        """Existing Leggett Okin entries should adopt LP Control's proven cadence."""
+        coordinator = self._make_coordinator(
+            hass,
+            mock_config_entry_data,
+            {
+                CONF_MOTOR_PULSE_COUNT: DEFAULT_MOTOR_PULSE_COUNT,
+                CONF_MOTOR_PULSE_DELAY_MS: DEFAULT_MOTOR_PULSE_DELAY_MS,
+            },
+            bed_type=BED_TYPE_LEGGETT_OKIN,
+        )
+
+        changed = coordinator._apply_runtime_bed_type_correction(BED_TYPE_LEGGETT_OKIN)
+
+        assert changed is True
+        assert (coordinator.motor_pulse_count, coordinator.motor_pulse_delay_ms) == (5, 200)
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_COUNT] == 5
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 200
+
+    async def test_existing_leggett_okin_preserves_nondefault_pulse_override(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+    ):
+        """A non-default user cadence must survive the Leggett Okin upgrade."""
+        coordinator = self._make_coordinator(
+            hass,
+            mock_config_entry_data,
+            {
+                CONF_MOTOR_PULSE_COUNT: 8,
+                CONF_MOTOR_PULSE_DELAY_MS: 150,
+            },
+            bed_type=BED_TYPE_LEGGETT_OKIN,
+        )
+
+        changed = coordinator._apply_runtime_bed_type_correction(BED_TYPE_LEGGETT_OKIN)
+
+        assert changed is False
+        assert (coordinator.motor_pulse_count, coordinator.motor_pulse_delay_ms) == (8, 150)
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_COUNT] == 8
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 150
+
+    async def test_legacy_leggett_okin_variant_migrates_persisted_generic_defaults(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+    ):
+        """The legacy Leggett umbrella type should use the Okin variant cadence."""
+        coordinator = self._make_coordinator(
+            hass,
+            mock_config_entry_data,
+            {
+                CONF_PROTOCOL_VARIANT: LEGGETT_VARIANT_OKIN,
+                CONF_MOTOR_PULSE_COUNT: DEFAULT_MOTOR_PULSE_COUNT,
+                CONF_MOTOR_PULSE_DELAY_MS: DEFAULT_MOTOR_PULSE_DELAY_MS,
+            },
+            bed_type=BED_TYPE_LEGGETT_PLATT,
+        )
+
+        changed = coordinator._apply_runtime_bed_type_correction(BED_TYPE_LEGGETT_PLATT)
+
+        assert changed is True
+        assert coordinator.bed_type == BED_TYPE_LEGGETT_PLATT
+        assert (coordinator.motor_pulse_count, coordinator.motor_pulse_delay_ms) == (5, 200)
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_COUNT] == 5
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 200
+
     async def test_correction_updates_shared_okin_bed_type(
         self,
         hass: HomeAssistant,
@@ -3175,6 +3252,117 @@ class TestRuntimeBedTypeCorrection:
             coordinator._connection_attempt_details[0]["result"]
             == "retry_with_pairing_after_protocol_correction"
         )
+
+    async def test_lp_control_dual_stack_recovers_persisted_cst_entry(
+        self,
+        hass: HomeAssistant,
+        mock_bleak_client: MagicMock,
+        mock_coordinator_connected: None,
+        mock_async_ble_device_from_address: MagicMock,
+        mock_establish_connection: AsyncMock,
+    ):
+        """Issue #368: the refreshed LP BED name must select the 6-byte controller."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="LP BED CONTROL",
+            data={
+                CONF_ADDRESS: TEST_ADDRESS,
+                CONF_NAME: "Bedroom Bed",
+                CONF_BED_TYPE: BED_TYPE_OKIN_CST,
+                CONF_MOTOR_COUNT: 4,
+                CONF_HAS_MASSAGE: True,
+                CONF_DISABLE_ANGLE_SENSING: False,
+                CONF_PREFERRED_ADAPTER: "auto",
+                CONF_BLE_BOND_ESTABLISHED: True,
+                CONF_MOTOR_PULSE_COUNT: DEFAULT_MOTOR_PULSE_COUNT,
+                CONF_MOTOR_PULSE_DELAY_MS: DEFAULT_MOTOR_PULSE_DELAY_MS,
+            },
+            unique_id=TEST_ADDRESS,
+            entry_id="test_entry_lp_bed_cst_recovery",
+        )
+        entry.add_to_hass(hass)
+        mock_async_ble_device_from_address.return_value.name = None
+
+        fresh_device = MagicMock()
+        fresh_device.address = TEST_ADDRESS
+        fresh_device.name = "LP BED CONTROL"
+        fresh_device.details = {"source": "local"}
+        fresh_service_info = SimpleNamespace(
+            address=TEST_ADDRESS,
+            source="local",
+            rssi=-55,
+            connectable=True,
+            device=fresh_device,
+        )
+
+        async def establish_with_fresh_device(*args: Any, **kwargs: Any) -> MagicMock:
+            """Simulate bleak-retry-connector refreshing stale scanner data."""
+            assert kwargs["ble_device_callback"]() is fresh_device
+            return mock_bleak_client
+
+        mock_establish_connection.side_effect = establish_with_fresh_device
+
+        gatt_services = [
+            SimpleNamespace(
+                uuid=OKIMAT_SERVICE_UUID,
+                characteristics=[
+                    SimpleNamespace(
+                        uuid=OKIMAT_WRITE_CHAR_UUID,
+                        properties=["read", "write"],
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                uuid=OKIN_SMART_REMOTE_CSS_SERVICE_UUID,
+                characteristics=[
+                    SimpleNamespace(
+                        uuid=OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID,
+                        properties=["read", "write"],
+                    )
+                ],
+            ),
+            SimpleNamespace(uuid=NORDIC_DFU_SERVICE_UUID, characteristics=[]),
+        ]
+        mock_bleak_client.services = MagicMock()
+        mock_bleak_client.services.__iter__ = lambda self: iter(gatt_services)
+        mock_bleak_client.services.__len__ = lambda self: len(gatt_services)
+        mock_bleak_client.services.get_service = MagicMock(return_value=None)
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.coordinator.discover_services",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.get_discovered_service_info",
+                return_value=[fresh_service_info],
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.read_ble_device_info",
+                new_callable=AsyncMock,
+                return_value=("DewertOkin GmbH", "CU170"),
+            ),
+            patch.object(
+                AdjustableBedCoordinator,
+                "_async_verify_bonded",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            coordinator = AdjustableBedCoordinator(hass, entry)
+            result = await coordinator.async_connect()
+
+        assert result is True
+        assert coordinator.bed_type == BED_TYPE_LEGGETT_OKIN
+        assert coordinator.controller.__class__.__name__ == "LeggettOkinController"
+        assert coordinator.disable_angle_sensing is True
+        assert entry.data[CONF_BED_TYPE] == BED_TYPE_LEGGETT_OKIN
+        assert entry.data[CONF_DISABLE_ANGLE_SENSING] is True
+        assert coordinator.motor_pulse_count == 5
+        assert coordinator.motor_pulse_delay_ms == 200
+        assert entry.data[CONF_MOTOR_PULSE_COUNT] == 5
+        assert entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 200
 
 
 

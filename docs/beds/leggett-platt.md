@@ -6,6 +6,7 @@
 
 ## Known Models
 - Leggett & Platt Prodigy 2.0 / S-Cape 2.0
+- Leggett & Platt Prodigy Comfort Elite / Prodigy CE (`LP BED CONTROL`, CU170)
 - Leggett & Platt beds with "MlRM" Bluetooth name prefix
 - Some Tempur-Pedic bases (non-Ergo)
 - Fashion Bed Group bases
@@ -76,7 +77,12 @@ Leggett & Platt beds have three protocol variants with different detection metho
 
 ### Okin Variant
 - **Service UUID:** `62741523-...` (shared with Okimat and Nectar)
-- Detection: By device name patterns ("leggett", "l&p", "adjustable base")
+- **Device name:** `LP BED...` (LP Control's own prefix), or a name containing
+  "leggett" / "l&p"
+- Detection: automatic from the name plus the shared Okin service
+- Some Prodigy CE / CU170 receivers also expose CSS `90311623-...` and Nordic
+  DFU `00001530-...`. LP Control ignores both services for bed control, so their
+  presence must not override the `LP BED` identity to Okin CST.
 
 ### MlRM Variant
 - **Service UUID:** WiLinke service (`f0010001-...` or `fee9`)
@@ -182,8 +188,14 @@ Unknown product ids fall back to a fully-featured profile.
 **Service UUID:** `62741523-52f9-8864-b1ab-3b3a8d65950b`
 **Format:** 6 bytes `[0x04, 0x02, ...int_bytes]` (big-endian)
 **Note:** Requires BLE pairing
+**Write characteristic:** `62741525-52f9-8864-b1ab-3b3a8d65950b`
 
 Uses same 32-bit command values as Keeson - see [Keeson commands](keeson.md#commands-32-bit-values).
+
+LP Control 2.9.0 repeats an actuator command every 200 ms while the button is
+held, then stops by cancelling that timer. The integration uses the same
+default cadence for a finite Home Assistant motor pulse and sends an explicit
+zero command afterward as a safety stop.
 
 ### Motor Commands
 

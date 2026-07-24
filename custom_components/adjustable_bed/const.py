@@ -701,7 +701,11 @@ MALOUF_LEGACY_OKIN_NOTIFY_CHAR_UUID: Final = "0000ffe4-0000-1000-8000-00805f9b34
 # - Leggett & Platt Okin variant (6-byte protocol, same as Okimat)
 # - OKIN 64-bit (10-byte protocol with 64-bit bitmasks)
 # Detection priority: name patterns first, then UUID fallback to Okimat
-LEGGETT_OKIN_NAME_PATTERNS: Final = ("leggett", "l&p")
+LEGGETT_OKIN_NAME_PATTERNS: Final = (
+    "leggett",
+    "l&p",
+    "lp bed",  # LP Control's Okin deviceNamePrefix (e.g. "LP BED CONTROL")
+)
 LEGGETT_RICHMAT_NAME_PATTERNS: Final = ("mlrm",)  # MlRM prefix beds
 # Okimat devices: "Okimat", "OKIN RF", "OKIN BLE", "OKIN luis", or
 # "Smartbed" (Malouf/Lucid/CVB beds using OKIN protocol).
@@ -2069,6 +2073,9 @@ BED_MOTOR_PULSE_DEFAULTS: Final = {
     # Leggett WiLinke: 110ms delay → 10 repeats = 1.1s total
     # Source: RICHMAT_MASTER_ANALYSIS.md - MLRM devices use 110ms timing
     BED_TYPE_LEGGETT_WILINKE: (10, 110),
+    # Leggett Okin: LP Control repeats held actuator commands every 200ms.
+    # Source: com.leggett.android.universal 2.9.0 (OkinControlBoxInterface)
+    BED_TYPE_LEGGETT_OKIN: (5, 200),
     # OCTO: 350ms delay → 3 repeats = 1.05s total
     # Source: de.octoactuators.octosmartcontrolapp ANALYSIS.md
     BED_TYPE_OCTO: (3, 350),

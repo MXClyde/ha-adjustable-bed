@@ -572,7 +572,25 @@ def _characteristics_from_gatt_service(service: Any) -> list[Any]:
     return list(characteristics or [])
 
 
-def detect_bed_type_from_gatt_services(gatt_services: Any) -> DetectionResult:
+def _is_leggett_okin_name(device_name: str | None) -> bool:
+    """Return whether a BLE name identifies LP Control's Okin protocol."""
+    normalized_name = (device_name or "").strip().lower()
+    return _is_lp_control_okin_name(device_name) or any(
+        pattern in normalized_name
+        for pattern in LEGGETT_OKIN_NAME_PATTERNS
+        if pattern != "lp bed"
+    )
+
+
+def _is_lp_control_okin_name(device_name: str | None) -> bool:
+    """Return whether a BLE name matches LP Control's proven Okin prefix."""
+    return (device_name or "").strip().lower().startswith("lp bed")
+
+
+def detect_bed_type_from_gatt_services(
+    gatt_services: Any,
+    device_name: str | None = None,
+) -> DetectionResult:
     """Detect a bed/profile from connected GATT services.
 
     This is intentionally limited to signatures that are not safe to infer from
@@ -610,6 +628,21 @@ def detect_bed_type_from_gatt_services(gatt_services: Any) -> DetectionResult:
             signals=[
                 "gatt_service:dewertokin_rf_gateway",
                 "gatt_char:dewertokin_rf_gateway_name",
+            ],
+        )
+
+    if has_okin_uuid_write and _is_lp_control_okin_name(device_name):
+        # LP Control classifies these receivers as Okin from 62741523 alone
+        # and sends 6-byte 04 02 frames to 62741525. Some LP BED CONTROL
+        # receivers also expose the CSS and Nordic DFU services, but the app
+        # ignores those services; their presence is not proof of CST (#368).
+        return DetectionResult(
+            bed_type=BED_TYPE_LEGGETT_OKIN,
+            confidence=0.95,
+            signals=[
+                "gatt_service:okin_uuid",
+                "gatt_char:okin_write",
+                "name:leggett_okin",
             ],
         )
 
@@ -675,6 +708,7 @@ def refine_okin_shared_uuid_protocol_from_gatt(
     gatt_services: Any,
     protocol_variant: str | None = None,
     ble_model: str | None = None,
+    device_name: str | None = None,
 ) -> str:
     """Correct shared OKIN UUID profiles once connected GATT services are known."""
     is_leggett_okin_variant = (
@@ -683,8 +717,22 @@ def refine_okin_shared_uuid_protocol_from_gatt(
     if bed_type not in OKIN_SHARED_UUID_GATT_REFINABLE_TYPES and not is_leggett_okin_variant:
         return bed_type
 
-    gatt_detection = detect_bed_type_from_gatt_services(gatt_services)
-    if gatt_detection.bed_type in {BED_TYPE_OKIN_CST, BED_TYPE_OKIN_RF_ECO_BT}:
+    gatt_detection = detect_bed_type_from_gatt_services(gatt_services, device_name)
+    if gatt_detection.bed_type in {
+        BED_TYPE_LEGGETT_OKIN,
+        BED_TYPE_OKIN_CST,
+        BED_TYPE_OKIN_RF_ECO_BT,
+    }:
+        if gatt_detection.bed_type == BED_TYPE_LEGGETT_OKIN:
+            if bed_type != BED_TYPE_LEGGETT_OKIN:
+                _LOGGER.info(
+                    "Refined shared OKIN protocol from %s to %s using LP Control "
+                    "device identity and GATT signals: %s",
+                    bed_type,
+                    BED_TYPE_LEGGETT_OKIN,
+                    ", ".join(gatt_detection.signals),
+                )
+            return BED_TYPE_LEGGETT_OKIN
         if gatt_detection.bed_type == BED_TYPE_OKIN_RF_ECO_BT and _is_okimat_bed_model(ble_model):
             # Full OKIMAT beds share the RF ECO BT stair's CSS GATT signature, so
             # the bare signature is not enough to pick the single-actuator stair
@@ -1600,7 +1648,7 @@ def detect_bed_type_detailed(service_info: BluetoothServiceInfoBleak) -> Detecti
     if OKIMAT_SERVICE_UUID.lower() in service_uuids:
         signals.append("uuid:okin")
         # Check for Leggett & Platt Okin by name patterns
-        if any(pattern in device_name for pattern in LEGGETT_OKIN_NAME_PATTERNS):
+        if _is_leggett_okin_name(device_name):
             signals.append("name:leggett")
             _LOGGER.info(
                 "Detected Leggett & Platt Okin bed at %s (name: %s)",

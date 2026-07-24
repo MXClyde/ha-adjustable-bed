@@ -972,6 +972,18 @@ class TestOkinUUIDDisambiguation:
         )
         assert detect_bed_type(service_info) == BED_TYPE_LEGGETT_OKIN
 
+    def test_okin_uuid_with_lp_control_name(self):
+        """LP Control receivers use the Leggett 6-byte Okin protocol."""
+        service_info = _make_service_info(
+            name="LP BED CONTROL",
+            service_uuids=[OKIMAT_SERVICE_UUID],
+        )
+        result = detect_bed_type_detailed(service_info)
+
+        assert result.bed_type == BED_TYPE_LEGGETT_OKIN
+        assert result.confidence == 0.9
+        assert "name:leggett" in result.signals
+
     def test_okin_uuid_with_okimat_name(self):
         """Test Okimat detection with OKIN UUID + 'okimat' in name."""
         service_info = _make_service_info(
@@ -1140,6 +1152,77 @@ class TestOkinUUIDDisambiguation:
 
         assert (
             refine_okin_shared_uuid_protocol_from_gatt(BED_TYPE_LEGGETT_OKIN, gatt_services)
+            == BED_TYPE_OKIN_CST
+        )
+
+    def test_lp_control_identity_overrides_dual_stack_cst_guess(self):
+        """LP BED receivers use 6-byte commands despite exposing CSS and DFU."""
+        gatt_services = [
+            SimpleNamespace(
+                uuid=OKIMAT_SERVICE_UUID,
+                characteristics=[
+                    SimpleNamespace(uuid=OKIMAT_WRITE_CHAR_UUID),
+                ],
+            ),
+            SimpleNamespace(
+                uuid=OKIN_SMART_REMOTE_CSS_SERVICE_UUID,
+                characteristics=[
+                    SimpleNamespace(uuid=OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID),
+                ],
+            ),
+            SimpleNamespace(
+                uuid=NORDIC_DFU_SERVICE_UUID,
+                characteristics=[],
+            ),
+        ]
+
+        detection = detect_bed_type_from_gatt_services(
+            gatt_services,
+            device_name="LP BED CONTROL",
+        )
+        assert detection.bed_type == BED_TYPE_LEGGETT_OKIN
+        assert detection.confidence == 0.95
+        assert "name:leggett_okin" in detection.signals
+
+        assert (
+            refine_okin_shared_uuid_protocol_from_gatt(
+                BED_TYPE_OKIN_CST,
+                gatt_services,
+                device_name="LP BED CONTROL",
+            )
+            == BED_TYPE_LEGGETT_OKIN
+        )
+
+    @pytest.mark.parametrize("device_name", ["Leggett Bed", "L&P Bed"])
+    def test_legacy_leggett_name_does_not_override_cst_gatt(
+        self,
+        device_name: str,
+    ):
+        """Only LP Control's proven LP BED prefix can override CST GATT."""
+        gatt_services = [
+            SimpleNamespace(
+                uuid=OKIMAT_SERVICE_UUID,
+                characteristics=[
+                    SimpleNamespace(uuid=OKIMAT_WRITE_CHAR_UUID),
+                ],
+            ),
+            SimpleNamespace(
+                uuid=OKIN_SMART_REMOTE_CSS_SERVICE_UUID,
+                characteristics=[
+                    SimpleNamespace(uuid=OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID),
+                ],
+            ),
+            SimpleNamespace(
+                uuid=NORDIC_DFU_SERVICE_UUID,
+                characteristics=[],
+            ),
+        ]
+
+        assert (
+            detect_bed_type_from_gatt_services(
+                gatt_services,
+                device_name=device_name,
+            ).bed_type
             == BED_TYPE_OKIN_CST
         )
 

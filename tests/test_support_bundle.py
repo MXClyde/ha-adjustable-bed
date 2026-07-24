@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from bleak.exc import BleakError
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant
@@ -17,6 +18,7 @@ from custom_components.adjustable_bed.ble_diagnostics import (
 )
 from custom_components.adjustable_bed.const import (
     BED_TYPE_LEGGETT_GEN2,
+    BED_TYPE_LEGGETT_OKIN,
     BED_TYPE_OKIN_CST,
     BED_TYPE_OKIN_RF_ECO_BT,
     CONF_BED_TYPE,
@@ -367,14 +369,25 @@ class TestBleDiagnosticsRunner:
         assert report.detection["supported_match"] is True
         assert "gatt_char:okin_smart_remote_css_write" in report.detection["signals"]
 
-    async def test_run_diagnostics_detects_okin_cst_dual_stack_signature(
+    @pytest.mark.parametrize(
+        ("snapshot_name", "selected_device_name", "expected_bed_type"),
+        [
+            ("OKIN-441954", "OKIN-441954", BED_TYPE_OKIN_CST),
+            ("LP BED CONTROL", "LP BED CONTROL", BED_TYPE_LEGGETT_OKIN),
+            (None, "LP BED CONTROL", BED_TYPE_LEGGETT_OKIN),
+        ],
+    )
+    async def test_run_diagnostics_disambiguates_okin_dual_stack_by_name(
         self,
         hass: HomeAssistant,
         enable_custom_integrations,
+        snapshot_name: str | None,
+        selected_device_name: str,
+        expected_bed_type: str,
     ):
-        """Diagnostics should not classify full OKIN CST beds as RF ECO BT."""
+        """Diagnostics should combine the dual-stack signature with receiver identity."""
         service_info = MagicMock()
-        service_info.name = "OKIN-441954"
+        service_info.name = snapshot_name
         service_info.address = "AA:BB:CC:DD:EE:55"
         service_info.rssi = -59
         service_info.manufacturer_data = {}
@@ -383,7 +396,7 @@ class TestBleDiagnosticsRunner:
         service_info.source = "proxy_1"
         service_info.device = MagicMock(
             address="AA:BB:CC:DD:EE:55",
-            name="OKIN-441954",
+            name=snapshot_name,
             details={"source": "proxy_1", "props": {"Paired": True}},
         )
         service_info.connectable = True
@@ -432,6 +445,11 @@ class TestBleDiagnosticsRunner:
         client.start_notify = AsyncMock()
         client.stop_notify = AsyncMock()
         client.disconnect = AsyncMock()
+        selected_device = MagicMock(
+            address="AA:BB:CC:DD:EE:55",
+            details={"source": "proxy_1", "props": {"Paired": True}},
+        )
+        selected_device.name = selected_device_name
 
         with (
             patch(
@@ -442,7 +460,7 @@ class TestBleDiagnosticsRunner:
                 "custom_components.adjustable_bed.ble_diagnostics.select_adapter",
                 new=AsyncMock(
                     return_value=AdapterSelectionResult(
-                        device=service_info.device,
+                        device=selected_device,
                         source="proxy_1",
                         rssi=-59,
                         connectable=True,
@@ -465,9 +483,12 @@ class TestBleDiagnosticsRunner:
                 capture_duration=0,
             ).run_diagnostics()
 
-        assert report.detection["bed_type"] == BED_TYPE_OKIN_CST
+        assert report.detection["bed_type"] == expected_bed_type
         assert report.detection["supported_match"] is True
-        assert "gatt_service:nordic_dfu" in report.detection["signals"]
+        if expected_bed_type == BED_TYPE_OKIN_CST:
+            assert "gatt_service:nordic_dfu" in report.detection["signals"]
+        else:
+            assert "name:leggett_okin" in report.detection["signals"]
 
     async def test_run_diagnostics_reconnects_after_mid_enumeration_disconnect(
         self,

@@ -205,10 +205,11 @@ class AdjustableBedCoordinator:
             CONF_PROTOCOL_VARIANT, DEFAULT_PROTOCOL_VARIANT
         )
         self._name: str = entry.data.get(CONF_NAME, "Adjustable Bed")
-        # Keep the advertised BLE name separate from the editable entry name.
-        # Malouf's APK has one command exception keyed to Smartbed238, so using
-        # a user-facing rename here would silently select the wrong command.
+        # Malouf's APK has one command exception keyed to Smartbed238. Keep the
+        # configured name as a controller fallback, but track actual observations
+        # separately so protocol detection never relies on a user-facing rename.
         self._ble_device_name: str = self._name
+        self._observed_ble_device_name: str | None = None
         self._malouf_layout: str = entry.data.get(CONF_MALOUF_LAYOUT, MALOUF_LAYOUT_AUTO)
         self._malouf_memory_slots: int = int(
             entry.data.get(CONF_MALOUF_MEMORY_SLOTS, MALOUF_MEMORY_SLOTS_AUTO)
@@ -393,7 +394,13 @@ class AdjustableBedCoordinator:
                 corrected_bed_type,
             )
         previous_defaults = BED_MOTOR_PULSE_DEFAULTS.get(previous_bed_type)
-        corrected_defaults = BED_MOTOR_PULSE_DEFAULTS.get(corrected_bed_type)
+        corrected_uses_leggett_okin = corrected_bed_type == BED_TYPE_LEGGETT_OKIN or (
+            corrected_bed_type == BED_TYPE_LEGGETT_PLATT
+            and self._protocol_variant == LEGGETT_VARIANT_OKIN
+        )
+        corrected_defaults = BED_MOTOR_PULSE_DEFAULTS.get(
+            BED_TYPE_LEGGETT_OKIN if corrected_uses_leggett_okin else corrected_bed_type
+        )
         # Only swap in the corrected protocol's defaults if the user never set
         # their own pulse values. Comparing against ``previous_defaults`` alone is
         # not enough: an explicit override can coincidentally equal the previous
@@ -404,12 +411,34 @@ class AdjustableBedCoordinator:
             CONF_MOTOR_PULSE_COUNT in self.entry.data
             or CONF_MOTOR_PULSE_DELAY_MS in self.entry.data
         )
+        # Config flows historically persisted the generic defaults even when the
+        # user did not customize them. Existing Leggett Okin entries and LP BED
+        # entries misclassified as CST therefore carry (10, 100), with no provenance
+        # that distinguishes those generated values from an override. Restrict this
+        # migration to these Leggett Okin upgrade paths so unrelated explicit
+        # settings remain intact.
+        previous_uses_leggett_okin = previous_bed_type == BED_TYPE_LEGGETT_OKIN or (
+            previous_bed_type == BED_TYPE_LEGGETT_PLATT
+            and self._protocol_variant == LEGGETT_VARIANT_OKIN
+        )
+        migrate_leggett_okin_defaults = (
+            (previous_uses_leggett_okin or previous_bed_type == BED_TYPE_OKIN_CST)
+            and corrected_uses_leggett_okin
+            and (self._motor_pulse_count, self._motor_pulse_delay_ms)
+            == (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
+        )
         if (
-            previous_defaults is not None
-            and corrected_defaults is not None
-            and bed_type_changed
-            and not has_custom_pulse_override
-            and (self._motor_pulse_count, self._motor_pulse_delay_ms) == previous_defaults
+            corrected_defaults is not None
+            and (
+                migrate_leggett_okin_defaults
+                or (
+                    bed_type_changed
+                    and previous_defaults is not None
+                    and not has_custom_pulse_override
+                    and (self._motor_pulse_count, self._motor_pulse_delay_ms)
+                    == previous_defaults
+                )
+            )
         ):
             self._motor_pulse_count, self._motor_pulse_delay_ms = corrected_defaults
             _LOGGER.info(
@@ -423,6 +452,9 @@ class AdjustableBedCoordinator:
 
         entry_data = dict(self.entry.data)
         entry_data[CONF_BED_TYPE] = corrected_bed_type
+        if migrate_leggett_okin_defaults and corrected_defaults is not None:
+            entry_data[CONF_MOTOR_PULSE_COUNT] = corrected_defaults[0]
+            entry_data[CONF_MOTOR_PULSE_DELAY_MS] = corrected_defaults[1]
         if corrected_bed_type == BED_TYPE_BEDTECH:
             entry_data.pop(CONF_RICHMAT_REMOTE, None)
         angle_sensing_defaulted = CONF_DISABLE_ANGLE_SENSING not in self.entry.data or (
@@ -484,8 +516,13 @@ class AdjustableBedCoordinator:
 
     @property
     def ble_device_name(self) -> str:
-        """Return the most recently observed BLE advertising name."""
+        """Return the observed BLE name or configured fallback for controller logic."""
         return self._ble_device_name
+
+    @property
+    def observed_ble_device_name(self) -> str | None:
+        """Return the most recently observed BLE advertising name, if any."""
+        return self._observed_ble_device_name
 
     @property
     def malouf_layout(self) -> str:
@@ -1504,6 +1541,7 @@ class AdjustableBedCoordinator:
                 )
                 if device.name:
                     self._ble_device_name = device.name
+                    self._observed_ble_device_name = device.name
 
                 if self._preferred_adapter and self._preferred_adapter != ADAPTER_AUTO:
                     if device_source == self._preferred_adapter:
@@ -1576,6 +1614,7 @@ class AdjustableBedCoordinator:
                         if selected_source is None or svc_source == selected_source:
                             if svc_info.device.name:
                                 self._ble_device_name = svc_info.device.name
+                                self._observed_ble_device_name = svc_info.device.name
                             _LOGGER.debug(
                                 "ble_device_callback returning device from %s (RSSI: %s, connectable=%s)",
                                 svc_source or "unknown",
@@ -1600,6 +1639,7 @@ class AdjustableBedCoordinator:
                         raise BleakError(f"Device {self._address} not found")
                     if fallback.name:
                         self._ble_device_name = fallback.name
+                        self._observed_ble_device_name = fallback.name
                     if connectable is False:
                         _LOGGER.debug(
                             "ble_device_callback falling back to non-connectable record for %s",
@@ -1939,6 +1979,7 @@ class AdjustableBedCoordinator:
                         self._store_ble_device_info(ble_manufacturer, ble_model)
 
                 previous_bed_type = self._bed_type
+                observed_device_name = self._observed_ble_device_name or device.name
                 corrected_bed_type = refine_malouf_protocol_from_gatt(
                     self._bed_type,
                     self._client.services,
@@ -1948,20 +1989,21 @@ class AdjustableBedCoordinator:
                     self._client.services,
                     self._protocol_variant,
                     ble_model,
+                    observed_device_name,
                 )
                 corrected_bed_type = refine_dewertokin_star_protocol_from_name(
                     corrected_bed_type,
-                    device.name,
+                    observed_device_name,
                 )
                 corrected_bed_type = refine_nordic_uart_protocol_from_device_info(
                     corrected_bed_type,
-                    device.name,
+                    observed_device_name,
                     ble_manufacturer,
                     ble_model,
                 )
                 corrected_bed_type = refine_qrrm_protocol_from_device_info(
                     corrected_bed_type,
-                    device.name,
+                    observed_device_name,
                     ble_model,
                 )
                 corrected_bed_type = refine_okin_dot_protocol_from_gatt(
