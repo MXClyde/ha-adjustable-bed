@@ -43,6 +43,12 @@ from custom_components.adjustable_bed.light import LIGHT_DESCRIPTION, Adjustable
 
 
 @pytest.fixture
+def _shorten_mocked_feature_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep mocked feature-discovery timeouts from dominating unit tests."""
+    monkeypatch.setattr("custom_components.adjustable_bed.beds.octo.OCTO_FEATURE_TIMEOUT", 0.01)
+
+
+@pytest.fixture
 def mock_octo_config_entry_data() -> dict:
     """Return mock config entry data for an Octo bed."""
     return {
@@ -62,7 +68,9 @@ def mock_octo_config_entry_data() -> dict:
 
 @pytest.fixture
 def mock_octo_config_entry(
-    hass: HomeAssistant, mock_octo_config_entry_data: dict
+    hass: HomeAssistant,
+    mock_octo_config_entry_data: dict,
+    _shorten_mocked_feature_timeout: None,
 ) -> MockConfigEntry:
     """Return a mock config entry for an Octo bed."""
     entry = MockConfigEntry(
@@ -87,7 +95,9 @@ def mock_octo_star2_config_entry_data(mock_octo_config_entry_data: dict) -> dict
 
 @pytest.fixture
 def mock_octo_star2_config_entry(
-    hass: HomeAssistant, mock_octo_star2_config_entry_data: dict
+    hass: HomeAssistant,
+    mock_octo_star2_config_entry_data: dict,
+    _shorten_mocked_feature_timeout: None,
 ) -> MockConfigEntry:
     """Return a mock config entry for an Octo Star2 bed."""
     entry = MockConfigEntry(

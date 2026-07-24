@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant
@@ -329,7 +331,8 @@ class TestOkin7BytePresets:
         await coordinator.async_connect()
         mock_client = coordinator._client
 
-        await coordinator.controller.preset_flat()
+        with patch("custom_components.adjustable_bed.beds.okin_7byte.asyncio.sleep"):
+            await coordinator.controller.preset_flat()
 
         calls = mock_client.write_gatt_char.call_args_list
         first_call_data = calls[0][0][1]
@@ -346,7 +349,8 @@ class TestOkin7BytePresets:
         await coordinator.async_connect()
         mock_client = coordinator._client
 
-        await coordinator.controller.preset_zero_g()
+        with patch("custom_components.adjustable_bed.beds.okin_7byte.asyncio.sleep"):
+            await coordinator.controller.preset_zero_g()
 
         calls = mock_client.write_gatt_char.call_args_list
         first_call_data = calls[0][0][1]

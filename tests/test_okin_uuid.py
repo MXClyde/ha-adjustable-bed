@@ -515,7 +515,8 @@ class TestOkinUuidPresets:
         coordinator = AdjustableBedCoordinator(hass, mock_okin_uuid_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.preset_flat()
+        with patch("custom_components.adjustable_bed.beds.okin_uuid.asyncio.sleep"):
+            await coordinator.controller.preset_flat()
 
         remote = OKIN_UUID_REMOTES[OKIMAT_VARIANT_82417]
         expected_cmd = coordinator.controller._build_command(remote.flat)
@@ -533,7 +534,8 @@ class TestOkinUuidPresets:
         coordinator = AdjustableBedCoordinator(hass, mock_okin_uuid_93329_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.preset_flat()
+        with patch("custom_components.adjustable_bed.beds.okin_uuid.asyncio.sleep"):
+            await coordinator.controller.preset_flat()
 
         remote = OKIN_UUID_REMOTES[OKIMAT_VARIANT_93329]
         expected_cmd = coordinator.controller._build_command(remote.flat)
@@ -851,7 +853,8 @@ class TestOkinUuidExtras:
         await coordinator.async_connect()
 
         assert coordinator.controller.supports_sync is True
-        await coordinator.controller.sync_positions()
+        with patch("custom_components.adjustable_bed.beds.okin_uuid.asyncio.sleep"):
+            await coordinator.controller.sync_positions()
 
         calls = mock_bleak_client.write_gatt_char.call_args_list
         expected_cmd = coordinator.controller._build_command(0x100)
@@ -870,7 +873,8 @@ class TestOkinUuidExtras:
         await coordinator.async_connect()
 
         assert coordinator.controller.supports_child_lock is True
-        await coordinator.controller.child_lock_toggle()
+        with patch("custom_components.adjustable_bed.beds.okin_uuid.asyncio.sleep"):
+            await coordinator.controller.child_lock_toggle()
 
         calls = mock_bleak_client.write_gatt_char.call_args_list
         expected_cmd = coordinator.controller._build_command(0x08000000)
@@ -889,7 +893,8 @@ class TestOkinUuidExtras:
         await coordinator.async_connect()
 
         assert coordinator.controller.supports_preset_zero_g is True
-        await coordinator.controller.preset_zero_g()
+        with patch("custom_components.adjustable_bed.beds.okin_uuid.asyncio.sleep"):
+            await coordinator.controller.preset_zero_g()
 
         expected_cmd = coordinator.controller._build_command(0x4000)
         assert any(

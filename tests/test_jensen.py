@@ -34,6 +34,15 @@ from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinato
 
 
 @pytest.fixture
+def _shorten_mocked_config_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep mocked config-query timeouts while avoiding five-second waits."""
+    monkeypatch.setattr(
+        "custom_components.adjustable_bed.beds.jensen._CONFIG_RESPONSE_TIMEOUT",
+        0.01,
+    )
+
+
+@pytest.fixture
 def mock_jensen_config_entry_data() -> dict:
     """Return mock config entry data for Jensen bed."""
     return {
@@ -49,7 +58,9 @@ def mock_jensen_config_entry_data() -> dict:
 
 @pytest.fixture
 def mock_jensen_config_entry(
-    hass: HomeAssistant, mock_jensen_config_entry_data: dict
+    hass: HomeAssistant,
+    mock_jensen_config_entry_data: dict,
+    _shorten_mocked_config_timeout: None,
 ) -> MockConfigEntry:
     """Return a mock config entry for Jensen bed."""
     entry = MockConfigEntry(
