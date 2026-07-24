@@ -42,7 +42,12 @@ from ..const import (
     KAIDI_WRITE_CHAR_UUID,
 )
 from ..kaidi_protocol import extract_kaidi_advertisement, format_kaidi_node_address
-from .base import BedController
+from .base import (
+    POSITION_UNIT_PERCENT,
+    BedController,
+    PositionNumberSpec,
+    build_position_number_spec,
+)
 
 if TYPE_CHECKING:
     from ..coordinator import AdjustableBedCoordinator
@@ -560,6 +565,20 @@ class KaidiController(BedController):
         return (
             self._command_profile.head_setting is not None
             and self._command_profile.leg_setting is not None
+        )
+
+    @property
+    def position_number_specs(self) -> tuple[PositionNumberSpec, ...]:
+        """Expose back/legs percentage sliders when the profile can set positions.
+
+        Kaidi writes target positions directly rather than seeking with feedback,
+        and its targets are percentages, so angle calibration does not apply.
+        """
+        if not self.supports_direct_position_control:
+            return ()
+        return (
+            build_position_number_spec("back", max_value=100.0, unit=POSITION_UNIT_PERCENT),
+            build_position_number_spec("legs", max_value=100.0, unit=POSITION_UNIT_PERCENT),
         )
 
     @property

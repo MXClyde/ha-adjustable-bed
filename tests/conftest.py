@@ -60,6 +60,44 @@ TEST_ADDRESS = "AA:BB:CC:DD:EE:FF"
 TEST_NAME = "Test Bed"
 
 
+def make_controller_mock(**overrides: object) -> MagicMock:
+    """Return a controller mock that honors BedController's declared defaults.
+
+    A bare ``MagicMock()`` answers every capability probe with a truthy Mock, so
+    a test that doesn't set a capability silently exercises the capability-enabled
+    path, and Mock objects leak into numeric comparisons (seek tolerances, stall
+    thresholds). Seeding the abstract base's real defaults keeps the mock faithful
+    to the contract that production code type-checks against.
+
+    Defaults are read from ``BedController`` itself rather than duplicated here, so
+    adding a capability to the base automatically covers every mock. Properties
+    that need real coordinator or client state are left as plain Mocks.
+
+    Pass keyword overrides for the capabilities a given test actually cares about.
+    """
+    from custom_components.adjustable_bed.beds.base import BedController
+
+    controller = MagicMock()
+    for name, member in vars(BedController).items():
+        if not isinstance(member, property) or member.fget is None:
+            continue
+        try:
+            default = member.fget(controller)
+        except Exception:  # noqa: BLE001 - property needs real state; leave it a Mock
+            continue
+        if isinstance(default, bool | int | float | str | tuple | list | dict | None):
+            setattr(controller, name, default)
+    for name, value in overrides.items():
+        setattr(controller, name, value)
+    return controller
+
+
+@pytest.fixture
+def controller_mock() -> Callable[..., MagicMock]:
+    """Return the :func:`make_controller_mock` factory."""
+    return make_controller_mock
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_xdist_auto_num_workers(config: pytest.Config) -> int | None:
     """Keep automatic local test parallelism laptop-friendly."""

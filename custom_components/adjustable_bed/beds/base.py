@@ -13,7 +13,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from bleak import BleakClient
 from bleak.exc import BleakError
@@ -45,6 +45,111 @@ class MotorControlSpec:
     stop_fn: MotorCommandCallable
     position_key: str | None = None
     max_angle: float = 68
+
+
+# Units a position slider can be scaled in.
+POSITION_UNIT_PERCENT: Final = "%"
+POSITION_UNIT_DEGREES: Final = "°"
+
+
+@dataclass(frozen=True, slots=True)
+class PositionNumberSpec:
+    """Describes a position slider the controller exposes.
+
+    Distinct from MotorControlSpec, which is about *movement* (and drives the
+    cover entities): this describes a numeric position the bed can be told to
+    seek. Values are fully resolved by the controller -- ``native_max_value``
+    already accounts for the user's angle calibration where that applies -- so
+    the number platform renders these without knowing any bed types.
+
+    ``key`` names the entity while ``position_key`` names the axis to read from
+    ``coordinator.position_data``; they differ on beds whose remote labels a
+    motor differently from the axis its firmware reports (e.g. Keeson exposes
+    "head" but reports it as "back").
+    """
+
+    key: str
+    translation_key: str
+    position_key: str
+    icon: str
+    native_max_value: float
+    native_unit_of_measurement: str
+    open_fn: MotorCommandCallable
+    close_fn: MotorCommandCallable
+    stop_fn: MotorCommandCallable
+
+
+# Movement commands for the four standard position axes, so controllers can
+# build sliders without restating the lambdas.
+POSITION_AXIS_COMMANDS: Final[
+    dict[str, tuple[MotorCommandCallable, MotorCommandCallable, MotorCommandCallable]]
+] = {
+    "back": (
+        lambda ctrl: ctrl.move_back_up(),
+        lambda ctrl: ctrl.move_back_down(),
+        lambda ctrl: ctrl.move_back_stop(),
+    ),
+    "legs": (
+        lambda ctrl: ctrl.move_legs_up(),
+        lambda ctrl: ctrl.move_legs_down(),
+        lambda ctrl: ctrl.move_legs_stop(),
+    ),
+    "head": (
+        lambda ctrl: ctrl.move_head_up(),
+        lambda ctrl: ctrl.move_head_down(),
+        lambda ctrl: ctrl.move_head_stop(),
+    ),
+    "feet": (
+        lambda ctrl: ctrl.move_feet_up(),
+        lambda ctrl: ctrl.move_feet_down(),
+        lambda ctrl: ctrl.move_feet_stop(),
+    ),
+}
+
+POSITION_AXIS_ICONS: Final[dict[str, str]] = {
+    "back": "mdi:human-handsup",
+    "legs": "mdi:human-handsdown",
+    "head": "mdi:head",
+    "feet": "mdi:foot-print",
+    "lumbar": "mdi:human-handsup",
+}
+
+# The standard motor layout: axis -> motor_count needed before it is exposed.
+_STANDARD_POSITION_AXES: Final[tuple[tuple[str, int], ...]] = (
+    ("back", 2),
+    ("legs", 2),
+    ("head", 3),
+    ("feet", 4),
+)
+
+
+def build_position_number_spec(
+    axis: str,
+    *,
+    max_value: float,
+    unit: str,
+    position_key: str | None = None,
+    key: str | None = None,
+    icon: str | None = None,
+) -> PositionNumberSpec:
+    """Build a slider for ``axis`` using that axis's standard commands and icon.
+
+    ``position_key`` defaults to ``axis``; override it when the firmware reports
+    the axis under a different name. ``key`` defaults to ``f"{axis}_position"``.
+    """
+    open_fn, close_fn, stop_fn = POSITION_AXIS_COMMANDS[axis]
+    entity_key = key or f"{axis}_position"
+    return PositionNumberSpec(
+        key=entity_key,
+        translation_key=entity_key,
+        position_key=position_key or axis,
+        icon=icon or POSITION_AXIS_ICONS.get(axis, "mdi:bed-outline"),
+        native_max_value=max_value,
+        native_unit_of_measurement=unit,
+        open_fn=open_fn,
+        close_fn=close_fn,
+        stop_fn=stop_fn,
+    )
 
 
 class BedController(ABC):
@@ -802,6 +907,31 @@ class BedController(ABC):
         return False
 
     @property
+    def bed_presence_sides(self) -> tuple[str, ...]:
+        """Return the bed sides that report occupancy, e.g. ``("left", "right")``.
+
+        Empty for single-sleeper beds and for controllers without presence
+        reporting. Only meaningful when ``supports_bed_presence`` is True.
+        """
+        return ()
+
+    @property
+    def thermal_climate_sides(self) -> tuple[str, ...]:
+        """Return the bed sides exposing heating/cooling climate control.
+
+        Empty when the bed has no thermal climate zones.
+        """
+        return ()
+
+    @property
+    def footwarming_climate_sides(self) -> tuple[str, ...]:
+        """Return the bed sides exposing foot-warming climate control.
+
+        Empty when the bed has no foot warmer.
+        """
+        return ()
+
+    @property
     def supports_light_cycle(self) -> bool:
         """Return True if bed supports light cycle control."""
         return False
@@ -907,6 +1037,17 @@ class BedController(ABC):
     @property
     def supports_massage(self) -> bool:
         """Return True if bed supports massage commands."""
+        return False
+
+    @property
+    def auto_enable_massage(self) -> bool:
+        """Return True if massage entities should be created without user opt-in.
+
+        The ``has_massage`` config option exists because most protocols cannot
+        tell whether the frame actually has massage motors. Controllers that do
+        know (because the protocol or profile declares it) override this to
+        skip asking the user.
+        """
         return False
 
     @property
@@ -1018,6 +1159,50 @@ class BedController(ABC):
         return False
 
     @property
+    def foundation_preset_sides(self) -> tuple[str, ...]:
+        """Return the bed sides exposing named foundation presets.
+
+        Distinct from numbered memory slots: these beds recall presets by name
+        (``foundation_preset_options``) rather than by slot index. Empty when
+        the bed has no named presets.
+        """
+        return ()
+
+    @property
+    def foundation_preset_options(self) -> list[str]:
+        """Return the selectable named foundation presets, e.g. ``["flat", "zero_g"]``."""
+        return []
+
+    @property
+    def supports_sleep_number_setting(self) -> bool:
+        """Return True if the bed exposes an air-chamber firmness setting."""
+        return False
+
+    @property
+    def sleep_number_setting_sides(self) -> tuple[str, ...]:
+        """Return the bed sides with independently adjustable firmness.
+
+        Empty for single-chamber beds, which expose one setting via
+        ``supports_sleep_number_setting`` instead.
+        """
+        return ()
+
+    @property
+    def sleep_number_setting_min(self) -> int:
+        """Return the minimum firmness value."""
+        return 5
+
+    @property
+    def sleep_number_setting_max(self) -> int:
+        """Return the maximum firmness value."""
+        return 100
+
+    @property
+    def sleep_number_setting_step(self) -> int:
+        """Return the firmness adjustment step."""
+        return 5
+
+    @property
     def motor_translation_keys(self) -> dict[str, str] | None:
         """Return custom translation keys for motor cover entities, or None for defaults.
 
@@ -1028,9 +1213,46 @@ class BedController(ABC):
         return None
 
     @property
+    def position_number_specs(self) -> tuple[PositionNumberSpec, ...]:
+        """Return the position sliders to expose for this controller.
+
+        The default is the standard back/legs/head/feet layout in degrees, scaled
+        to the user's configured angle limits and gated on motor_count.
+        Controllers override when the hardware reports percentages instead of
+        angles, drives a different set of axes, or labels a motor differently
+        from the axis its firmware reports.
+
+        Only consulted for beds that report position feedback -- see
+        ``bed_type_has_position_feedback()``. Deliberately not derived from
+        ``motor_control_specs``: that describes every axis the remote can drive,
+        which is a broader set than the axes the bed reports a position for.
+        """
+        motor_count = self._coordinator.motor_count
+        return tuple(
+            build_position_number_spec(
+                axis,
+                max_value=self._coordinator.get_max_angle(axis),
+                unit=POSITION_UNIT_DEGREES,
+            )
+            for axis, required_motors in _STANDARD_POSITION_AXES
+            if motor_count >= required_motors
+        )
+
+    @property
+    def motor_max_angles(self) -> dict[str, float]:
+        """Return per-axis travel limits that differ from the standard defaults.
+
+        The standard limits are 68 degrees for back/head and 45 for legs/feet.
+        Frames whose hardware travels a different range map axis key -> degrees
+        here rather than restating the whole motor layout.
+        """
+        return {}
+
+    @property
     def motor_control_specs(self) -> tuple[MotorControlSpec, ...]:
         """Return motor controls that should be exposed for this controller."""
         translation_overrides = self.motor_translation_keys or {}
+        max_angle_overrides = self.motor_max_angles
         motor_count = self._coordinator.motor_count
 
         def _spec(
@@ -1049,7 +1271,7 @@ class BedController(ABC):
                 close_fn=close_fn,
                 stop_fn=stop_fn,
                 position_key=position_key,
-                max_angle=max_angle,
+                max_angle=max_angle_overrides.get(key, max_angle),
             )
 
         specs = [

@@ -159,7 +159,7 @@ async def async_setup_entry(
 
     entities: list[AdjustableBedClimate] = []
 
-    thermal_sides: tuple[str, ...] = tuple(getattr(controller, "thermal_climate_sides", ()))
+    thermal_sides = controller.thermal_climate_sides
     if thermal_sides:
         _async_remove_stale_split_climate_entity(
             hass,
@@ -176,7 +176,7 @@ async def async_setup_entry(
     elif getattr(controller, SLEEP_NUMBER_THERMAL_CLIMATE_DESCRIPTION.required_capability, False):
         entities.append(AdjustableBedClimate(coordinator, SLEEP_NUMBER_THERMAL_CLIMATE_DESCRIPTION))
 
-    footwarming_sides: tuple[str, ...] = tuple(getattr(controller, "footwarming_climate_sides", ()))
+    footwarming_sides = controller.footwarming_climate_sides
     if footwarming_sides:
         _async_remove_stale_split_climate_entity(
             hass,

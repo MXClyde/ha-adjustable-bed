@@ -17,24 +17,15 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .beds.base import PositionNumberSpec
 from .const import (
-    BED_TYPE_ERGOMOTION,
-    BED_TYPE_KAIDI,
-    BED_TYPE_KEESON,
-    BED_TYPE_OKIN_CST,
-    BED_TYPE_SLEEP_NUMBER,
     BED_TYPE_SLEEPSTAR,
-    BED_TYPE_SLEEPYS_BOX25,
-    BEDS_WITH_POSITION_FEEDBACK,
     BEDS_WITHOUT_ANGLE_FEEDBACK,
     CONF_BED_TYPE,
     CONF_HAS_MASSAGE,
-    CONF_MOTOR_COUNT,
     CONF_PROTOCOL_VARIANT,
-    DEFAULT_MOTOR_COUNT,
     DOMAIN,
-    KEESON_VARIANT_ERGOMOTION,
-    OKIN_CST_POSITION_AXES,
+    bed_type_has_position_feedback,
 )
 from .coordinator import AdjustableBedCoordinator
 from .entity import AdjustableBedEntity
@@ -240,6 +231,32 @@ SLEEP_NUMBER_SETTING_RIGHT_DESCRIPTION = AdjustableBedSideStateNumberEntityDescr
 )
 
 
+def _build_position_description(
+    spec: PositionNumberSpec,
+) -> AdjustableBedNumberEntityDescription:
+    """Render a controller-declared position slider as an entity description.
+
+    Everything bed-specific (axis set, scale, unit, calibration) is already
+    resolved in the spec, so this only adapts it to Home Assistant's shape.
+    """
+    return AdjustableBedNumberEntityDescription(
+        key=spec.key,
+        translation_key=spec.translation_key,
+        icon=spec.icon,
+        native_min_value=0,
+        native_max_value=spec.native_max_value,
+        native_step=1,
+        native_unit_of_measurement=spec.native_unit_of_measurement,
+        mode=NumberMode.SLIDER,
+        position_key=spec.position_key,
+        move_up_fn=spec.open_fn,
+        move_down_fn=spec.close_fn,
+        move_stop_fn=spec.stop_fn,
+        max_angle=spec.native_max_value,
+        min_motors=1,
+    )
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -247,11 +264,10 @@ async def async_setup_entry(
 ) -> None:
     """Set up Adjustable Bed number entities."""
     coordinator: AdjustableBedCoordinator = hass.data[DOMAIN][entry.entry_id]
-    motor_count = entry.data.get(CONF_MOTOR_COUNT, DEFAULT_MOTOR_COUNT)
     bed_type = entry.data.get(CONF_BED_TYPE)
     has_massage = entry.data.get(CONF_HAS_MASSAGE, False)
     controller = coordinator.controller
-    if controller is not None and getattr(controller, "auto_enable_massage", False):
+    if controller is not None and controller.auto_enable_massage:
         has_massage = True
 
     entities: list[NumberEntity] = []
@@ -270,256 +286,19 @@ async def async_setup_entry(
 
     # Set up position number entities (only for beds with position feedback)
     if not coordinator.disable_angle_sensing:
-        # Check if bed supports position feedback
-        # Special case: BED_TYPE_KEESON only supports position feedback with ergomotion variant
         protocol_variant = entry.data.get(CONF_PROTOCOL_VARIANT)
-        has_position_feedback = bed_type in BEDS_WITH_POSITION_FEEDBACK or (
-            bed_type == BED_TYPE_KEESON and protocol_variant == KEESON_VARIANT_ERGOMOTION
-        )
+        has_position_feedback = bed_type_has_position_feedback(bed_type, protocol_variant)
 
-        if has_position_feedback or (
-            bed_type == BED_TYPE_KAIDI
-            and controller is not None
-            and getattr(controller, "supports_direct_position_control", False)
+        if controller is not None and (
+            has_position_feedback or controller.supports_direct_position_control
         ):
-            descriptions_by_key = {d.key: d for d in NUMBER_DESCRIPTIONS}
-
-            # Keeson and Ergomotion beds use different motor naming:
-            # Head/Feet instead of Back/Legs, but position data still uses "back"/"legs" keys
-            if bed_type in (BED_TYPE_KEESON, BED_TYPE_ERGOMOTION):
-                _LOGGER.debug(
-                    "Setting up Keeson/Ergomotion position numbers for %s (motor_count=%d)",
-                    coordinator.name,
-                    motor_count,
-                )
-
-                # Create head position (maps to "back" position data)
-                # Keeson/Ergomotion report percentage positions (0-100), not angles
-                head_desc = descriptions_by_key["head_position"]
-                keeson_head_desc = AdjustableBedNumberEntityDescription(
-                    key=head_desc.key,
-                    translation_key=head_desc.translation_key,
-                    icon=head_desc.icon,
-                    native_min_value=0,
-                    native_max_value=100,
-                    native_step=1,
-                    native_unit_of_measurement="%",
-                    mode=head_desc.mode,
-                    position_key="back",  # Map to "back" in position_data
-                    move_up_fn=head_desc.move_up_fn,
-                    move_down_fn=head_desc.move_down_fn,
-                    move_stop_fn=head_desc.move_stop_fn,
-                    max_angle=100.0,  # Use 100 as max for percentage-based beds
-                    min_motors=2,
-                )
-                entities.append(AdjustableBedPositionNumber(coordinator, keeson_head_desc))
-
-                # Create feet position (maps to "legs" position data)
-                # Keeson/Ergomotion report percentage positions (0-100), not angles
-                feet_desc = descriptions_by_key["feet_position"]
-                keeson_feet_desc = AdjustableBedNumberEntityDescription(
-                    key=feet_desc.key,
-                    translation_key=feet_desc.translation_key,
-                    icon=feet_desc.icon,
-                    native_min_value=0,
-                    native_max_value=100,
-                    native_step=1,
-                    native_unit_of_measurement="%",
-                    mode=feet_desc.mode,
-                    position_key="legs",  # Map to "legs" in position_data
-                    move_up_fn=feet_desc.move_up_fn,
-                    move_down_fn=feet_desc.move_down_fn,
-                    move_stop_fn=feet_desc.move_stop_fn,
-                    max_angle=100.0,  # Use 100 as max for percentage-based beds
-                    min_motors=2,
-                )
-                entities.append(AdjustableBedPositionNumber(coordinator, keeson_feet_desc))
-            elif bed_type == BED_TYPE_SLEEPYS_BOX25:
-                _LOGGER.debug(
-                    "Setting up BOX25 position numbers for %s",
-                    coordinator.name,
-                )
-
-                for key, position_key in (
-                    ("head_position", "head"),
-                    ("feet_position", "feet"),
-                ):
-                    description = descriptions_by_key[key]
-                    box25_desc = AdjustableBedNumberEntityDescription(
-                        key=description.key,
-                        translation_key=description.translation_key,
-                        icon=description.icon,
-                        native_min_value=0,
-                        native_max_value=100,
-                        native_step=1,
-                        native_unit_of_measurement="%",
-                        mode=description.mode,
-                        position_key=position_key,
-                        move_up_fn=description.move_up_fn,
-                        move_down_fn=description.move_down_fn,
-                        move_stop_fn=description.move_stop_fn,
-                        max_angle=100.0,
-                        min_motors=2,
-                    )
-                    entities.append(AdjustableBedPositionNumber(coordinator, box25_desc))
-            elif bed_type == BED_TYPE_SLEEPSTAR and controller is not None:
-                _LOGGER.debug(
-                    "Setting up SLEEPSTAR position numbers for %s",
-                    coordinator.name,
-                )
-
-                icons = {
-                    "head": "mdi:head",
-                    "feet": "mdi:foot-print",
-                    "lumbar": "mdi:human-handsup",
-                    "sleepstar_part4": "mdi:bed-outline",
-                    "sleepstar_part5": "mdi:bed-outline",
-                }
-                for spec in controller.motor_control_specs:
-                    if spec.position_key is None:
-                        continue
-                    max_value = float(spec.max_angle)
-                    sleepstar_desc = AdjustableBedNumberEntityDescription(
-                        key=f"{spec.key}_position",
-                        translation_key=f"{spec.translation_key}_position",
-                        icon=icons.get(spec.key, "mdi:bed-outline"),
-                        native_min_value=0,
-                        native_max_value=max_value,
-                        native_step=1,
-                        native_unit_of_measurement="%",
-                        mode=NumberMode.SLIDER,
-                        position_key=spec.position_key,
-                        move_up_fn=spec.open_fn,
-                        move_down_fn=spec.close_fn,
-                        move_stop_fn=spec.stop_fn,
-                        max_angle=max_value,
-                        min_motors=1,
-                    )
-                    entities.append(AdjustableBedPositionNumber(coordinator, sleepstar_desc))
-            elif bed_type == BED_TYPE_OKIN_CST:
-                _LOGGER.debug(
-                    "Setting up CST position numbers for %s",
-                    coordinator.name,
-                )
-
-                for key in ("back_position", "legs_position"):
-                    description = descriptions_by_key[key]
-                    if description.position_key not in OKIN_CST_POSITION_AXES:
-                        continue
-                    max_angle = coordinator.get_max_angle(description.position_key)
-                    cst_desc = AdjustableBedNumberEntityDescription(
-                        key=description.key,
-                        translation_key=description.translation_key,
-                        icon=description.icon,
-                        native_min_value=description.native_min_value,
-                        native_max_value=max_angle,
-                        native_step=description.native_step,
-                        native_unit_of_measurement=description.native_unit_of_measurement,
-                        mode=description.mode,
-                        position_key=description.position_key,
-                        move_up_fn=description.move_up_fn,
-                        move_down_fn=description.move_down_fn,
-                        move_stop_fn=description.move_stop_fn,
-                        max_angle=max_angle,
-                        min_motors=description.min_motors,
-                    )
-                    entities.append(AdjustableBedPositionNumber(coordinator, cst_desc))
-            elif bed_type == BED_TYPE_KAIDI and controller is not None:
-                _LOGGER.debug(
-                    "Setting up Kaidi direct-position numbers for %s",
-                    coordinator.name,
-                )
-
-                for key, position_key, max_value, icon in (
-                    ("back_position", "back", 100.0, "mdi:human-handsup"),
-                    ("legs_position", "legs", 100.0, "mdi:human-handsdown"),
-                ):
-                    entities.append(
-                        AdjustableBedPositionNumber(
-                            coordinator,
-                            AdjustableBedNumberEntityDescription(
-                                key=key,
-                                translation_key=key,
-                                icon=icon,
-                                native_min_value=0,
-                                native_max_value=max_value,
-                                native_step=1,
-                                native_unit_of_measurement="%",
-                                mode=NumberMode.SLIDER,
-                                position_key=position_key,
-                                move_up_fn=(
-                                    (lambda ctrl: ctrl.move_back_up())
-                                    if position_key == "back"
-                                    else (lambda ctrl: ctrl.move_legs_up())
-                                ),
-                                move_down_fn=(
-                                    (lambda ctrl: ctrl.move_back_down())
-                                    if position_key == "back"
-                                    else (lambda ctrl: ctrl.move_legs_down())
-                                ),
-                                move_stop_fn=(
-                                    (lambda ctrl: ctrl.move_back_stop())
-                                    if position_key == "back"
-                                    else (lambda ctrl: ctrl.move_legs_stop())
-                                ),
-                                max_angle=max_value,
-                                min_motors=2,
-                            ),
-                        )
-                    )
-            elif bed_type == BED_TYPE_SLEEP_NUMBER:
-                _LOGGER.debug(
-                    "Setting up Sleep Number direct-position numbers for %s",
-                    coordinator.name,
-                )
-
-                for description in NUMBER_DESCRIPTIONS[:2]:
-                    entities.append(
-                        AdjustableBedPositionNumber(
-                            coordinator,
-                            AdjustableBedNumberEntityDescription(
-                                key=description.key,
-                                translation_key=description.translation_key,
-                                icon=description.icon,
-                                native_min_value=0,
-                                native_max_value=100,
-                                native_step=1,
-                                native_unit_of_measurement="%",
-                                mode=description.mode,
-                                position_key=description.position_key,
-                                move_up_fn=description.move_up_fn,
-                                move_down_fn=description.move_down_fn,
-                                move_stop_fn=description.move_stop_fn,
-                                max_angle=100.0,
-                                min_motors=2,
-                            ),
-                        )
-                    )
-            else:
-                # Standard bed motor layout (Back/Legs/Head/Feet)
-                # Use configurable angle limits for beds that support angle-based positions
-                for description in NUMBER_DESCRIPTIONS:
-                    if motor_count >= description.min_motors:
-                        # Get dynamic max angle from coordinator (preserves decimal precision)
-                        max_angle = coordinator.get_max_angle(description.position_key)
-                        # Create a new description with the dynamic max angle
-                        dynamic_desc = AdjustableBedNumberEntityDescription(
-                            key=description.key,
-                            translation_key=description.translation_key,
-                            icon=description.icon,
-                            native_min_value=description.native_min_value,
-                            native_max_value=max_angle,
-                            native_step=description.native_step,
-                            native_unit_of_measurement=description.native_unit_of_measurement,
-                            mode=description.mode,
-                            position_key=description.position_key,
-                            move_up_fn=description.move_up_fn,
-                            move_down_fn=description.move_down_fn,
-                            move_stop_fn=description.move_stop_fn,
-                            max_angle=max_angle,
-                            min_motors=description.min_motors,
-                        )
-                        entities.append(AdjustableBedPositionNumber(coordinator, dynamic_desc))
+            # The controller owns the layout: which axes exist, whether they are
+            # scaled in degrees or percent, and which position_data key each one
+            # reads. See BedController.position_number_specs.
+            entities.extend(
+                AdjustableBedPositionNumber(coordinator, _build_position_description(spec))
+                for spec in controller.position_number_specs
+            )
         else:
             _LOGGER.debug(
                 "Bed type %s (variant=%s) does not support position feedback, skipping position number entities",
@@ -529,9 +308,9 @@ async def async_setup_entry(
 
     # Set up massage intensity number entities (only for beds with massage and direct intensity control)
     if has_massage and controller is not None:
-        if getattr(controller, "supports_massage_intensity_control", False):
-            supported_zones = getattr(controller, "massage_intensity_zones", [])
-            max_intensity = getattr(controller, "massage_intensity_max", 10)
+        if controller.supports_massage_intensity_control:
+            supported_zones = controller.massage_intensity_zones
+            max_intensity = controller.massage_intensity_max
             _LOGGER.debug(
                 "Setting up massage intensity numbers for %s (zones: %s, max: %d)",
                 coordinator.name,
@@ -555,8 +334,8 @@ async def async_setup_entry(
                     entities.append(AdjustableBedMassageNumber(coordinator, massage_adjusted))
 
     # Set up light level number entity (only for beds that support it)
-    if controller is not None and getattr(controller, "supports_light_level_control", False):
-        max_level = getattr(controller, "light_level_max", 10)
+    if controller is not None and controller.supports_light_level_control:
+        max_level = controller.light_level_max
         _LOGGER.debug(
             "Setting up light level number for %s (max: %d)",
             coordinator.name,
@@ -574,8 +353,8 @@ async def async_setup_entry(
         )
         entities.append(AdjustableBedLightLevelNumber(coordinator, light_adjusted))
 
-    sleep_number_sides = tuple(getattr(controller, "sleep_number_setting_sides", ()))
-    if sleep_number_sides:
+    sleep_number_sides = controller.sleep_number_setting_sides if controller else ()
+    if controller is not None and sleep_number_sides:
         _LOGGER.debug(
             "Setting up side-specific Sleep Number controls for %s (sides: %s)",
             coordinator.name,
@@ -595,9 +374,9 @@ async def async_setup_entry(
                         key=side_description.key,
                         translation_key=side_description.translation_key,
                         icon=side_description.icon,
-                        native_min_value=getattr(controller, "sleep_number_setting_min", 5),
-                        native_max_value=getattr(controller, "sleep_number_setting_max", 100),
-                        native_step=getattr(controller, "sleep_number_setting_step", 5),
+                        native_min_value=controller.sleep_number_setting_min,
+                        native_max_value=controller.sleep_number_setting_max,
+                        native_step=controller.sleep_number_setting_step,
                         mode=side_description.mode,
                         state_key=side_description.state_key,
                         setter_name=side_description.setter_name,
@@ -605,7 +384,7 @@ async def async_setup_entry(
                     ),
                 )
             )
-    elif controller is not None and getattr(controller, "supports_sleep_number_setting", False):
+    elif controller is not None and controller.supports_sleep_number_setting:
         _LOGGER.debug("Setting up Sleep Number setting control for %s", coordinator.name)
         entities.append(
             AdjustableBedSleepNumberSettingNumber(
@@ -614,9 +393,9 @@ async def async_setup_entry(
                     key=SLEEP_NUMBER_SETTING_DESCRIPTION.key,
                     translation_key=SLEEP_NUMBER_SETTING_DESCRIPTION.translation_key,
                     icon=SLEEP_NUMBER_SETTING_DESCRIPTION.icon,
-                    native_min_value=getattr(controller, "sleep_number_setting_min", 5),
-                    native_max_value=getattr(controller, "sleep_number_setting_max", 100),
-                    native_step=getattr(controller, "sleep_number_setting_step", 5),
+                    native_min_value=controller.sleep_number_setting_min,
+                    native_max_value=controller.sleep_number_setting_max,
+                    native_step=controller.sleep_number_setting_step,
                     mode=SLEEP_NUMBER_SETTING_DESCRIPTION.mode,
                 ),
             )

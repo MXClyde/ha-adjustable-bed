@@ -1961,6 +1961,24 @@ BEDS_WITH_POSITION_FEEDBACK: Final = frozenset(
     }
 )
 
+
+def bed_type_has_position_feedback(
+    bed_type: str | None, protocol_variant: str | None
+) -> bool:
+    """Return True if this bed type/variant combination reports motor positions.
+
+    Membership in BEDS_WITH_POSITION_FEEDBACK is not sufficient on its own:
+    Keeson hardware only reports positions on the ergomotion variant, so the
+    variant has to be consulted too. Callers that decide whether to create
+    position entities, accept set_position calls, or probe for position
+    feedback must all agree, so they share this single predicate.
+    """
+    if not bed_type:
+        return False
+    if bed_type in BEDS_WITH_POSITION_FEEDBACK:
+        return True
+    return bed_type == BED_TYPE_KEESON and protocol_variant == KEESON_VARIANT_ERGOMOTION
+
 # Bed types that may have angle sensing enabled but report NO degree-angle data.
 # Sleep Number MCR/BAM beds only report sleep-number values and bed presence over BLE
 # (no motor angle feedback at all), so degree angle sensors would sit at "unknown"

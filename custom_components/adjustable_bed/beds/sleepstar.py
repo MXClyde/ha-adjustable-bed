@@ -29,7 +29,13 @@ from ..const import (
     SLEEPSTAR_MANUFACTURER_ID,
     SLEEPSTAR_SINGLE_SUBTYPE,
 )
-from .base import BedController, MotorControlSpec
+from .base import (
+    POSITION_AXIS_ICONS,
+    POSITION_UNIT_PERCENT,
+    BedController,
+    MotorControlSpec,
+    PositionNumberSpec,
+)
 
 if TYPE_CHECKING:
     from bleak.backends.characteristic import BleakGATTCharacteristic
@@ -422,6 +428,30 @@ class SleepStarController(BedController):
     def massage_timer_options(self) -> list[int]:
         """Return the app's timer durations in minutes."""
         return [10, 20, 30]
+
+    @property
+    def position_number_specs(self) -> tuple[PositionNumberSpec, ...]:
+        """Expose a percentage slider per motor that reports a position.
+
+        Unlike other controllers this tracks motor_control_specs directly: the
+        app-addressable motor list is the same set SLEEPSTAR reports positions
+        for, including the unproven Part4/Part5 axes.
+        """
+        return tuple(
+            PositionNumberSpec(
+                key=f"{spec.key}_position",
+                translation_key=f"{spec.translation_key}_position",
+                position_key=spec.position_key,
+                icon=POSITION_AXIS_ICONS.get(spec.key, "mdi:bed-outline"),
+                native_max_value=float(spec.max_angle),
+                native_unit_of_measurement=POSITION_UNIT_PERCENT,
+                open_fn=spec.open_fn,
+                close_fn=spec.close_fn,
+                stop_fn=spec.stop_fn,
+            )
+            for spec in self.motor_control_specs
+            if spec.position_key is not None
+        )
 
     @property
     def motor_control_specs(self) -> tuple[MotorControlSpec, ...]:

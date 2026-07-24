@@ -520,7 +520,7 @@ async def async_setup_entry(
     coordinator: AdjustableBedCoordinator = hass.data[DOMAIN][entry.entry_id]
     has_massage = entry.data.get(CONF_HAS_MASSAGE, False)
     controller = coordinator.controller
-    if controller is not None and getattr(controller, "auto_enable_massage", False):
+    if controller is not None and controller.auto_enable_massage:
         has_massage = True
 
     if controller is not None:
@@ -547,14 +547,17 @@ def _should_add_button(
     # Hide the manual Disconnect for beds that can't recover from it — e.g. LP
     # Comfort Connect only accepts a connection while in pairing mode. Beds that
     # stay connected but CAN reconnect on demand (e.g. Sleep Number MCR) keep it.
-    if description.key == "disconnect" and getattr(
-        controller, "manual_disconnect_strands_connection", False
+    if (
+        description.key == "disconnect"
+        and controller is not None
+        and controller.manual_disconnect_strands_connection
     ):
         return False
 
     if description.key == "toggle_light" and controller is not None:
-        if getattr(controller, "supports_discrete_light_control", False) or getattr(
-            controller, "supports_light_color_control", False
+        if (
+            controller.supports_discrete_light_control
+            or controller.supports_light_color_control
         ):
             return False
 
@@ -565,12 +568,11 @@ def _should_add_button(
             return False
 
     if description.memory_slot is not None and controller is not None:
-        slot_count = getattr(controller, "memory_slot_count", 4)
-        if description.memory_slot > slot_count:
+        if description.memory_slot > controller.memory_slot_count:
             return False
 
     if description.is_program_button and controller is not None:
-        if not getattr(controller, "supports_memory_programming", False):
+        if not controller.supports_memory_programming:
             return False
 
     return True
