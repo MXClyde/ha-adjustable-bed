@@ -84,6 +84,8 @@ OCTO_UNESCAPE_MAP: dict[int, int] = {v: k for k, v in OCTO_ESCAPE_MAP.items()}
 class OctoController(BedController):
     """Controller for Octo beds."""
 
+    _write_with_response = False
+
     def __init__(self, coordinator: AdjustableBedCoordinator, pin: str = "") -> None:
         """Initialize the Octo controller.
 
@@ -196,6 +198,16 @@ class OctoController(BedController):
 
         # Build final packet with unescaped delimiters
         return bytes([OCTO_PACKET_CHAR, *escaped_payload, OCTO_PACKET_CHAR])
+
+    def _format_command_trace_payload(self, command: bytes) -> dict[str, object] | None:
+        """Redact PIN authentication packets from logs and support bundles."""
+        if command[:3] == bytes((OCTO_PACKET_CHAR, 0x20, 0x43)):
+            return {
+                "hex": "**REDACTED**",
+                "length": len(command),
+                "ascii_preview": None,
+            }
+        return super()._format_command_trace_payload(command)
 
     def _parse_response_packet(self, message: bytes) -> dict[str, list[int]] | None:
         """Parse a response packet from the bed.
@@ -434,43 +446,6 @@ class OctoController(BedController):
                             "Drivemode set acknowledged: %s",
                             "sync" if self._synchro_active else "single",
                         )
-
-    async def write_command(
-        self,
-        command: bytes,
-        repeat_count: int = 1,
-        repeat_delay_ms: int = 100,
-        cancel_event: asyncio.Event | None = None,
-    ) -> None:
-        """Write a command to the bed."""
-        if self.client is None or not self.client.is_connected:
-            _LOGGER.error("Cannot write command: BLE client not connected")
-            raise ConnectionError("Not connected to bed")
-
-        effective_cancel = cancel_event or self._coordinator.cancel_command
-
-        _LOGGER.debug(
-            "Writing command to Octo bed (%s): %s (repeat: %d, delay: %dms, response=False)",
-            OCTO_CHAR_UUID,
-            command.hex(),
-            repeat_count,
-            repeat_delay_ms,
-        )
-
-        for i in range(repeat_count):
-            if effective_cancel is not None and effective_cancel.is_set():
-                _LOGGER.info("Command cancelled after %d/%d writes", i, repeat_count)
-                return
-
-            try:
-                async with self._ble_lock:
-                    await self.client.write_gatt_char(OCTO_CHAR_UUID, command, response=False)
-            except BleakError:
-                _LOGGER.exception("Failed to write command")
-                raise
-
-            if i < repeat_count - 1:
-                await asyncio.sleep(repeat_delay_ms / 1000)
 
     async def _write_octo_command(
         self,
@@ -1208,6 +1183,8 @@ class OctoStar2Controller(BedController):
     - Packet format: starts with 0x68, ends with 0x16
     """
 
+    _write_with_response = False
+
     # Star2 fixed command bytes
     # Protocol reverse-engineered by goedh452
     # (https://community.home-assistant.io/t/how-to-setup-esphome-to-control-my-bluetooth-controlled-octocontrol-bed/540790/10)
@@ -1265,43 +1242,6 @@ class OctoStar2Controller(BedController):
     def control_characteristic_uuid(self) -> str:
         """Return the UUID of the control characteristic."""
         return OCTO_STAR2_CHAR_UUID
-
-    async def write_command(
-        self,
-        command: bytes,
-        repeat_count: int = 1,
-        repeat_delay_ms: int = 100,
-        cancel_event: asyncio.Event | None = None,
-    ) -> None:
-        """Write a command to the bed."""
-        if self.client is None or not self.client.is_connected:
-            _LOGGER.error("Cannot write command: BLE client not connected")
-            raise ConnectionError("Not connected to bed")
-
-        effective_cancel = cancel_event or self._coordinator.cancel_command
-
-        _LOGGER.debug(
-            "Writing command to Octo Star2 bed (%s): %s (repeat: %d, delay: %dms, response=False)",
-            OCTO_STAR2_CHAR_UUID,
-            command.hex(),
-            repeat_count,
-            repeat_delay_ms,
-        )
-
-        for i in range(repeat_count):
-            if effective_cancel is not None and effective_cancel.is_set():
-                _LOGGER.info("Command cancelled after %d/%d writes", i, repeat_count)
-                return
-
-            try:
-                async with self._ble_lock:
-                    await self.client.write_gatt_char(OCTO_STAR2_CHAR_UUID, command, response=False)
-            except BleakError:
-                _LOGGER.exception("Failed to write command")
-                raise
-
-            if i < repeat_count - 1:
-                await asyncio.sleep(repeat_delay_ms / 1000)
 
     async def start_notify(self, callback: Callable[[str, float], None] | None = None) -> None:
         """Start listening for notifications.

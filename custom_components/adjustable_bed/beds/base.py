@@ -68,6 +68,8 @@ class BedController(ABC):
     - massage_* methods
     """
 
+    _write_with_response: bool = True
+
     def __init__(self, coordinator: AdjustableBedCoordinator) -> None:
         """Initialize the controller.
 
@@ -295,6 +297,10 @@ class BedController(ABC):
         This is the BLE characteristic that accepts motor/preset commands.
         """
 
+    def _format_command_trace_payload(self, command: bytes) -> dict[str, Any] | None:
+        """Return a safe diagnostic representation of a command."""
+        return format_payload(command)
+
     async def _write_gatt_with_retry(
         self,
         char_uuid: str,
@@ -337,12 +343,14 @@ class BedController(ABC):
             raise ConnectionError("Not connected to bed")
 
         effective_cancel = cancel_event or self._coordinator.cancel_command
+        payload = self._format_command_trace_payload(command)
+        logged_command = str(payload.get("hex", "**REDACTED**")) if payload else "**REDACTED**"
 
         _LOGGER.debug(
             "GATT write to %s (%s): %s (response=%s, repeat=%d, delay=%dms)",
             self._coordinator.address,
             char_uuid,
-            command.hex(),
+            logged_command,
             response,
             repeat_count,
             repeat_delay_ms,
@@ -363,7 +371,6 @@ class BedController(ABC):
         if caller_frame is not None and caller_frame.f_back is not None:
             command_origin = caller_frame.f_back.f_code.co_name
 
-        payload = format_payload(command)
         if payload is not None:
             self._coordinator.record_command_trace(
                 payload=payload,
@@ -394,13 +401,13 @@ class BedController(ABC):
                 if log_errors:
                     _LOGGER.exception(
                         "Failed to write command %s to %s",
-                        command.hex(),
+                        logged_command,
                         char_uuid,
                     )
                 else:
                     _LOGGER.debug(
                         "Suppressed write failure for %s to %s",
-                        command.hex(),
+                        logged_command,
                         char_uuid,
                         exc_info=True,
                     )
@@ -419,9 +426,9 @@ class BedController(ABC):
         """Write a command to the bed.
 
         Default implementation delegates to _write_gatt_with_retry() using
-        the control_characteristic_uuid. Subclasses with custom write behavior
-        (init sequences, handle-based writes, custom error handling) should
-        override this method.
+        the control_characteristic_uuid and configured GATT response mode.
+        Subclasses with custom write behavior (init sequences, handle-based
+        writes, custom error handling) should override this method.
 
         Args:
             command: The command bytes to send (protocol-specific format)
@@ -442,6 +449,7 @@ class BedController(ABC):
             repeat_count=repeat_count,
             repeat_delay_ms=repeat_delay_ms,
             cancel_event=cancel_event,
+            response=self._write_with_response,
         )
 
     async def start_notify(self, callback: Callable[[str, float], None] | None = None) -> None:
