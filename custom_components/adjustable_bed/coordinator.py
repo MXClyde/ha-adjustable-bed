@@ -589,6 +589,10 @@ class AdjustableBedCoordinator:
         Returns:
             Maximum angle in degrees for the specified motor.
         """
+        # Deliberately keyed on bed type rather than the controller's
+        # motor_max_angles: this limit must hold while disconnected, so that
+        # set_position validation still rejects a target the frame cannot reach
+        # when the controller is momentarily absent.
         if position_key in ("back", "head"):
             if self._bed_type == BED_TYPE_OKIN_CST:
                 return OKIN_HEAD_MAX_ANGLE

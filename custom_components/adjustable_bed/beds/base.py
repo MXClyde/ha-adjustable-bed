@@ -104,6 +104,11 @@ POSITION_AXIS_COMMANDS: Final[
         lambda ctrl: ctrl.move_feet_down(),
         lambda ctrl: ctrl.move_feet_stop(),
     ),
+    "lumbar": (
+        lambda ctrl: ctrl.move_lumbar_up(),
+        lambda ctrl: ctrl.move_lumbar_down(),
+        lambda ctrl: ctrl.move_lumbar_stop(),
+    ),
 }
 
 POSITION_AXIS_ICONS: Final[dict[str, str]] = {

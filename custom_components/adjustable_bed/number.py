@@ -299,11 +299,20 @@ async def async_setup_entry(
                 AdjustableBedPositionNumber(coordinator, _build_position_description(spec))
                 for spec in controller.position_number_specs
             )
+        elif controller is None:
+            # The layout comes from the controller, so a bed that is disconnected
+            # at setup gets no sliders until the entry reloads. Say so plainly
+            # rather than blaming the bed type.
+            _LOGGER.warning(
+                "No controller available for %s, skipping position number entities; "
+                "reload the entry once the bed reconnects",
+                coordinator.name,
+            )
         else:
             _LOGGER.debug(
                 "Bed type %s (variant=%s) does not support position feedback, skipping position number entities",
                 bed_type,
-                entry.data.get(CONF_PROTOCOL_VARIANT),
+                protocol_variant,
             )
 
     # Set up massage intensity number entities (only for beds with massage and direct intensity control)

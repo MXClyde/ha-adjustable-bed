@@ -160,8 +160,9 @@ class OkinCstController(BedController):
                 max_value=self._coordinator.get_max_angle(axis),
                 unit=POSITION_UNIT_DEGREES,
             )
-            for axis in ("back", "legs")
-            if axis in OKIN_CST_POSITION_AXES
+            # sorted() because OKIN_CST_POSITION_AXES is a frozenset and entity
+            # creation order must not vary between runs.
+            for axis in sorted(OKIN_CST_POSITION_AXES)
         )
 
     @property
