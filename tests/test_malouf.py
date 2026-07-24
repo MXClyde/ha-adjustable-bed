@@ -511,11 +511,21 @@ class TestMaloufMemoryProgramming:
         mock_malouf_legacy_config_entry,
         mock_coordinator_connected,
         mock_bleak_client: MagicMock,
+        mock_async_ble_device_from_address: MagicMock,
     ):
-        """Smartbed238 uses the APK's modified Memory 1 save command 85 times."""
+        """The configured Smartbed238 name remains a fallback for the save command."""
+        hass.config_entries.async_update_entry(
+            mock_malouf_legacy_config_entry,
+            data={
+                **mock_malouf_legacy_config_entry.data,
+                CONF_NAME: "Smartbed238001234",
+            },
+        )
+        mock_async_ble_device_from_address.return_value.name = None
         coordinator = AdjustableBedCoordinator(hass, mock_malouf_legacy_config_entry)
         await coordinator.async_connect()
-        coordinator._ble_device_name = "Smartbed238001234"  # noqa: SLF001
+        assert coordinator.ble_device_name == "Smartbed238001234"
+        assert coordinator.observed_ble_device_name is None
         mock_bleak_client.write_gatt_char.reset_mock()
 
         with patch(

@@ -88,8 +88,8 @@ Several bed brands use Okin-based BLE controllers. While they share common roots
 4. Name starts with `OKIN-` → prompt for Okin-family protocol (confirmed Nectar bases can advertise this way)
 5. Name is `OKIN-Receiver` / `OKIN - Receiver` → prompt for Okin-family protocol
 6. Connected GATT has `62741525-...` plus CSS `90311625-...` and Nordic DFU
-   `00001530-...` → Okin CST, unless the Leggett / `LP BED` identity above
-   identifies LP Control's 6-byte Okin path
+   `00001530-...` → Okin CST, unless the name begins `LP BED`, which identifies
+   LP Control's proven 6-byte Okin path
 7. Connected GATT has `62741525-...` plus CSS `90311625-...` without Nordic DFU → OKIN Smart Remote / RF ECO BT
 8. Fallback → Okimat (with warning logged)
 

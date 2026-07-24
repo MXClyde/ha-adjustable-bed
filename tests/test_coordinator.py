@@ -19,6 +19,7 @@ from custom_components.adjustable_bed.const import (
     BED_TYPE_KEESON,
     BED_TYPE_LEGGETT_GEN2,
     BED_TYPE_LEGGETT_OKIN,
+    BED_TYPE_LEGGETT_PLATT,
     BED_TYPE_LINAK,
     BED_TYPE_MALOUF_LEGACY_OKIN,
     BED_TYPE_MALOUF_NEW_OKIN,
@@ -41,10 +42,12 @@ from custom_components.adjustable_bed.const import (
     CONF_MOTOR_PULSE_DELAY_MS,
     CONF_PASSIVE_POSITION_RECONCILIATION,
     CONF_PREFERRED_ADAPTER,
+    CONF_PROTOCOL_VARIANT,
     CONF_RICHMAT_REMOTE,
     DEFAULT_MOTOR_PULSE_COUNT,
     DEFAULT_MOTOR_PULSE_DELAY_MS,
     DOMAIN,
+    LEGGETT_VARIANT_OKIN,
     NORDIC_DFU_SERVICE_UUID,
     OKIMAT_SERVICE_UUID,
     OKIMAT_WRITE_CHAR_UUID,
@@ -2811,6 +2814,31 @@ class TestRuntimeBedTypeCorrection:
         assert (coordinator.motor_pulse_count, coordinator.motor_pulse_delay_ms) == (8, 150)
         assert coordinator.entry.data[CONF_MOTOR_PULSE_COUNT] == 8
         assert coordinator.entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 150
+
+    async def test_legacy_leggett_okin_variant_migrates_persisted_generic_defaults(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+    ):
+        """The legacy Leggett umbrella type should use the Okin variant cadence."""
+        coordinator = self._make_coordinator(
+            hass,
+            mock_config_entry_data,
+            {
+                CONF_PROTOCOL_VARIANT: LEGGETT_VARIANT_OKIN,
+                CONF_MOTOR_PULSE_COUNT: DEFAULT_MOTOR_PULSE_COUNT,
+                CONF_MOTOR_PULSE_DELAY_MS: DEFAULT_MOTOR_PULSE_DELAY_MS,
+            },
+            bed_type=BED_TYPE_LEGGETT_PLATT,
+        )
+
+        changed = coordinator._apply_runtime_bed_type_correction(BED_TYPE_LEGGETT_PLATT)
+
+        assert changed is True
+        assert coordinator.bed_type == BED_TYPE_LEGGETT_PLATT
+        assert (coordinator.motor_pulse_count, coordinator.motor_pulse_delay_ms) == (5, 200)
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_COUNT] == 5
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 200
 
     async def test_correction_updates_shared_okin_bed_type(
         self,

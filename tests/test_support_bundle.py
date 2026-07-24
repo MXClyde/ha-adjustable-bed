@@ -370,22 +370,24 @@ class TestBleDiagnosticsRunner:
         assert "gatt_char:okin_smart_remote_css_write" in report.detection["signals"]
 
     @pytest.mark.parametrize(
-        ("device_name", "expected_bed_type"),
+        ("snapshot_name", "selected_device_name", "expected_bed_type"),
         [
-            ("OKIN-441954", BED_TYPE_OKIN_CST),
-            ("LP BED CONTROL", BED_TYPE_LEGGETT_OKIN),
+            ("OKIN-441954", "OKIN-441954", BED_TYPE_OKIN_CST),
+            ("LP BED CONTROL", "LP BED CONTROL", BED_TYPE_LEGGETT_OKIN),
+            (None, "LP BED CONTROL", BED_TYPE_LEGGETT_OKIN),
         ],
     )
     async def test_run_diagnostics_disambiguates_okin_dual_stack_by_name(
         self,
         hass: HomeAssistant,
         enable_custom_integrations,
-        device_name: str,
+        snapshot_name: str | None,
+        selected_device_name: str,
         expected_bed_type: str,
     ):
         """Diagnostics should combine the dual-stack signature with receiver identity."""
         service_info = MagicMock()
-        service_info.name = device_name
+        service_info.name = snapshot_name
         service_info.address = "AA:BB:CC:DD:EE:55"
         service_info.rssi = -59
         service_info.manufacturer_data = {}
@@ -394,7 +396,7 @@ class TestBleDiagnosticsRunner:
         service_info.source = "proxy_1"
         service_info.device = MagicMock(
             address="AA:BB:CC:DD:EE:55",
-            name=device_name,
+            name=snapshot_name,
             details={"source": "proxy_1", "props": {"Paired": True}},
         )
         service_info.connectable = True
@@ -443,6 +445,11 @@ class TestBleDiagnosticsRunner:
         client.start_notify = AsyncMock()
         client.stop_notify = AsyncMock()
         client.disconnect = AsyncMock()
+        selected_device = MagicMock(
+            address="AA:BB:CC:DD:EE:55",
+            details={"source": "proxy_1", "props": {"Paired": True}},
+        )
+        selected_device.name = selected_device_name
 
         with (
             patch(
@@ -453,7 +460,7 @@ class TestBleDiagnosticsRunner:
                 "custom_components.adjustable_bed.ble_diagnostics.select_adapter",
                 new=AsyncMock(
                     return_value=AdapterSelectionResult(
-                        device=service_info.device,
+                        device=selected_device,
                         source="proxy_1",
                         rssi=-59,
                         connectable=True,
