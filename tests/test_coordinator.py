@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
@@ -41,6 +42,8 @@ from custom_components.adjustable_bed.const import (
     CONF_PASSIVE_POSITION_RECONCILIATION,
     CONF_PREFERRED_ADAPTER,
     CONF_RICHMAT_REMOTE,
+    DEFAULT_MOTOR_PULSE_COUNT,
+    DEFAULT_MOTOR_PULSE_DELAY_MS,
     DOMAIN,
     NORDIC_DFU_SERVICE_UUID,
     OKIMAT_SERVICE_UUID,
@@ -3182,26 +3185,48 @@ class TestRuntimeBedTypeCorrection:
         mock_bleak_client: MagicMock,
         mock_coordinator_connected: None,
         mock_async_ble_device_from_address: MagicMock,
+        mock_establish_connection: AsyncMock,
     ):
-        """Issue #368: a bonded LP BED entry must select the 6-byte controller."""
+        """Issue #368: the refreshed LP BED name must select the 6-byte controller."""
         entry = MockConfigEntry(
             domain=DOMAIN,
             title="LP BED CONTROL",
             data={
                 CONF_ADDRESS: TEST_ADDRESS,
-                CONF_NAME: "LP BED CONTROL",
+                CONF_NAME: "Bedroom Bed",
                 CONF_BED_TYPE: BED_TYPE_OKIN_CST,
                 CONF_MOTOR_COUNT: 4,
                 CONF_HAS_MASSAGE: True,
                 CONF_DISABLE_ANGLE_SENSING: False,
                 CONF_PREFERRED_ADAPTER: "auto",
                 CONF_BLE_BOND_ESTABLISHED: True,
+                CONF_MOTOR_PULSE_COUNT: DEFAULT_MOTOR_PULSE_COUNT,
+                CONF_MOTOR_PULSE_DELAY_MS: DEFAULT_MOTOR_PULSE_DELAY_MS,
             },
             unique_id=TEST_ADDRESS,
             entry_id="test_entry_lp_bed_cst_recovery",
         )
         entry.add_to_hass(hass)
-        mock_async_ble_device_from_address.return_value.name = "LP BED CONTROL"
+        mock_async_ble_device_from_address.return_value.name = None
+
+        fresh_device = MagicMock()
+        fresh_device.address = TEST_ADDRESS
+        fresh_device.name = "LP BED CONTROL"
+        fresh_device.details = {"source": "local"}
+        fresh_service_info = SimpleNamespace(
+            address=TEST_ADDRESS,
+            source="local",
+            rssi=-55,
+            connectable=True,
+            device=fresh_device,
+        )
+
+        async def establish_with_fresh_device(*args: Any, **kwargs: Any) -> MagicMock:
+            """Simulate bleak-retry-connector refreshing stale scanner data."""
+            assert kwargs["ble_device_callback"]() is fresh_device
+            return mock_bleak_client
+
+        mock_establish_connection.side_effect = establish_with_fresh_device
 
         gatt_services = [
             SimpleNamespace(
@@ -3236,6 +3261,10 @@ class TestRuntimeBedTypeCorrection:
                 return_value=True,
             ),
             patch(
+                "custom_components.adjustable_bed.coordinator.get_discovered_service_info",
+                return_value=[fresh_service_info],
+            ),
+            patch(
                 "custom_components.adjustable_bed.coordinator.read_ble_device_info",
                 new_callable=AsyncMock,
                 return_value=("DewertOkin GmbH", "CU170"),
@@ -3256,6 +3285,10 @@ class TestRuntimeBedTypeCorrection:
         assert coordinator.disable_angle_sensing is True
         assert entry.data[CONF_BED_TYPE] == BED_TYPE_LEGGETT_OKIN
         assert entry.data[CONF_DISABLE_ANGLE_SENSING] is True
+        assert coordinator.motor_pulse_count == 5
+        assert coordinator.motor_pulse_delay_ms == 200
+        assert entry.data[CONF_MOTOR_PULSE_COUNT] == 5
+        assert entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 200
 
 
 

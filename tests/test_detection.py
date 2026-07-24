@@ -1193,6 +1193,39 @@ class TestOkinUUIDDisambiguation:
             == BED_TYPE_LEGGETT_OKIN
         )
 
+    @pytest.mark.parametrize("device_name", ["Leggett Bed", "L&P Bed"])
+    def test_legacy_leggett_name_does_not_override_cst_gatt(
+        self,
+        device_name: str,
+    ):
+        """Only LP Control's proven LP BED prefix can override CST GATT."""
+        gatt_services = [
+            SimpleNamespace(
+                uuid=OKIMAT_SERVICE_UUID,
+                characteristics=[
+                    SimpleNamespace(uuid=OKIMAT_WRITE_CHAR_UUID),
+                ],
+            ),
+            SimpleNamespace(
+                uuid=OKIN_SMART_REMOTE_CSS_SERVICE_UUID,
+                characteristics=[
+                    SimpleNamespace(uuid=OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID),
+                ],
+            ),
+            SimpleNamespace(
+                uuid=NORDIC_DFU_SERVICE_UUID,
+                characteristics=[],
+            ),
+        ]
+
+        assert (
+            detect_bed_type_from_gatt_services(
+                gatt_services,
+                device_name=device_name,
+            ).bed_type
+            == BED_TYPE_OKIN_CST
+        )
+
     def test_shared_okin_gatt_refinement_corrects_legacy_leggett_okin_variant_to_cst(self):
         """A legacy Leggett entry using the OKIN variant should be GATT-refinable."""
         gatt_services = [

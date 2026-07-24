@@ -575,11 +575,16 @@ def _characteristics_from_gatt_service(service: Any) -> list[Any]:
 def _is_leggett_okin_name(device_name: str | None) -> bool:
     """Return whether a BLE name identifies LP Control's Okin protocol."""
     normalized_name = (device_name or "").strip().lower()
-    return normalized_name.startswith("lp bed") or any(
+    return _is_lp_control_okin_name(device_name) or any(
         pattern in normalized_name
         for pattern in LEGGETT_OKIN_NAME_PATTERNS
         if pattern != "lp bed"
     )
+
+
+def _is_lp_control_okin_name(device_name: str | None) -> bool:
+    """Return whether a BLE name matches LP Control's proven Okin prefix."""
+    return (device_name or "").strip().lower().startswith("lp bed")
 
 
 def detect_bed_type_from_gatt_services(
@@ -626,7 +631,7 @@ def detect_bed_type_from_gatt_services(
             ],
         )
 
-    if has_okin_uuid_write and _is_leggett_okin_name(device_name):
+    if has_okin_uuid_write and _is_lp_control_okin_name(device_name):
         # LP Control classifies these receivers as Okin from 62741523 alone
         # and sends 6-byte 04 02 frames to 62741525. Some LP BED CONTROL
         # receivers also expose the CSS and Nordic DFU services, but the app

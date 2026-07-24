@@ -208,7 +208,7 @@ class AdjustableBedCoordinator:
         # Keep the advertised BLE name separate from the editable entry name.
         # Malouf's APK has one command exception keyed to Smartbed238, so using
         # a user-facing rename here would silently select the wrong command.
-        self._ble_device_name: str = self._name
+        self._ble_device_name: str = ""
         self._malouf_layout: str = entry.data.get(CONF_MALOUF_LAYOUT, MALOUF_LAYOUT_AUTO)
         self._malouf_memory_slots: int = int(
             entry.data.get(CONF_MALOUF_MEMORY_SLOTS, MALOUF_MEMORY_SLOTS_AUTO)
@@ -404,12 +404,29 @@ class AdjustableBedCoordinator:
             CONF_MOTOR_PULSE_COUNT in self.entry.data
             or CONF_MOTOR_PULSE_DELAY_MS in self.entry.data
         )
+        # Config flows historically persisted the generic defaults even when the
+        # user did not customize them. An LP BED entry misclassified as CST
+        # therefore carries (10, 100), with no provenance that distinguishes those
+        # generated values from an override. Restrict this migration to the exact
+        # broken route from issue #368 so unrelated explicit settings remain intact.
+        migrate_lp_control_defaults = (
+            previous_bed_type == BED_TYPE_OKIN_CST
+            and corrected_bed_type == BED_TYPE_LEGGETT_OKIN
+            and (self._motor_pulse_count, self._motor_pulse_delay_ms)
+            == (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
+        )
         if (
-            previous_defaults is not None
-            and corrected_defaults is not None
+            corrected_defaults is not None
             and bed_type_changed
-            and not has_custom_pulse_override
-            and (self._motor_pulse_count, self._motor_pulse_delay_ms) == previous_defaults
+            and (
+                migrate_lp_control_defaults
+                or (
+                    previous_defaults is not None
+                    and not has_custom_pulse_override
+                    and (self._motor_pulse_count, self._motor_pulse_delay_ms)
+                    == previous_defaults
+                )
+            )
         ):
             self._motor_pulse_count, self._motor_pulse_delay_ms = corrected_defaults
             _LOGGER.info(
@@ -423,6 +440,9 @@ class AdjustableBedCoordinator:
 
         entry_data = dict(self.entry.data)
         entry_data[CONF_BED_TYPE] = corrected_bed_type
+        if migrate_lp_control_defaults and corrected_defaults is not None:
+            entry_data[CONF_MOTOR_PULSE_COUNT] = corrected_defaults[0]
+            entry_data[CONF_MOTOR_PULSE_DELAY_MS] = corrected_defaults[1]
         if corrected_bed_type == BED_TYPE_BEDTECH:
             entry_data.pop(CONF_RICHMAT_REMOTE, None)
         angle_sensing_defaulted = CONF_DISABLE_ANGLE_SENSING not in self.entry.data or (
@@ -1939,6 +1959,7 @@ class AdjustableBedCoordinator:
                         self._store_ble_device_info(ble_manufacturer, ble_model)
 
                 previous_bed_type = self._bed_type
+                observed_device_name = self._ble_device_name or device.name
                 corrected_bed_type = refine_malouf_protocol_from_gatt(
                     self._bed_type,
                     self._client.services,
@@ -1948,21 +1969,21 @@ class AdjustableBedCoordinator:
                     self._client.services,
                     self._protocol_variant,
                     ble_model,
-                    device.name,
+                    observed_device_name,
                 )
                 corrected_bed_type = refine_dewertokin_star_protocol_from_name(
                     corrected_bed_type,
-                    device.name,
+                    observed_device_name,
                 )
                 corrected_bed_type = refine_nordic_uart_protocol_from_device_info(
                     corrected_bed_type,
-                    device.name,
+                    observed_device_name,
                     ble_manufacturer,
                     ble_model,
                 )
                 corrected_bed_type = refine_qrrm_protocol_from_device_info(
                     corrected_bed_type,
-                    device.name,
+                    observed_device_name,
                     ble_model,
                 )
                 corrected_bed_type = refine_okin_dot_protocol_from_gatt(
