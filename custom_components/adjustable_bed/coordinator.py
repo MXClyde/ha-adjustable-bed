@@ -405,23 +405,24 @@ class AdjustableBedCoordinator:
             or CONF_MOTOR_PULSE_DELAY_MS in self.entry.data
         )
         # Config flows historically persisted the generic defaults even when the
-        # user did not customize them. An LP BED entry misclassified as CST
-        # therefore carries (10, 100), with no provenance that distinguishes those
-        # generated values from an override. Restrict this migration to the exact
-        # broken route from issue #368 so unrelated explicit settings remain intact.
-        migrate_lp_control_defaults = (
-            previous_bed_type == BED_TYPE_OKIN_CST
+        # user did not customize them. Existing Leggett Okin entries and LP BED
+        # entries misclassified as CST therefore carry (10, 100), with no provenance
+        # that distinguishes those generated values from an override. Restrict this
+        # migration to these Leggett Okin upgrade paths so unrelated explicit
+        # settings remain intact.
+        migrate_leggett_okin_defaults = (
+            previous_bed_type in {BED_TYPE_LEGGETT_OKIN, BED_TYPE_OKIN_CST}
             and corrected_bed_type == BED_TYPE_LEGGETT_OKIN
             and (self._motor_pulse_count, self._motor_pulse_delay_ms)
             == (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
         )
         if (
             corrected_defaults is not None
-            and bed_type_changed
             and (
-                migrate_lp_control_defaults
+                migrate_leggett_okin_defaults
                 or (
-                    previous_defaults is not None
+                    bed_type_changed
+                    and previous_defaults is not None
                     and not has_custom_pulse_override
                     and (self._motor_pulse_count, self._motor_pulse_delay_ms)
                     == previous_defaults
@@ -440,7 +441,7 @@ class AdjustableBedCoordinator:
 
         entry_data = dict(self.entry.data)
         entry_data[CONF_BED_TYPE] = corrected_bed_type
-        if migrate_lp_control_defaults and corrected_defaults is not None:
+        if migrate_leggett_okin_defaults and corrected_defaults is not None:
             entry_data[CONF_MOTOR_PULSE_COUNT] = corrected_defaults[0]
             entry_data[CONF_MOTOR_PULSE_DELAY_MS] = corrected_defaults[1]
         if corrected_bed_type == BED_TYPE_BEDTECH:

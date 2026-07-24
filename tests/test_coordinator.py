@@ -2766,6 +2766,52 @@ class TestRuntimeBedTypeCorrection:
             coordinator.motor_pulse_delay_ms,
         ) == new_okin_defaults
 
+    async def test_existing_leggett_okin_migrates_persisted_generic_pulse_defaults(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+    ):
+        """Existing Leggett Okin entries should adopt LP Control's proven cadence."""
+        coordinator = self._make_coordinator(
+            hass,
+            mock_config_entry_data,
+            {
+                CONF_MOTOR_PULSE_COUNT: DEFAULT_MOTOR_PULSE_COUNT,
+                CONF_MOTOR_PULSE_DELAY_MS: DEFAULT_MOTOR_PULSE_DELAY_MS,
+            },
+            bed_type=BED_TYPE_LEGGETT_OKIN,
+        )
+
+        changed = coordinator._apply_runtime_bed_type_correction(BED_TYPE_LEGGETT_OKIN)
+
+        assert changed is True
+        assert (coordinator.motor_pulse_count, coordinator.motor_pulse_delay_ms) == (5, 200)
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_COUNT] == 5
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 200
+
+    async def test_existing_leggett_okin_preserves_nondefault_pulse_override(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+    ):
+        """A non-default user cadence must survive the Leggett Okin upgrade."""
+        coordinator = self._make_coordinator(
+            hass,
+            mock_config_entry_data,
+            {
+                CONF_MOTOR_PULSE_COUNT: 8,
+                CONF_MOTOR_PULSE_DELAY_MS: 150,
+            },
+            bed_type=BED_TYPE_LEGGETT_OKIN,
+        )
+
+        changed = coordinator._apply_runtime_bed_type_correction(BED_TYPE_LEGGETT_OKIN)
+
+        assert changed is False
+        assert (coordinator.motor_pulse_count, coordinator.motor_pulse_delay_ms) == (8, 150)
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_COUNT] == 8
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 150
+
     async def test_correction_updates_shared_okin_bed_type(
         self,
         hass: HomeAssistant,
