@@ -37,6 +37,8 @@ HEAD_POS_MAX = 30500
 FOOT_POS_FLAT = 1
 FOOT_POS_MAX = 30500
 
+_CONFIG_RESPONSE_TIMEOUT = 5.0
+
 
 class JensenCommands:
     """Jensen 6-byte command constants.
@@ -318,7 +320,10 @@ class JensenController(BedController):
 
             # Wait for response (with timeout)
             try:
-                await asyncio.wait_for(self._config_received.wait(), timeout=5.0)
+                await asyncio.wait_for(
+                    self._config_received.wait(),
+                    timeout=_CONFIG_RESPONSE_TIMEOUT,
+                )
             except TimeoutError:
                 _LOGGER.warning("Timeout waiting for config response, assuming full features")
                 # Default to all features enabled if we can't query

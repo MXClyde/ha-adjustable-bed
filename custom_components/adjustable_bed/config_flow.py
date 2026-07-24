@@ -390,6 +390,13 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         self._pending_title: str | None = None
         _LOGGER.debug("AdjustableBedConfigFlow initialized")
 
+    def _set_device_title_placeholders(self, name: str | None, address: str) -> None:
+        """Identify the selected device in the flow title."""
+        self.context["title_placeholders"] = {
+            "name": name or "Unknown",
+            "address": address.upper(),
+        }
+
     def _prepare_disambiguation(self, detection_result: DetectionResult) -> bool:
         """Prepare the focused bed-type chooser for an ambiguous detection."""
         self._disambiguation_types = None
@@ -699,7 +706,7 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
             )
 
         self._discovery_info = discovery_info
-        self.context["title_placeholders"] = {"name": discovery_info.name or discovery_info.address}
+        self._set_device_title_placeholders(discovery_info.name, discovery_info.address)
 
         # Check if disambiguation is needed (low confidence with alternatives)
         if self._prepare_disambiguation(detection_result):
@@ -765,7 +772,8 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
                 }
             ),
             description_placeholders={
-                "name": self._discovery_info.name or self._discovery_info.address,
+                "name": self._discovery_info.name or "Unknown",
+                "address": self._discovery_info.address.upper(),
             },
         )
 
@@ -1101,7 +1109,8 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
 
         # Build description placeholders with optional ambiguity warning
         description_placeholders = {
-            "name": self._discovery_info.name or self._discovery_info.address,
+            "name": self._discovery_info.name or "Unknown",
+            "address": self._discovery_info.address.upper(),
         }
 
         # Add detection confidence info for ambiguous cases
@@ -1198,6 +1207,9 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
 
             self._discovery_info = self._discovered_devices[address]
+            self._set_device_title_placeholders(
+                self._discovery_info.name, self._discovery_info.address
+            )
             return await self.async_step_bluetooth_confirm()
 
         # Discover devices
@@ -1423,6 +1435,9 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
 
             self._discovery_info = self._all_ble_devices[address]
+            self._set_device_title_placeholders(
+                self._discovery_info.name, self._discovery_info.address
+            )
             return await self.async_step_manual_config()
 
         # Get ALL BLE devices (not just beds)
@@ -1791,6 +1806,7 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
 
                     await self.async_set_unique_id(address)
                     self._abort_if_unique_id_configured()
+                    self._set_device_title_placeholders(user_input.get(CONF_NAME), address)
 
                     _LOGGER.info(
                         "Manual bed configuration: address=%s, type=%s, variant=%s, name=%s, motors=%s, massage=%s, disable_angle_sensing=%s, adapter=%s, pulse_count=%s, pulse_delay=%s",

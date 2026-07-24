@@ -56,6 +56,9 @@ index 8 and `5` at index 9, which selects the Power Bob A15 panel.
   user-confirmed device uses this shared command, matching the reachable
   MotoSleep 5.1.5 PanelEight action even though Power Bob 2.0.3 does not render
   that action on its separate Panel Eight.
+- The same user-confirmed Panel Eight hardware exposes its under-bed light as
+  the root `$A` toggle. It does not support the generic Power Bob RGB settings,
+  so Home Assistant keeps the toggle button and does not expose RGB controls.
 - Unmatched Power Bob selectors and malformed MOTO names receive no speculative
   controls. Legacy manual configurations without a usable advertised name keep
   a conservative two-axis fallback; current long HHC names retain the app's
@@ -138,10 +141,12 @@ Power Bob places selector before value; MotoSleep places value before selector.
 Both XOR the decimal digits and append a five-digit decimal checksum plus
 `R\r`.
 
-Power Bob RGB settings are independent of the selected root motor panel.
-Advertised-name character 10 selects the Mood configuration when it is `D` and
-the Night configuration otherwise, so even minimal one-motor panels retain RGB
-settings when their root controls do not include the raw `$A` light toggle.
+The Power Bob app's RGB settings route is independent of the selected root
+motor panel. Advertised-name character 10 selects the Mood configuration when
+it is `D` and the Night configuration otherwise. Reachability in the generic
+settings UI does not by itself prove the connected hardware implements those
+numeric commands: the user-confirmed Panel Eight compatibility profile supports
+only its root `$A` light toggle.
 
 ## MOTO binary protocol
 

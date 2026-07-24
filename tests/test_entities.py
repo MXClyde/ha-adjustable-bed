@@ -20,6 +20,7 @@ from custom_components.adjustable_bed.const import (
     BED_TYPE_LEGGETT_GEN2,
     BED_TYPE_MALOUF_LEGACY_OKIN,
     BED_TYPE_MALOUF_NEW_OKIN,
+    BED_TYPE_MOTOSLEEP,
     BED_TYPE_OCTO,
     BED_TYPE_OKIN_CST,
     BED_TYPE_OKIN_RF_ECO_BT,
@@ -1677,6 +1678,60 @@ class TestSwitchEntities:
 
 class TestLightEntities:
     """Test light entities."""
+
+    async def test_motosleep_panel_eight_restores_toggle_button(
+        self,
+        hass: HomeAssistant,
+        mock_coordinator_connected,
+        mock_async_ble_device_from_address,
+        enable_custom_integrations,
+    ):
+        """PanelEight should remove its stale RGB light and restore the toggle button."""
+        address = "AA:BB:CC:DD:EE:70"
+        device_name = "HHC0120182CDEH"
+        mock_async_ble_device_from_address.return_value.name = device_name
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="MotoSleep Panel Eight",
+            data={
+                CONF_ADDRESS: address,
+                CONF_NAME: device_name,
+                CONF_BED_TYPE: BED_TYPE_MOTOSLEEP,
+                CONF_PROTOCOL_VARIANT: "auto",
+                CONF_MOTOR_COUNT: 2,
+                CONF_HAS_MASSAGE: False,
+                CONF_DISABLE_ANGLE_SENSING: True,
+                CONF_PREFERRED_ADAPTER: "auto",
+            },
+            unique_id=address,
+            entry_id="motosleep_panel_eight_toggle_light_entry",
+        )
+        entry.add_to_hass(hass)
+
+        from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(hass)
+        registry.async_get_or_create(
+            "light",
+            DOMAIN,
+            f"{address}_under_bed_lights",
+            config_entry=entry,
+            suggested_object_id="motosleep_panel_eight_under_bed_lights",
+        )
+
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        assert coordinator.controller.profile.profile_id == "power_bob_eight"
+        assert (
+            registry.async_get_entity_id("light", DOMAIN, f"{address}_under_bed_lights")
+            is None
+        )
+        assert (
+            registry.async_get_entity_id("button", DOMAIN, f"{address}_toggle_light")
+            is not None
+        )
 
     async def test_richmat_qrrm_light_entity_created_and_toggle_button_removed(
         self,

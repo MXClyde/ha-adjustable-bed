@@ -1,5 +1,6 @@
 {
   "config": {
+    "flow_title": "{name} ({address})",
     "step": {
       "user": {
         "title": "Select Adjustable Bed",
@@ -30,7 +31,7 @@
       },
       "bluetooth_disambiguate": {
         "title": "Select Bed Type",
-        "description": "Multiple bed types use the same Bluetooth identifier as **{name}**.\n\nSelect which type matches your bed:",
+        "description": "Multiple bed types use the same Bluetooth identifier as **{name} ({address})**.\n\nSelect which type matches your bed:",
         "data": {
           "bed_type_choice": "Bed type",
           "show_all_option": "Show all bed types..."
@@ -41,7 +42,7 @@
       },
       "bluetooth_confirm": {
         "title": "Confirm Adjustable Bed",
-        "description": "Do you want to set up {name}?\n{detection_note}\n\n{report_note}",
+        "description": "Do you want to set up {name} ({address})?\n{detection_note}\n\n{report_note}",
         "data": {
           "bed_type": "Bed type",
           "name": "Name",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from bleak.exc import BleakError
@@ -246,7 +246,8 @@ class TestOkinHandlePresets:
         coordinator = AdjustableBedCoordinator(hass, mock_okin_handle_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.preset_flat()
+        with patch("custom_components.adjustable_bed.beds.okin_handle.asyncio.sleep"):
+            await coordinator.controller.preset_flat()
 
         first_call = mock_bleak_client.write_gatt_char.call_args_list[0]
         assert first_call[0][1] == OkinHandleCommands.FLAT
@@ -262,7 +263,8 @@ class TestOkinHandlePresets:
         coordinator = AdjustableBedCoordinator(hass, mock_okin_handle_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.preset_zero_g()
+        with patch("custom_components.adjustable_bed.beds.okin_handle.asyncio.sleep"):
+            await coordinator.controller.preset_zero_g()
 
         first_call = mock_bleak_client.write_gatt_char.call_args_list[0]
         assert first_call[0][1] == OkinHandleCommands.ZERO_G
@@ -278,7 +280,8 @@ class TestOkinHandlePresets:
         coordinator = AdjustableBedCoordinator(hass, mock_okin_handle_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.preset_tv()
+        with patch("custom_components.adjustable_bed.beds.okin_handle.asyncio.sleep"):
+            await coordinator.controller.preset_tv()
 
         first_call = mock_bleak_client.write_gatt_char.call_args_list[0]
         assert first_call[0][1] == OkinHandleCommands.TV
@@ -294,7 +297,8 @@ class TestOkinHandlePresets:
         coordinator = AdjustableBedCoordinator(hass, mock_okin_handle_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.preset_anti_snore()
+        with patch("custom_components.adjustable_bed.beds.okin_handle.asyncio.sleep"):
+            await coordinator.controller.preset_anti_snore()
 
         first_call = mock_bleak_client.write_gatt_char.call_args_list[0]
         assert first_call[0][1] == OkinHandleCommands.QUIET_SLEEP
@@ -319,7 +323,8 @@ class TestOkinHandlePresets:
         coordinator = AdjustableBedCoordinator(hass, mock_okin_handle_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.preset_memory(memory_num)
+        with patch("custom_components.adjustable_bed.beds.okin_handle.asyncio.sleep"):
+            await coordinator.controller.preset_memory(memory_num)
 
         first_call = mock_bleak_client.write_gatt_char.call_args_list[0]
         assert first_call[0][1] == expected_command

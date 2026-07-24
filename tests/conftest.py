@@ -6,10 +6,13 @@ import asyncio
 import binascii
 import contextlib
 import json
+import os
 import struct
+import warnings
 from collections.abc import AsyncGenerator, Callable, Generator
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import psutil
 import pytest
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant
@@ -55,6 +58,32 @@ from custom_components.adjustable_bed.const import (  # noqa: E402
 # Test constants
 TEST_ADDRESS = "AA:BB:CC:DD:EE:FF"
 TEST_NAME = "Test Bed"
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_xdist_auto_num_workers(config: pytest.Config) -> int | None:
+    """Keep automatic local test parallelism laptop-friendly."""
+    if config.option.numprocesses != "auto":
+        return None
+
+    configured_workers = os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS")
+    if configured_workers is not None:
+        try:
+            worker_count = int(configured_workers)
+            if worker_count >= 0:
+                return worker_count
+        except ValueError:
+            pass
+        warnings.warn(
+            "PYTEST_XDIST_AUTO_NUM_WORKERS must be a non-negative integer; "
+            "using the project default.",
+            stacklevel=2,
+        )
+
+    usable_workers = os.process_cpu_count() or 1
+    physical_workers = psutil.cpu_count(logical=False) or usable_workers
+    detected_workers = min(physical_workers, usable_workers)
+    return min(detected_workers, 4)
 
 
 @pytest.fixture(autouse=True)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
@@ -545,7 +545,8 @@ class TestLeggettMovement:
         coordinator = AdjustableBedCoordinator(hass, mock_leggett_gen2_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.move_head_up()
+        with patch("custom_components.adjustable_bed.beds.leggett_gen2.asyncio.sleep"):
+            await coordinator.controller.move_head_up()
 
         # _move_with_stop sends the head-up command then the per-actuator stop
         assert mock_bleak_client.write_gatt_char.called
@@ -605,7 +606,8 @@ class TestLeggettPresets:
         await coordinator.async_connect()
         mock_bleak_client.write_gatt_char.reset_mock()  # ignore the GET STATE on connect
 
-        await coordinator.controller.preset_flat()
+        with patch("custom_components.adjustable_bed.beds.leggett_gen2.asyncio.sleep"):
+            await coordinator.controller.preset_flat()
 
         first_call = mock_bleak_client.write_gatt_char.call_args_list[0]
         assert first_call[0][1] == LeggettGen2Commands.PRESET_FLAT
@@ -622,7 +624,8 @@ class TestLeggettPresets:
         await coordinator.async_connect()
         mock_bleak_client.write_gatt_char.reset_mock()  # ignore the GET STATE on connect
 
-        await coordinator.controller.preset_anti_snore()
+        with patch("custom_components.adjustable_bed.beds.leggett_gen2.asyncio.sleep"):
+            await coordinator.controller.preset_anti_snore()
 
         first_call = mock_bleak_client.write_gatt_char.call_args_list[0]
         assert first_call[0][1] == LeggettGen2Commands.PRESET_ANTI_SNORE
@@ -650,7 +653,8 @@ class TestLeggettPresets:
         await coordinator.async_connect()
         mock_bleak_client.write_gatt_char.reset_mock()  # ignore the GET STATE on connect
 
-        await coordinator.controller.preset_memory(memory_num)
+        with patch("custom_components.adjustable_bed.beds.leggett_gen2.asyncio.sleep"):
+            await coordinator.controller.preset_memory(memory_num)
 
         first_call = mock_bleak_client.write_gatt_char.call_args_list[0]
         assert first_call[0][1] == expected_command
