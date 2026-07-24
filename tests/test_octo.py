@@ -35,6 +35,7 @@ from custom_components.adjustable_bed.const import (
     CONF_PROTOCOL_VARIANT,
     DOMAIN,
     OCTO_CHAR_UUID,
+    OCTO_STAR2_CHAR_UUID,
     OCTO_VARIANT_STANDARD,
     OCTO_VARIANT_STAR2,
 )
@@ -454,6 +455,53 @@ class TestOctoCommands:
 
         assert calls[0][0][1] == move_packet
         assert calls[-1][0][1] == stop_packet
+
+    async def test_standard_commands_are_recorded_for_support_bundles(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_coordinator_connected,
+    ):
+        """Standard OCTO movement writes should appear in command traces."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        await coordinator.async_connect()
+        coordinator._command_trace.clear()
+
+        controller = cast(OctoController, coordinator.controller)
+        await coordinator.async_execute_controller_command(lambda active: active.move_head_up())
+
+        move_packet = controller._build_packet([0x02, 0x70], [OCTO_MOTOR_HEAD])
+        stop_packet = controller._build_packet([0x02, 0x73])
+        trace = coordinator.command_trace
+
+        assert [entry["payload"]["hex"] for entry in trace] == [
+            move_packet.hex(),
+            stop_packet.hex(),
+        ]
+        assert all(entry["characteristic_uuid"] == OCTO_CHAR_UUID for entry in trace)
+        assert all(entry["write_mode"] == "without_response" for entry in trace)
+        assert all(entry["operation_name"] == "command" for entry in trace)
+
+    async def test_star2_commands_are_recorded_for_support_bundles(
+        self,
+        hass: HomeAssistant,
+        mock_octo_star2_config_entry,
+        mock_coordinator_connected,
+    ):
+        """Star2 movement writes should appear in command traces."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_star2_config_entry)
+        await coordinator.async_connect()
+        coordinator._command_trace.clear()
+
+        controller = cast(OctoStar2Controller, coordinator.controller)
+        await coordinator.async_execute_controller_command(lambda active: active.move_head_up())
+
+        assert len(coordinator.command_trace) == 1
+        trace = coordinator.command_trace[0]
+        assert trace["payload"]["hex"] == controller.CMD_HEAD_UP.hex()
+        assert trace["characteristic_uuid"] == OCTO_STAR2_CHAR_UUID
+        assert trace["write_mode"] == "without_response"
+        assert trace["operation_name"] == "command"
 
     async def test_move_with_stop_sends_stop_on_error(
         self,

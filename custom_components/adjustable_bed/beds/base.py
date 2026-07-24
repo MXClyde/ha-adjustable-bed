@@ -68,6 +68,8 @@ class BedController(ABC):
     - massage_* methods
     """
 
+    _write_with_response: bool = True
+
     def __init__(self, coordinator: AdjustableBedCoordinator) -> None:
         """Initialize the controller.
 
@@ -419,9 +421,9 @@ class BedController(ABC):
         """Write a command to the bed.
 
         Default implementation delegates to _write_gatt_with_retry() using
-        the control_characteristic_uuid. Subclasses with custom write behavior
-        (init sequences, handle-based writes, custom error handling) should
-        override this method.
+        the control_characteristic_uuid and configured GATT response mode.
+        Subclasses with custom write behavior (init sequences, handle-based
+        writes, custom error handling) should override this method.
 
         Args:
             command: The command bytes to send (protocol-specific format)
@@ -442,6 +444,7 @@ class BedController(ABC):
             repeat_count=repeat_count,
             repeat_delay_ms=repeat_delay_ms,
             cancel_event=cancel_event,
+            response=self._write_with_response,
         )
 
     async def start_notify(self, callback: Callable[[str, float], None] | None = None) -> None:
