@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from copy import copy
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -781,6 +782,40 @@ class TestPinValidation:
 class TestBluetoothDiscoveryFlow:
     """Test Bluetooth discovery flow."""
 
+    async def test_bluetooth_discovery_identical_names_include_address(
+        self,
+        hass: HomeAssistant,
+        mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+        enable_custom_integrations,
+    ):
+        """Discovery cards and confirmation distinguish beds with identical names."""
+        raw_addresses = ("aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02")
+        discovered_titles: list[dict[str, str]] = []
+
+        for raw_address in raw_addresses:
+            service_info = copy(mock_bluetooth_service_info)
+            service_info.name = "LP BED CONTROL"
+            service_info.address = raw_address
+
+            result = await hass.config_entries.flow.async_init(
+                DOMAIN,
+                context={"source": SOURCE_BLUETOOTH},
+                data=service_info,
+            )
+
+            address = raw_address.upper()
+            progress = hass.config_entries.flow.async_get(result["flow_id"])
+            title_placeholders = progress["context"]["title_placeholders"]
+            discovered_titles.append(title_placeholders)
+            assert title_placeholders == {
+                "name": "LP BED CONTROL",
+                "address": address,
+            }
+            assert result["description_placeholders"]["name"] == "LP BED CONTROL"
+            assert result["description_placeholders"]["address"] == address
+
+        assert discovered_titles[0] != discovered_titles[1]
+
     async def test_bluetooth_discovery_creates_entry(
         self,
         hass: HomeAssistant,
@@ -1235,6 +1270,8 @@ class TestBluetoothDiscoveryFlow:
         enable_custom_integrations,
     ):
         """Test that ambiguous BLE detection shows disambiguation step."""
+        raw_address = mock_bluetooth_service_info_ambiguous_okin.address.lower()
+        mock_bluetooth_service_info_ambiguous_okin.address = raw_address
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
             context={"source": SOURCE_BLUETOOTH},
@@ -1244,6 +1281,7 @@ class TestBluetoothDiscoveryFlow:
         # Should show disambiguation form instead of confirm
         assert result["type"] == FlowResultType.FORM
         assert result["step_id"] == "bluetooth_disambiguate"
+        assert result["description_placeholders"]["address"] == raw_address.upper()
 
     async def test_bluetooth_discovery_name_only_okin_receiver_shows_disambiguation(
         self,
