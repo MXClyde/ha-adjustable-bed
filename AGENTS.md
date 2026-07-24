@@ -251,6 +251,16 @@ under `custom_components/adjustable_bed/frontend/`.
 
 ## Development
 
+### Running tests
+
+Run the Python test suite with `uv run pytest`. Automatic worker selection
+detects the available CPUs but is capped at four workers; explicit numeric
+overrides remain available.
+Use `uv run pytest -n 0 <test-path>` for focused or debug runs. Agents must not
+run multiple full suites concurrently, since the worker cap applies to each
+pytest process. On a suitably powerful desktop, one full-suite run may override
+the automatic selection explicitly, for example: `uv run pytest -n 8`.
+
 ### Testing in Home Assistant
 
 1. Copy `custom_components/adjustable_bed` to your HA's `config/custom_components/`

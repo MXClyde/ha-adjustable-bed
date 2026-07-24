@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
@@ -140,7 +140,8 @@ class TestReverieMovement:
         coordinator = AdjustableBedCoordinator(hass, mock_reverie_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.move_head_up()
+        with patch("custom_components.adjustable_bed.beds.reverie.asyncio.sleep"):
+            await coordinator.controller.move_head_up()
 
         calls = mock_bleak_client.write_gatt_char.call_args_list
         first_command = calls[0][0][1]
@@ -162,7 +163,8 @@ class TestReverieMovement:
         coordinator = AdjustableBedCoordinator(hass, mock_reverie_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.move_head_down()
+        with patch("custom_components.adjustable_bed.beds.reverie.asyncio.sleep"):
+            await coordinator.controller.move_head_down()
 
         calls = mock_bleak_client.write_gatt_char.call_args_list
         first_command = calls[0][0][1]
@@ -184,7 +186,8 @@ class TestReverieMovement:
         coordinator = AdjustableBedCoordinator(hass, mock_reverie_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.move_legs_up()
+        with patch("custom_components.adjustable_bed.beds.reverie.asyncio.sleep"):
+            await coordinator.controller.move_legs_up()
 
         calls = mock_bleak_client.write_gatt_char.call_args_list
         first_command = calls[0][0][1]

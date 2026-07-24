@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
@@ -418,7 +418,8 @@ class TestLeggettWilinkePresets:
         coordinator = AdjustableBedCoordinator(hass, mock_leggett_wilinke_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.preset_flat()
+        with patch("custom_components.adjustable_bed.beds.leggett_wilinke.asyncio.sleep"):
+            await coordinator.controller.preset_flat()
 
         expected_cmd = coordinator.controller._build_command(LeggettWilinkeCommands.PRESET_FLAT)
         first_call = mock_bleak_client.write_gatt_char.call_args_list[0]
@@ -435,7 +436,8 @@ class TestLeggettWilinkePresets:
         coordinator = AdjustableBedCoordinator(hass, mock_leggett_wilinke_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.preset_zero_g()
+        with patch("custom_components.adjustable_bed.beds.leggett_wilinke.asyncio.sleep"):
+            await coordinator.controller.preset_zero_g()
 
         expected_cmd = coordinator.controller._build_command(LeggettWilinkeCommands.PRESET_ZERO_G)
         first_call = mock_bleak_client.write_gatt_char.call_args_list[0]
@@ -452,7 +454,8 @@ class TestLeggettWilinkePresets:
         coordinator = AdjustableBedCoordinator(hass, mock_leggett_wilinke_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.preset_anti_snore()
+        with patch("custom_components.adjustable_bed.beds.leggett_wilinke.asyncio.sleep"):
+            await coordinator.controller.preset_anti_snore()
 
         expected_cmd = coordinator.controller._build_command(
             LeggettWilinkeCommands.PRESET_ANTI_SNORE
@@ -471,7 +474,8 @@ class TestLeggettWilinkePresets:
         coordinator = AdjustableBedCoordinator(hass, mock_leggett_wilinke_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.preset_tv()
+        with patch("custom_components.adjustable_bed.beds.leggett_wilinke.asyncio.sleep"):
+            await coordinator.controller.preset_tv()
 
         expected_cmd = coordinator.controller._build_command(LeggettWilinkeCommands.PRESET_TV)
         first_call = mock_bleak_client.write_gatt_char.call_args_list[0]
@@ -488,7 +492,8 @@ class TestLeggettWilinkePresets:
         coordinator = AdjustableBedCoordinator(hass, mock_leggett_wilinke_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.preset_lounge()
+        with patch("custom_components.adjustable_bed.beds.leggett_wilinke.asyncio.sleep"):
+            await coordinator.controller.preset_lounge()
 
         expected_cmd = coordinator.controller._build_command(LeggettWilinkeCommands.PRESET_LOUNGE)
         first_call = mock_bleak_client.write_gatt_char.call_args_list[0]
@@ -514,7 +519,8 @@ class TestLeggettWilinkePresets:
         coordinator = AdjustableBedCoordinator(hass, mock_leggett_wilinke_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.preset_memory(memory_num)
+        with patch("custom_components.adjustable_bed.beds.leggett_wilinke.asyncio.sleep"):
+            await coordinator.controller.preset_memory(memory_num)
 
         expected_cmd = coordinator.controller._build_command(expected_value)
         first_call = mock_bleak_client.write_gatt_char.call_args_list[0]
