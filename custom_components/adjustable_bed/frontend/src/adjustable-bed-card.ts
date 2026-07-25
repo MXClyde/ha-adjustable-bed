@@ -672,6 +672,11 @@ export class AdjustableBedCard extends LitElement {
       if (e.repeat || (e.key !== "Enter" && e.key !== " ")) return;
       e.preventDefault();
     } else {
+      // Only the primary button of the primary pointer moves the bed. Without
+      // this a right-click, a stylus barrel button or a secondary touch starts
+      // the bed moving, and pointerdown fires before any click the previous
+      // @click handler would have filtered out.
+      if (e.button !== 0 || !e.isPrimary) return;
       // Keep receiving pointerup even if the finger slides off the button.
       (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
       e.preventDefault();

@@ -248,26 +248,27 @@ class TestLeggettOkinController:
 
         assert controller.write_command.await_count == 2
 
-    async def test_preset_flat_falls_back_on_a_nonpositive_pulse_delay(self):
-        """A stored delay of 0 falls back to the proven cadence, not to 1ms.
+    async def test_preset_flat_floors_an_unsafe_pulse_delay(self):
+        """Flat is a fixed-duration hold, so the cadence has a floor.
 
-        The setup and options flows accept any integer, so the duration maths
-        has to tolerate values the UI should not have allowed. Clamping to 1ms
-        would avoid the ZeroDivisionError but expand the 30s hold into 30,000
-        GATT writes, which would saturate the link or the proxy.
+        The setup and options flows accept any integer. 0 would divide by zero,
+        a negative would collapse the hold to one frame, and a small positive
+        like 1ms would expand the 30s hold into 30,000 sequential writes and
+        saturate the link. All three floor to the proven cadence.
         """
-        coordinator = MagicMock()
-        coordinator.motor_pulse_count = 10
-        coordinator.motor_pulse_delay_ms = 0
-        controller = LeggettOkinController(coordinator)
-        controller.write_command = AsyncMock()
+        for stored_delay in (0, -50, 1):
+            coordinator = MagicMock()
+            coordinator.motor_pulse_count = 10
+            coordinator.motor_pulse_delay_ms = stored_delay
+            controller = LeggettOkinController(coordinator)
+            controller.write_command = AsyncMock()
 
-        await controller.preset_flat()
+            await controller.preset_flat()
 
-        flat_call = controller.write_command.await_args_list[0]
-        assert flat_call.args == (bytes.fromhex("040208000000"),)
-        assert flat_call.kwargs["repeat_delay_ms"] == LEGGETT_OKIN_PULSE_DEFAULTS[1]
-        assert flat_call.kwargs["repeat_count"] == 300
+            flat_call = controller.write_command.await_args_list[0]
+            assert flat_call.args == (bytes.fromhex("040208000000"),)
+            assert flat_call.kwargs["repeat_delay_ms"] == LEGGETT_OKIN_PULSE_DEFAULTS[1]
+            assert flat_call.kwargs["repeat_count"] == 300
 
     async def test_program_memory_aborts_when_the_stage_release_fails(self):
         """The arm-to-slot release is a stage boundary, not best-effort cleanup.

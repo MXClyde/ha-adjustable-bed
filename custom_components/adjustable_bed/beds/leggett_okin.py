@@ -364,13 +364,13 @@ class LeggettOkinController(BedController):
         this streams for roughly the time a full recline takes and then
         releases.
         """
+        # The setup flows accept any integer for the pulse delay, and this hold
+        # is a fixed duration, so a small or nonpositive value would expand it
+        # into tens of thousands of sequential writes and flood the proxy (a
+        # stored 0 would divide by zero outright). Streaming faster than the
+        # protocol's proven cadence buys nothing here, so floor it at that.
         _, pulse_delay_ms = self.motor_pulse_settings()
-        # The setup flows accept any integer here. A stored 0 would divide by
-        # zero and a negative would collapse the hold to a single frame, but
-        # clamping to 1ms would instead saturate the link with 30,000 writes.
-        # Fall back to the cadence the protocol analysis actually proved.
-        if pulse_delay_ms <= 0:
-            pulse_delay_ms = LEGGETT_OKIN_PULSE_DEFAULTS[1]
+        pulse_delay_ms = max(pulse_delay_ms, LEGGETT_OKIN_PULSE_DEFAULTS[1])
         repeat_count = max(1, round(FLAT_HOLD_S * 1000 / pulse_delay_ms))
         try:
             await self.write_command(
