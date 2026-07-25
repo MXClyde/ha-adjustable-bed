@@ -8,7 +8,7 @@ Protocol details:
     Service UUID: 62741523-52f9-8864-b1ab-3b3a8d65950b (shared with Okimat/Nectar)
     Write characteristic: 62741525-52f9-8864-b1ab-3b3a8d65950b
     Command format: 6-byte binary [0x04, 0x02, <4-byte-command-big-endian>]
-    Motor timing: the LP Control app repeats held commands every 200ms
+    Motor timing: held keycodes stream every 100ms, released with four zero frames
     Position feedback: Not supported
     Pairing: Required before first use; handled by coordinator
 
@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 
 from bleak.exc import BleakError
 
-from ..const import LEGGETT_OKIN_CHAR_UUID
+from ..const import LEGGETT_OKIN_CHAR_UUID, LEGGETT_OKIN_PULSE_DEFAULTS
 from .base import BedController
 from .okin_protocol import build_okin_command
 
@@ -262,10 +262,10 @@ class LeggettOkinController(BedController):
             # the movement it had just started. The burst is bounded (~300ms),
             # so wait it out before propagating.
             while not release.done():
-                with contextlib.suppress(asyncio.CancelledError, BleakError):
+                with contextlib.suppress(asyncio.CancelledError, BleakError, ConnectionError):
                     await asyncio.shield(release)
             raise
-        except BleakError:
+        except (BleakError, ConnectionError):
             # The release burst is this protocol's only stop, so a failure can
             # leave the bed still moving. That is worth surfacing, not hiding.
             _LOGGER.warning(
@@ -365,9 +365,12 @@ class LeggettOkinController(BedController):
         releases.
         """
         _, pulse_delay_ms = self.motor_pulse_settings()
-        # The setup flows accept any integer here, so a stored 0 would divide by
-        # zero and a negative would collapse the hold to a single frame.
-        pulse_delay_ms = max(1, pulse_delay_ms)
+        # The setup flows accept any integer here. A stored 0 would divide by
+        # zero and a negative would collapse the hold to a single frame, but
+        # clamping to 1ms would instead saturate the link with 30,000 writes.
+        # Fall back to the cadence the protocol analysis actually proved.
+        if pulse_delay_ms <= 0:
+            pulse_delay_ms = LEGGETT_OKIN_PULSE_DEFAULTS[1]
         repeat_count = max(1, round(FLAT_HOLD_S * 1000 / pulse_delay_ms))
         try:
             await self.write_command(
@@ -402,7 +405,10 @@ class LeggettOkinController(BedController):
         _LOGGER.debug("Arming memory store for slot %d", memory_num)
         try:
             await self._hold_keycode(LeggettOkinCommands.MEMORY_STORE, MEMORY_STORE_HOLD_S)
-            await self._send_release_frames("memory store arm")
+            # This release is a stage boundary, not cleanup: without the zero
+            # frames the box never leaves the arm stage, so continuing to the
+            # slot hold would run an invalid sequence and still report success.
+            await self._send_release_frames("memory store arm", raise_on_error=True)
             await self._hold_keycode(command, MEMORY_SLOT_HOLD_S)
         finally:
             await self._send_release_frames("memory store slot")

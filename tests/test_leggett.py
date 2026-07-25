@@ -30,6 +30,7 @@ from custom_components.adjustable_bed.const import (
     CONF_PROTOCOL_VARIANT,
     DOMAIN,
     LEGGETT_GEN2_WRITE_CHAR_UUID,
+    LEGGETT_OKIN_PULSE_DEFAULTS,
     LEGGETT_VARIANT_GEN2,
     LEGGETT_VARIANT_MLRM,
     LEGGETT_VARIANT_OKIN,
@@ -231,20 +232,29 @@ class TestLeggettOkinController:
             await controller.stop_all()
 
     async def test_cleanup_release_failures_do_not_mask_the_real_error(self):
-        """A failed release burst during cleanup stays logged, not raised."""
-        controller = LeggettOkinController(MagicMock())
-        controller.write_command = AsyncMock(side_effect=BleakError("write failed"))
+        """A failed release burst during cleanup stays logged, not raised.
 
-        # move_head_up's own write fails; the release burst in the finally block
-        # must not replace that with its own exception.
-        with pytest.raises(BleakError, match="write failed"):
+        The two writes raise distinct errors so the assertion actually proves
+        which one propagated: with a shared message it would pass even if the
+        cleanup failure replaced the movement failure.
+        """
+        controller = LeggettOkinController(MagicMock())
+        controller.write_command = AsyncMock(
+            side_effect=[BleakError("movement failed"), BleakError("release failed")]
+        )
+
+        with pytest.raises(BleakError, match="movement failed"):
             await controller.move_head_up()
 
-    async def test_preset_flat_survives_a_nonpositive_pulse_delay(self):
-        """A stored delay of 0 must not turn Flat into a ZeroDivisionError.
+        assert controller.write_command.await_count == 2
 
-        The setup and options flows accept any integer for the delay, so the
-        duration maths has to tolerate values the UI should not have allowed.
+    async def test_preset_flat_falls_back_on_a_nonpositive_pulse_delay(self):
+        """A stored delay of 0 falls back to the proven cadence, not to 1ms.
+
+        The setup and options flows accept any integer, so the duration maths
+        has to tolerate values the UI should not have allowed. Clamping to 1ms
+        would avoid the ZeroDivisionError but expand the 30s hold into 30,000
+        GATT writes, which would saturate the link or the proxy.
         """
         coordinator = MagicMock()
         coordinator.motor_pulse_count = 10
@@ -256,7 +266,28 @@ class TestLeggettOkinController:
 
         flat_call = controller.write_command.await_args_list[0]
         assert flat_call.args == (bytes.fromhex("040208000000"),)
-        assert flat_call.kwargs["repeat_count"] >= 1
+        assert flat_call.kwargs["repeat_delay_ms"] == LEGGETT_OKIN_PULSE_DEFAULTS[1]
+        assert flat_call.kwargs["repeat_count"] == 300
+
+    async def test_program_memory_aborts_when_the_stage_release_fails(self):
+        """The arm-to-slot release is a stage boundary, not best-effort cleanup.
+
+        Without those zero frames the control box never leaves the arm stage, so
+        continuing to the slot hold would run an invalid programming sequence
+        while the service still reported success.
+        """
+        controller = LeggettOkinController(MagicMock())
+        # Stage 1 (arm hold) succeeds; the release burst that ends it fails.
+        controller.write_command = AsyncMock(
+            side_effect=[None, BleakError("release failed"), None]
+        )
+
+        with pytest.raises(BleakError, match="release failed"):
+            await controller.program_memory(2)
+
+        # The slot keycode must never have been sent.
+        sent = [call.args[0] for call in controller.write_command.await_args_list]
+        assert bytes.fromhex("040200002000") not in sent
 
     async def test_massage_timer_step_is_not_exposed(self):
         """0x200 is a constant the app never builds or writes, so it is not a command."""

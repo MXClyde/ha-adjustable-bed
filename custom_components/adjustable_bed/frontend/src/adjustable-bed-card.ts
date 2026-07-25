@@ -241,7 +241,7 @@ export class AdjustableBedCard extends LitElement {
       }
       ${
         bed.stop
-          ? html`<button class="stop-all" @click=${() => this._press(bed.stop!)}>
+          ? html`<button class="stop-all" @click=${() => this._stopAll()}>
               <ha-icon icon="mdi:stop"></ha-icon>
               <span>${this._name(bed.stop)}</span>
             </button>`
@@ -279,6 +279,7 @@ export class AdjustableBedCard extends LitElement {
             @keydown=${(e: KeyboardEvent) => this._startHold(e, m, "up")}
             @keyup=${(e: KeyboardEvent) => this._endKeyHold(e, m)}
             @blur=${() => this._endHold(m)}
+            @click=${(e: MouseEvent) => this._activateWithoutPointer(e, m, "up")}
             ?disabled=${!upId}
           >
             <ha-icon icon="mdi:chevron-up"></ha-icon>
@@ -300,6 +301,7 @@ export class AdjustableBedCard extends LitElement {
             @keydown=${(e: KeyboardEvent) => this._startHold(e, m, "down")}
             @keyup=${(e: KeyboardEvent) => this._endKeyHold(e, m)}
             @blur=${() => this._endHold(m)}
+            @click=${(e: MouseEvent) => this._activateWithoutPointer(e, m, "down")}
             ?disabled=${!downId}
           >
             <ha-icon icon="mdi:chevron-down"></ha-icon>
@@ -718,6 +720,30 @@ export class AdjustableBedCard extends LitElement {
     }
   }
 
+  // Screen readers, voice control and switch devices activate a native button
+  // by dispatching a click alone, with no pointer or key events, so the hold
+  // handlers never fire and the bed would not move at all. Such clicks report
+  // detail === 0; real pointer clicks report the click count, and keyboard
+  // activation is already preventDefault()ed in _startHold so it never gets
+  // here. One press is the right response: there is no hold to track.
+  private _activateWithoutPointer(
+    e: MouseEvent,
+    m: MotorEntity,
+    dir: "up" | "down",
+  ): void {
+    if (e.detail !== 0 || this._heldMotorKey !== null) return;
+    void this._pulseOnce(m, dir);
+  }
+
+  private async _pulseOnce(m: MotorEntity, dir: "up" | "down"): Promise<void> {
+    if (m.cover) {
+      this._cover(m.cover, dir === "up" ? "open_cover" : "close_cover");
+      return;
+    }
+    const id = dir === "up" ? m.up : m.down;
+    if (id) this._press(id);
+  }
+
   private _endKeyHold(e: KeyboardEvent, m: MotorEntity): void {
     if (e.key !== "Enter" && e.key !== " ") return;
     this._endHold(m);
@@ -741,6 +767,16 @@ export class AdjustableBedCard extends LitElement {
     // ends its own burst, and the controllers already send the protocol's STOP
     // frame when it finishes, so an extra stop-all here would only add churn.
     if (m.cover) this._cover(m.cover, "stop_cover");
+  }
+
+  // Global stop. Cancelling the hold first matters: otherwise the in-flight
+  // pulse resolves after the stop lands and the loop issues another press, so
+  // the bed starts moving again right after the user asked it to stop.
+  private _stopAll(): void {
+    this._heldMotorKey = null;
+    this._heldCover = null;
+    this._holdGeneration++;
+    if (this._bed?.stop) this._press(this._bed.stop);
   }
 
   private _motorStop(m: MotorEntity): void {
