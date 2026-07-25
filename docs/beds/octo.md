@@ -24,6 +24,22 @@ separate TV Lift device.
 
 Some Octo beds require a 4-digit PIN to maintain the Bluetooth connection. Without the PIN, the bed will disconnect after ~30 seconds.
 
+### Symptom: lights work but the motors never move
+
+A PIN-locked receiver does **not** reject the connection. It connects, answers
+the capability query, and switches the under-bed light, but it silently drops
+every motor packet. So a locked receiver with no PIN configured looks like a
+working integration whose Back/Legs buttons do nothing.
+
+The integration raises a repair notification when capability discovery reports
+`CAP_PIN` locked while no PIN is configured. Enter the PIN in the integration
+options to fix it. Receivers reset to factory defaults commonly use `0000`.
+
+If a support bundle is needed, `controller.protocol_state` in the bundle records
+what discovery resolved: `has_pin`, `pin_locked`, `pin_configured`, `pin_sent`,
+and whether `feature_discovery_complete` was reached at all. The PIN value is
+never included.
+
 ### How to Configure Your PIN
 
 **During initial setup:** If your bed is detected as Octo, you'll see an "Octo PIN" field in the setup wizard.

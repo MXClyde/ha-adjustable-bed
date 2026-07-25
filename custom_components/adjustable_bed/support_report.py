@@ -230,6 +230,12 @@ def _get_controller_info(coordinator: AdjustableBedCoordinator) -> dict[str, Any
         if char_uuid is not None:
             info["char_uuid"] = char_uuid
 
+        # Whatever the connect-time protocol handshake resolved to (capabilities,
+        # authentication state, ...). Empty for controllers with no handshake.
+        protocol_state = controller.protocol_diagnostics
+        if protocol_state:
+            info["protocol_state"] = protocol_state
+
     return info
 
 

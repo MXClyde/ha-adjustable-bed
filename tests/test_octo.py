@@ -1127,3 +1127,178 @@ class TestOctoRGBWILightEntity:
             response=False,
         )
         assert light.is_on is False
+
+
+class TestOctoPinLockDiagnostics:
+    """A PIN-locked receiver accepts lights but ignores motors - say so."""
+
+    def test_protocol_diagnostics_reports_discovery_state_without_leaking_pin(self):
+        """The bundle needs the resolved capabilities, never the PIN itself."""
+        coordinator = MagicMock()
+        coordinator.address = "AA:BB:CC:DD:EE:FF"
+        coordinator.client = None
+        controller = OctoController(coordinator, pin="1234")
+
+        controller._has_pin = True
+        controller._pin_locked = True
+        controller._has_lights = True
+        controller._memory_count = 2
+        controller._discovered_motor_count = 2
+        controller._features_complete.set()
+
+        state = controller.protocol_diagnostics
+
+        assert state["feature_discovery_complete"] is True
+        assert state["has_pin"] is True
+        assert state["pin_locked"] is True
+        assert state["pin_configured"] is True
+        assert state["pin_sent"] is False
+        assert state["memory_count"] == 2
+        assert state["discovered_motor_count"] == 2
+        assert "1234" not in str(state)
+
+    def test_protocol_diagnostics_distinguishes_undiscovered_features(self):
+        """None means the capability was never reported, not that it is absent."""
+        coordinator = MagicMock()
+        coordinator.address = "AA:BB:CC:DD:EE:FF"
+        coordinator.client = None
+        controller = OctoController(coordinator)
+
+        state = controller.protocol_diagnostics
+
+        assert state["feature_discovery_complete"] is False
+        assert state["has_pin"] is None
+        assert state["has_lights"] is None
+        assert state["pin_configured"] is False
+
+    @pytest.mark.parametrize(
+        ("has_pin", "pin_locked", "pin", "expected"),
+        [
+            (True, True, "", True),
+            (True, True, "1234", False),
+            (True, False, "", False),
+            (False, False, "", False),
+            (None, None, "", False),
+        ],
+    )
+    def test_pin_locked_without_pin(
+        self, has_pin: bool | None, pin_locked: bool | None, pin: str, expected: bool
+    ):
+        """Only a discovered lock with no configured PIN counts as the bad state."""
+        coordinator = MagicMock()
+        coordinator.address = "AA:BB:CC:DD:EE:FF"
+        coordinator.client = None
+        controller = OctoController(coordinator, pin=pin)
+        controller._has_pin = has_pin
+        controller._pin_locked = pin_locked
+
+        assert controller.pin_locked_without_pin is expected
+
+    async def test_connect_raises_and_clears_pin_required_repair(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry_data: dict,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        _shorten_mocked_feature_timeout: None,
+    ):
+        """Connecting to a locked receiver with no PIN must be user-visible."""
+        from homeassistant.helpers import issue_registry as ir
+
+        data = dict(mock_octo_config_entry_data)
+        data[CONF_OCTO_PIN] = ""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Octo Test Bed",
+            data=data,
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id="octo_pin_lock_entry",
+        )
+        entry.add_to_hass(hass)
+
+        locked = True
+
+        async def _fake_discovery(controller: OctoController) -> bool:
+            controller._has_pin = True
+            controller._pin_locked = locked
+            return True
+
+        issue_id = "octo_pin_required_aa_bb_cc_dd_ee_ff"
+        registry = ir.async_get(hass)
+
+        with patch.object(
+            OctoController, "discover_features", autospec=True, side_effect=_fake_discovery
+        ):
+            coordinator = AdjustableBedCoordinator(hass, entry)
+            await coordinator.async_connect()
+            assert registry.async_get_issue(DOMAIN, issue_id) is not None
+
+            # Unlocking the receiver on a later connection clears the repair.
+            locked = False
+            await coordinator.async_disconnect()
+            await coordinator.async_connect()
+
+        assert registry.async_get_issue(DOMAIN, issue_id) is None
+
+    def test_support_bundle_controller_section_carries_protocol_state(self):
+        """The bundle is the only evidence we get, so it must record the handshake."""
+        from custom_components.adjustable_bed.support_report import _get_controller_info
+
+        coordinator = MagicMock()
+        coordinator.address = "AA:BB:CC:DD:EE:FF"
+        coordinator.client = None
+        controller = OctoController(coordinator, pin="")
+        controller._has_pin = True
+        controller._pin_locked = True
+        coordinator.controller = controller
+
+        info = _get_controller_info(coordinator)
+
+        assert info["protocol_state"]["pin_locked_without_pin"] is True
+
+    async def test_discovery_timeout_leaves_pin_state_unknown(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_coordinator_connected,
+        _shorten_mocked_feature_timeout: None,
+    ):
+        """A timeout must not report a configured-PIN guess as device state."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+
+        # The mocked client never notifies, so connect-time discovery timed out.
+        state = controller.protocol_diagnostics
+        assert state["feature_discovery_complete"] is False
+        assert state["has_pin"] is None
+        assert state["pin_locked"] is None
+        # requires_pin still falls back to the configured PIN.
+        assert controller.requires_pin is True
+
+    async def test_send_pin_is_not_suppressed_by_a_pending_stop(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """Authentication must survive a pending cancel, or the bed stays locked."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        await coordinator.async_connect()
+
+        controller = cast(OctoController, coordinator.controller)
+        controller._has_pin = True
+        controller._pin_locked = True
+        coordinator.cancel_command.set()
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await controller.send_pin()
+
+        expected_packet = controller._build_packet([0x20, 0x43], [1, 2, 3, 4])
+        mock_bleak_client.write_gatt_char.assert_called_once_with(
+            OCTO_CHAR_UUID,
+            expected_packet,
+            response=False,
+        )
+        assert controller.protocol_diagnostics["pin_sent"] is True

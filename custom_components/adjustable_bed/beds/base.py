@@ -1030,6 +1030,17 @@ class BedController(ABC):
         return False
 
     @property
+    def protocol_diagnostics(self) -> dict[str, Any]:
+        """Return protocol state worth reporting in diagnostics/support bundles.
+
+        Controllers that negotiate capabilities, authentication, or variants at
+        connect time should override this so a support bundle records what the
+        handshake actually resolved to. Never include secrets such as PINs -
+        report whether one is configured, not its value.
+        """
+        return {}
+
+    @property
     def allow_position_polling_during_commands(self) -> bool:
         """Return True if movement-time position polling is safe for this protocol.
 

@@ -872,6 +872,10 @@
           "pairing_failed": "Pairing didn't complete. Put the bed back into pairing mode (OKIN bases: unplug the control box ~30s, then plug it back in; Leggett & Platt Smart Bed: unplug the bed and remove the power-supply batteries, then plug it back in and wait for the chime and pulsing blue light; other beds: hold the pairing button), make sure it is in range of your Home Assistant adapter or an ESPHome proxy on 2024.3.0+, then run this repair again."
         }
       }
+    },
+    "octo_pin_required": {
+      "title": "PIN required for {name}",
+      "description": "**{name}** ({address}) is an Octo receiver with its PIN lock enabled, and no PIN is configured in Home Assistant.\n\nA locked receiver still connects and still switches the under-bed light, but it silently ignores every motor command, so Back/Legs and the presets do nothing.\n\nOpen the OCTO Smart Control app (or your bed brand's version of it) to look up the receiver's 4-digit PIN, then enter it under **Settings → Devices & services → Adjustable Bed → Configure → Octo PIN**. Receivers that were reset to factory defaults commonly use `0000`."
     }
   }
 }

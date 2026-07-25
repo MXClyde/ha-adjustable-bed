@@ -222,3 +222,52 @@ async def create_pairing_required_issue(
 async def delete_pairing_required_issue(hass: HomeAssistant, address: str) -> None:
     """Remove the pairing-required Repairs issue once the bed is bonded."""
     async_delete_issue(hass, DOMAIN, _pairing_required_issue_id(address))
+
+
+def _octo_pin_required_issue_id(address: str) -> str:
+    """Return the stable Repairs issue id for a PIN-locked Octo receiver."""
+    return f"octo_pin_required_{address.replace(':', '_').lower()}"
+
+
+def update_octo_pin_required_issue(
+    hass: HomeAssistant,
+    address: str,
+    name: str,
+    pin_locked_without_pin: bool,
+) -> None:
+    """Raise or clear the "Octo receiver is PIN locked" Repairs issue.
+
+    A locked receiver still connects, still reports its capabilities, and still
+    switches its under-bed light, but it silently drops every motor packet. That
+    is indistinguishable from a broken protocol implementation unless we say so,
+    and the fix (enter the PIN in the options flow) is not discoverable.
+    """
+    issue_id = _octo_pin_required_issue_id(address)
+
+    if not pin_locked_without_pin:
+        async_delete_issue(hass, DOMAIN, issue_id)
+        return
+
+    async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id,
+        is_fixable=False,
+        is_persistent=True,
+        severity=IssueSeverity.WARNING,
+        translation_key="octo_pin_required",
+        translation_placeholders={
+            "name": name,
+            "address": address,
+        },
+        learn_more_url=(
+            "https://github.com/kristofferR/ha-adjustable-bed/blob/master/docs/beds/octo.md"
+            "#pin-configuration"
+        ),
+    )
+
+    _LOGGER.debug(
+        "Created Repairs issue for PIN-locked Octo receiver: %s (%s)",
+        name,
+        address,
+    )

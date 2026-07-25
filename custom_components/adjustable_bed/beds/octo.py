@@ -20,7 +20,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.exc import BleakError
@@ -115,6 +115,7 @@ class OctoController(BedController):
         self._features_complete: asyncio.Event = (
             asyncio.Event()
         )  # Set when 0xFFFFFF sentinel received
+        self._pin_sent: bool = False  # True once a PIN packet was written this session
 
         _LOGGER.debug(
             "OctoController initialized (PIN %s)",
@@ -504,6 +505,44 @@ class OctoController(BedController):
         return bool(self._pin)
 
     @property
+    def pin_locked_without_pin(self) -> bool:
+        """Return True if the bed is PIN locked but no PIN is configured.
+
+        A locked Octo receiver silently ignores motor packets while still
+        accepting light and capability packets, so this state looks like a bed
+        that connects fine but never moves. Only reported once capability
+        discovery has actually resolved CAP_PIN.
+        """
+        return bool(self._has_pin) and bool(self._pin_locked) and not self._pin
+
+    @property
+    def protocol_diagnostics(self) -> dict[str, Any]:
+        """Report what connect-time capability discovery resolved to.
+
+        ``None`` means the capability was never reported. When
+        ``feature_discovery_complete`` is False, discovery timed out and the
+        non-None booleans are the fallback defaults from ``discover_features()``
+        rather than device-reported state. The configured PIN is never included.
+        """
+        return {
+            "feature_discovery_complete": self._features_complete.is_set(),
+            "has_pin": self._has_pin,
+            "pin_locked": self._pin_locked,
+            "pin_configured": bool(self._pin),
+            "pin_sent": self._pin_sent,
+            "pin_locked_without_pin": self.pin_locked_without_pin,
+            "has_lights": self._has_lights,
+            "has_rgbwi": self._has_rgbwi,
+            "memory_count": self._memory_count,
+            "discovered_motor_count": self._discovered_motor_count,
+            "has_synchro": self._has_synchro,
+            "synchro_active": self._synchro_active,
+            "keepalive_running": (
+                self._keepalive_task is not None and not self._keepalive_task.done()
+            ),
+        }
+
+    @property
     def _is_one_motor_lift(self) -> bool:
         """Return whether this controller represents an OCTO one-motor lift."""
         return self._coordinator.motor_count == 1
@@ -693,6 +732,7 @@ class OctoController(BedController):
         self._memory_count = None
         self._discovered_motor_count = None
         self._has_synchro = None
+        self._pin_sent = False
 
         _LOGGER.debug("Requesting bed features...")
 
@@ -727,6 +767,14 @@ class OctoController(BedController):
                     self._has_synchro,
                 )
 
+                if self.pin_locked_without_pin:
+                    _LOGGER.warning(
+                        "Octo bed is PIN locked but no PIN is configured. The bed will "
+                        "accept the under-bed light and stay connected, but it silently "
+                        "ignores every motor command. Enter the receiver's 4-digit OCTO "
+                        "app PIN in the integration options to enable movement"
+                    )
+
                 # Query current drivemode if synchro is supported
                 if self._has_synchro:
                     await self._query_drivemode()
@@ -734,9 +782,11 @@ class OctoController(BedController):
                 return True
             except TimeoutError:
                 _LOGGER.debug("Feature discovery timed out - bed may not support feature query")
-                # Set defaults for beds that don't respond to feature query
-                self._has_pin = bool(self._pin)  # Assume PIN needed if configured
-                self._pin_locked = bool(self._pin)
+                # Set defaults for beds that don't respond to feature query.
+                # _has_pin/_pin_locked deliberately stay None: requires_pin already
+                # falls back to "PIN needed if one is configured" for the unknown
+                # case, so writing that guess here would only make the support
+                # bundle report a guess as a device-reported capability.
                 self._has_lights = True  # Assume lights exist for backward compatibility
                 self._memory_count = 0  # Assume no memory support if not reported
                 self._has_synchro = False  # Assume no synchro if not reported
@@ -1107,7 +1157,18 @@ class OctoController(BedController):
             await self._write_octo_command(
                 command=[0x20, 0x43],
                 data=pin_data,
+                # Authentication is not a cancellable user command. The write
+                # helper returns without writing when the coordinator's cancel
+                # event is already set, and that event stays set after a stop
+                # until the next prepared operation clears it - so a stop
+                # followed by an auto-reconnect would silently skip the PIN,
+                # leaving the bed locked and dropping the link ~30s later.
+                # Serialization is unaffected: the keep-alive path already runs
+                # under async_execute_controller_command, and the connect-time
+                # call runs inside the connection lock. A PIN frame moves nothing.
+                cancel_event=asyncio.Event(),
             )
+            self._pin_sent = True
             _LOGGER.debug("PIN authentication sent successfully")
         except (ValueError, BleakError) as err:
             _LOGGER.warning("Failed to send PIN: %s", err)

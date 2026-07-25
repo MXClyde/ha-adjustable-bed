@@ -156,6 +156,7 @@ from .diagnostic_payloads import new_connection_attempt_details
 from .unsupported import (
     create_pairing_required_issue,
     delete_pairing_required_issue,
+    update_octo_pin_required_issue,
 )
 
 if TYPE_CHECKING:
@@ -2147,6 +2148,15 @@ class AdjustableBedCoordinator:
                     if hasattr(self._controller, "send_pin"):
                         await cast(Any, self._controller).send_pin()
                         await cast(Any, self._controller).start_keepalive()
+                    # A PIN-locked receiver accepts lights but ignores motors, so
+                    # surface the missing PIN instead of looking simply broken.
+                    if hasattr(self._controller, "pin_locked_without_pin"):
+                        update_octo_pin_required_issue(
+                            self.hass,
+                            self._address,
+                            self._name,
+                            cast(Any, self._controller).pin_locked_without_pin,
+                        )
 
                 # Beds with connect-time feature discovery/state hydration.
                 if self._bed_type in {BED_TYPE_JENSEN, BED_TYPE_SLEEP_NUMBER} and hasattr(
