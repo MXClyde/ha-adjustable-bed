@@ -237,9 +237,9 @@ def update_octo_pin_required_issue(
 ) -> None:
     """Raise or clear the "Octo receiver is PIN locked" Repairs issue.
 
-    A locked receiver still connects, still reports its capabilities, and still
-    switches its under-bed light, but it silently drops every motor packet. That
-    is indistinguishable from a broken protocol implementation unless we say so,
+    A locked receiver still connects and still reports its capabilities, but
+    will not act on commands until it is authenticated. That is
+    indistinguishable from a broken protocol implementation unless we say so,
     and the fix (enter the PIN in the options flow) is not discoverable.
 
     ``None`` means capability discovery did not resolve the lock state, and the
@@ -261,10 +261,10 @@ def update_octo_pin_required_issue(
     # flag would not.
     if async_get_issue_registry(hass).async_get_issue(DOMAIN, issue_id) is None:
         _LOGGER.warning(
-            "Octo bed %s (%s) is PIN locked but no PIN is configured. The bed will "
-            "accept the under-bed light and stay connected, but it silently ignores "
-            "every motor command. Enter the receiver's 4-digit OCTO app PIN in the "
-            "integration options to enable movement",
+            "Octo bed %s (%s) reports its PIN lock engaged but no PIN is configured. "
+            "The bed stays connected and reports its capabilities, but will not act on "
+            "commands until it is authenticated. Enter the receiver's 4-digit OCTO app "
+            "PIN in the integration options",
             name,
             address,
         )

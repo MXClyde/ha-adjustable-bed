@@ -24,16 +24,24 @@ separate TV Lift device.
 
 Some Octo beds require a 4-digit PIN to maintain the Bluetooth connection. Without the PIN, the bed will disconnect after ~30 seconds.
 
-### Symptom: lights work but the motors never move
+### Symptom: the bed connects but nothing moves
 
-A PIN-locked receiver does **not** reject the connection. It connects, answers
-the capability query, and switches the under-bed light, but it silently drops
-every motor packet. So a locked receiver with no PIN configured looks like a
-working integration whose Back/Legs buttons do nothing.
+A PIN-locked receiver does **not** reject the connection. It connects and
+answers the capability query, but will not act on commands until it is
+authenticated, so a locked receiver with no PIN configured looks like a working
+integration whose controls do nothing.
+
+The official app hides *every* control while locked (motors, light and presets
+alike), so the app itself does not distinguish between them. Users have reported
+the under-bed light still responding while the motors do not, which is how this
+usually presents in the field, but that asymmetry is a field observation and is
+not established by the app.
 
 The integration raises a repair notification when capability discovery reports
-`CAP_PIN` locked while no PIN is configured. Enter the PIN in the integration
-options to fix it. Receivers reset to factory defaults commonly use `0000`.
+`CAP_BLE_PIN` locked while no PIN is configured. Enter the PIN in the
+integration options to fix it. There is no documented factory-default PIN;
+some users report `0000` on receivers that were never given one, and the app
+links to `https://octo-customer.com/pinlost/` for recovery.
 
 If a support bundle is needed, `controller.protocol_state` in the bundle records
 what discovery resolved: `has_pin`, `pin_locked`, `pin_configured`, `pin_sent`,
@@ -192,7 +200,7 @@ The integration queries capabilities via `[0x20, 0x71]`. Known feature IDs:
 |------------|------|-------|
 | `0x000001` | CAP_MOTORCOUNT | Motor count reported by the device (1-4; Standard OCTO supports 1-4) |
 | `0x000002` | CAP_MEMCOUNT | Memory preset count |
-| `0x000003` | CAP_PIN | PIN requirement + lock state |
+| `0x000003` | CAP_BLE_PIN | PIN state + lock state (see below) |
 | `0x000101` | CAP_SYNCHRO | Synchro/linked mode support |
 | `0x000102` | CAP_LIGHT | Under-bed light support (on/off) |
 | `0x000104` | CAP_LIGHT_RGBWI | RGB + White + Intensity light control |
@@ -209,6 +217,28 @@ Colors are set via `SYSTEM_SET_CAPS` packets targeting feature ID `0x000104`, wi
 | Set RGBWI | `[0x20, 0x73]` | `[valueType, 0x00, 0x01, 0x04, R, G, B, W, 0xFF]` | Set light color (R/G/B/W channels + full intensity) |
 
 #### PIN Authentication
+
+`CAP_BLE_PIN` (`0x000003`) carries three separate flags. Per a clean-room
+analysis of OCTO Smart Control 1.03.01 (versionCode 10301):
+
+| Field | Meaning |
+|-------|---------|
+| `characteristic[0]` | The device has the PIN feature at all |
+| `value[0]` | A PIN is set on the device |
+| `value[1]` | `0x01` unlocked, anything else locked |
+
+The PIN digits are sent as **raw integers 0-9, one byte per digit** (not ASCII
+and not BCD), four digits, as `[0x20, 0x43]` + the four bytes.
+
+The app re-authenticates on an event, not on a timer: the device pushes a
+`0x44` LOCK notification and the app answers by re-sending the stored PIN. A
+`0x43` STATE response with `data[0] != 1` means the PIN was rejected. The
+integration currently re-sends the PIN on a 25-second timer instead, which
+covers the same ground more bluntly; handling the `0x44` push and surfacing a
+rejected PIN are open improvements.
+
+The PIN feature does not exist in OCTO Smart Control 1.1.57 (versionCode
+10157); it was added by versionCode 10301.
 
 Some Octo beds require PIN authentication to control the bed. The integration automatically:
 1. Detects if the bed requires PIN via feature discovery (`command=[0x20, 0x71]`)

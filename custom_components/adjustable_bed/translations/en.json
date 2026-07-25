@@ -875,7 +875,7 @@
     },
     "octo_pin_required": {
       "title": "PIN required for {name}",
-      "description": "**{name}** ({address}) is an Octo receiver with its PIN lock enabled, and no PIN is configured in Home Assistant.\n\nA locked receiver still connects and still switches the under-bed light, but it silently ignores every motor command, so Back/Legs and the presets do nothing.\n\nOpen the OCTO Smart Control app (or your bed brand's version of it) to look up the receiver's 4-digit PIN, then enter it under **Settings → Devices & services → Adjustable Bed → Configure → Octo PIN**. Receivers that were reset to factory defaults commonly use `0000`."
+      "description": "**{name}** ({address}) is an Octo receiver whose PIN lock is engaged, and no PIN is configured in Home Assistant.\n\nA locked receiver still connects and still reports its capabilities, but it will not act on commands until it is authenticated, so the controls appear to work while the bed does nothing.\n\nOpen the OCTO Smart Control app (or your bed brand's version of it) to look up the receiver's 4-digit PIN, then enter it under **Settings → Devices & services → Adjustable Bed → Configure → Octo PIN**. If you have lost the PIN, the app links to `https://octo-customer.com/pinlost/` for recovery. Some users report `0000` working on receivers that were never given a PIN."
     }
   }
 }

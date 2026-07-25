@@ -378,8 +378,13 @@ class OctoController(BedController):
                     self._coordinator.motor_count,
                 )
         elif feature_id == OCTO_FEATURE_PIN:
-            # value[0] = hasPin (0x01 if bed has PIN feature)
-            # value[1] = pinLock (0x01 if unlocked, other if locked)
+            # CAP_BLE_PIN. Per clean-room analysis of OCTO Smart Control 1.03.01
+            # (versionCode 10301) the record is:
+            #   characteristic[0] = the device has the PIN feature (not parsed
+            #                       here; _extract_feature_value_pair skips it)
+            #   value[0]          = a PIN is set on the device
+            #   value[1]          = 0x01 unlocked, anything else locked
+            # So _has_pin is really "a PIN is set", which is what gates us.
             self._has_pin = len(value) > 0 and value[0] == 0x01
             self._pin_locked = len(value) > 1 and value[1] != 0x01
             _LOGGER.info(
@@ -508,9 +513,13 @@ class OctoController(BedController):
     def pin_locked_without_pin(self) -> bool | None:
         """Return whether the bed is PIN locked with no PIN configured.
 
-        A locked Octo receiver silently ignores motor packets while still
-        accepting light and capability packets, so this state looks like a bed
-        that connects fine but never moves.
+        A locked receiver still connects and still answers the capability
+        query, but will not act on commands until it is authenticated, so this
+        looks like a bed that connects fine and then does nothing. The official
+        app hides every control (motors, light and presets alike) while locked.
+        Users report the light still responding while the motors do not, which
+        is how this usually presents in practice, but that asymmetry is a field
+        observation rather than something the app establishes.
 
         Returns None when capability discovery has not resolved CAP_PIN. That
         is deliberately distinct from False: a transient discovery timeout must

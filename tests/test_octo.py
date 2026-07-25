@@ -1320,13 +1320,13 @@ class TestOctoPinLockDiagnostics:
         for _ in range(3):
             update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
 
-        assert caplog.text.count("is PIN locked but no PIN is configured") == 1
+        assert caplog.text.count("reports its PIN lock engaged") == 1
 
         # Resolving and re-entering the state warns again - that is a real change.
         update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", False)
         update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
 
-        assert caplog.text.count("is PIN locked but no PIN is configured") == 2
+        assert caplog.text.count("reports its PIN lock engaged") == 2
 
     async def test_saving_a_pin_clears_the_repair_without_reconnecting(
         self,
