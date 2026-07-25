@@ -1401,3 +1401,34 @@ class TestOctoPinLockDiagnostics:
         update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", None)
 
         assert registry.async_get_issue(DOMAIN, issue_id) is not None
+
+    async def test_star2_variant_clears_a_stale_standard_octo_repair(
+        self,
+        hass: HomeAssistant,
+        mock_octo_star2_config_entry_data: dict,
+    ):
+        """Star2 has no PIN, and its controller could never clear the issue."""
+        from homeassistant.helpers import issue_registry as ir
+
+        from custom_components.adjustable_bed import _async_clear_stale_octo_pin_issue
+        from custom_components.adjustable_bed.unsupported import (
+            update_octo_pin_required_issue,
+        )
+
+        issue_id = "octo_pin_required_aa_bb_cc_dd_ee_ff"
+        registry = ir.async_get(hass)
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
+        assert registry.async_get_issue(DOMAIN, issue_id) is not None
+
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Octo Star2",
+            data=mock_octo_star2_config_entry_data,
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id="octo_star2_stale_entry",
+        )
+        entry.add_to_hass(hass)
+
+        _async_clear_stale_octo_pin_issue(hass, entry)
+
+        assert registry.async_get_issue(DOMAIN, issue_id) is None

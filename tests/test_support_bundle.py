@@ -1406,7 +1406,10 @@ class TestSupportBundleLoggingWarning:
         assert evidence["log_capture_status"] == "unavailable"
         assert evidence["log_capture_reason"] == "missing"
         warning = next(w for w in evidence["warnings"] if "no log" in w)
-        assert "configuration.yaml" in warning
+        # `logger:` cannot create a missing log file, so it must not be advised
+        # here either - the notification and the warning must not contradict.
+        assert "logger:" not in warning
+        assert "Enable debug logging" in warning
         assert "[Errno 2]" in warning
 
     def test_evidence_warning_does_not_blame_logging_for_a_read_error(self):

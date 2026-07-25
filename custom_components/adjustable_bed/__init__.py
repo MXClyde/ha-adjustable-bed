@@ -39,6 +39,7 @@ from .const import (
     CONF_PROTOCOL_VARIANT,
     CONF_RICHMAT_REMOTE,
     DOMAIN,
+    OCTO_VARIANT_STAR2,
     VARIANT_AUTO,
     connection_gated_by_bond,
     requires_pairing,
@@ -565,7 +566,13 @@ def _async_clear_stale_octo_pin_issue(hass: HomeAssistant, entry: ConfigEntry) -
     address = entry.data.get(CONF_ADDRESS)
     if not address:
         return
-    if entry.data.get(CONF_BED_TYPE) != BED_TYPE_OCTO or entry.data.get(CONF_OCTO_PIN):
+    # Star2 has no PIN mechanism at all, and OctoStar2Controller has no
+    # pin_locked_without_pin, so the connect path could never clear a stale
+    # issue left behind by a variant switch.
+    is_standard_octo = entry.data.get(CONF_BED_TYPE) == BED_TYPE_OCTO and entry.data.get(
+        CONF_PROTOCOL_VARIANT
+    ) != OCTO_VARIANT_STAR2
+    if not is_standard_octo or entry.data.get(CONF_OCTO_PIN):
         clear_octo_pin_required_issue(hass, address)
 
 

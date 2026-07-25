@@ -708,10 +708,12 @@ def _build_evidence_summary(
             "configured log path."
         )
     elif log_status == "unavailable":
+        # Deliberately not `logger:` - that only sets levels and never installs a
+        # file handler, so it cannot help an install that logs to stdout.
         warnings.append(
             "No Home Assistant log file was found, so the bundle contains no log "
-            f"({log_capture_error}). Add `logger:` to configuration.yaml, restart, "
-            "reproduce the problem, then generate the bundle again."
+            f"({log_capture_error}). Use the integration's Enable debug logging "
+            "action, reproduce the problem, then disable it to download the log."
         )
     elif log_status == "empty":
         warnings.append("No relevant Adjustable Bed or Bluetooth log entries were found.")
