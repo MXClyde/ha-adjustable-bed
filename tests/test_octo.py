@@ -18,6 +18,8 @@ from custom_components.adjustable_bed.beds.octo import (
     OCTO_FEATURE_LIGHT,
     OCTO_FEATURE_LIGHT_RGBWI,
     OCTO_MAX_RESPONSE_BUFFER_SIZE,
+    OCTO_MEMORY_RECALL_INTERVAL_MS,
+    OCTO_MEMORY_RECALL_SECONDS,
     OCTO_MOTOR_HEAD,
     OCTO_PACKET_CHAR,
     OctoController,
@@ -448,7 +450,9 @@ class TestOctoCommands:
         assert controller.supports_memory_presets is False
         assert controller.memory_slot_count == 0
         assert controller.supports_synchro is False
-        assert controller.stale_motor_entity_keys == frozenset({"back", "legs", "head", "feet"})
+        assert controller.stale_motor_entity_keys == frozenset(
+            {"back", "legs", "head", "feet", "head_feet"}
+        )
 
         mock_bleak_client.write_gatt_char.reset_mock()
         await controller.motor_control_specs[0].open_fn(controller)
@@ -468,7 +472,9 @@ class TestOctoCommands:
         coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
         controller = OctoController(coordinator)
 
-        assert controller.stale_motor_entity_keys == frozenset({"tv_lift"})
+        # This fixture is a 2-motor bed, so the 4-motor combined step is stale
+        # here too and must not linger in the registry.
+        assert controller.stale_motor_entity_keys == frozenset({"tv_lift", "head_feet"})
 
     async def test_star2_layout_marks_tv_lift_entity_as_stale(
         self,
@@ -1127,3 +1133,676 @@ class TestOctoRGBWILightEntity:
             response=False,
         )
         assert light.is_on is False
+
+
+class TestOctoPinLockDiagnostics:
+    """A PIN-locked receiver accepts lights but ignores motors - say so."""
+
+    def test_protocol_diagnostics_reports_discovery_state_without_leaking_pin(self):
+        """The bundle needs the resolved capabilities, never the PIN itself."""
+        coordinator = MagicMock()
+        coordinator.address = "AA:BB:CC:DD:EE:FF"
+        coordinator.client = None
+        controller = OctoController(coordinator, pin="1234")
+
+        controller._has_pin = True
+        controller._pin_locked = True
+        controller._has_lights = True
+        controller._memory_count = 2
+        controller._discovered_motor_count = 2
+        controller._features_complete.set()
+
+        state = controller.protocol_diagnostics
+
+        assert state["feature_discovery_complete"] is True
+        assert state["has_pin"] is True
+        assert state["pin_locked"] is True
+        assert state["pin_configured"] is True
+        assert state["pin_sent"] is False
+        assert state["memory_count"] == 2
+        assert state["discovered_motor_count"] == 2
+        assert "1234" not in str(state)
+
+    def test_protocol_diagnostics_distinguishes_undiscovered_features(self):
+        """None means the capability was never reported, not that it is absent."""
+        coordinator = MagicMock()
+        coordinator.address = "AA:BB:CC:DD:EE:FF"
+        coordinator.client = None
+        controller = OctoController(coordinator)
+
+        state = controller.protocol_diagnostics
+
+        assert state["feature_discovery_complete"] is False
+        assert state["has_pin"] is None
+        assert state["has_lights"] is None
+        assert state["pin_configured"] is False
+
+    @pytest.mark.parametrize(
+        ("has_pin", "pin_locked", "pin", "expected"),
+        [
+            (True, True, "", True),
+            (True, True, "1234", False),
+            (True, False, "", False),
+            (False, False, "", False),
+            # Discovery never resolved CAP_PIN: unknown, not "unlocked".
+            (None, None, "", None),
+        ],
+    )
+    def test_pin_locked_without_pin(
+        self, has_pin: bool | None, pin_locked: bool | None, pin: str, expected: bool | None
+    ):
+        """Only a discovered lock with no configured PIN counts as the bad state."""
+        coordinator = MagicMock()
+        coordinator.address = "AA:BB:CC:DD:EE:FF"
+        coordinator.client = None
+        controller = OctoController(coordinator, pin=pin)
+        controller._has_pin = has_pin
+        controller._pin_locked = pin_locked
+
+        assert controller.pin_locked_without_pin is expected
+
+    async def test_connect_raises_and_clears_pin_required_repair(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry_data: dict,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        _shorten_mocked_feature_timeout: None,
+    ):
+        """Connecting to a locked receiver with no PIN must be user-visible."""
+        from homeassistant.helpers import issue_registry as ir
+
+        data = dict(mock_octo_config_entry_data)
+        data[CONF_OCTO_PIN] = ""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Octo Test Bed",
+            data=data,
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id="octo_pin_lock_entry",
+        )
+        entry.add_to_hass(hass)
+
+        locked = True
+
+        async def _fake_discovery(controller: OctoController) -> bool:
+            controller._has_pin = True
+            controller._pin_locked = locked
+            return True
+
+        issue_id = "octo_pin_required_aa_bb_cc_dd_ee_ff"
+        registry = ir.async_get(hass)
+
+        with patch.object(
+            OctoController, "discover_features", autospec=True, side_effect=_fake_discovery
+        ):
+            coordinator = AdjustableBedCoordinator(hass, entry)
+            await coordinator.async_connect()
+            assert registry.async_get_issue(DOMAIN, issue_id) is not None
+
+            # Unlocking the receiver on a later connection clears the repair.
+            locked = False
+            await coordinator.async_disconnect()
+            await coordinator.async_connect()
+
+        assert registry.async_get_issue(DOMAIN, issue_id) is None
+
+    def test_support_bundle_controller_section_carries_protocol_state(self):
+        """The bundle is the only evidence we get, so it must record the handshake."""
+        from custom_components.adjustable_bed.support_report import _get_controller_info
+
+        coordinator = MagicMock()
+        coordinator.address = "AA:BB:CC:DD:EE:FF"
+        coordinator.client = None
+        controller = OctoController(coordinator, pin="")
+        controller._has_pin = True
+        controller._pin_locked = True
+        coordinator.controller = controller
+
+        info = _get_controller_info(coordinator)
+
+        assert info["protocol_state"]["pin_locked_without_pin"] is True
+
+    async def test_discovery_timeout_leaves_pin_state_unknown(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_coordinator_connected,
+        _shorten_mocked_feature_timeout: None,
+    ):
+        """A timeout must not report a configured-PIN guess as device state."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+
+        # The mocked client never notifies, so connect-time discovery timed out.
+        state = controller.protocol_diagnostics
+        assert state["feature_discovery_complete"] is False
+        assert state["has_pin"] is None
+        assert state["pin_locked"] is None
+        # requires_pin still falls back to the configured PIN.
+        assert controller.requires_pin is True
+
+    async def test_send_pin_is_not_suppressed_by_a_pending_stop(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """Authentication must survive a pending cancel, or the bed stays locked."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        await coordinator.async_connect()
+
+        controller = cast(OctoController, coordinator.controller)
+        controller._has_pin = True
+        controller._pin_locked = True
+        coordinator.cancel_command.set()
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await controller.send_pin()
+
+        expected_packet = controller._build_packet([0x20, 0x43], [1, 2, 3, 4])
+        mock_bleak_client.write_gatt_char.assert_called_once_with(
+            OCTO_CHAR_UUID,
+            expected_packet,
+            response=False,
+        )
+        assert controller.protocol_diagnostics["pin_sent"] is True
+
+    async def test_pin_lock_warning_is_logged_once_per_transition(
+        self,
+        hass: HomeAssistant,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """A locked bed reconnects every ~30s; the warning must not flood logs."""
+        from custom_components.adjustable_bed.unsupported import (
+            update_octo_pin_required_issue,
+        )
+
+        caplog.set_level(logging.WARNING)
+        caplog.clear()
+
+        for _ in range(3):
+            update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
+
+        assert caplog.text.count("reports its PIN lock engaged") == 1
+
+        # Resolving and re-entering the state warns again - that is a real change.
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", False)
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
+
+        assert caplog.text.count("reports its PIN lock engaged") == 2
+
+    async def test_saving_a_pin_clears_the_repair_without_reconnecting(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry_data: dict,
+    ):
+        """The user follows the repair while the bed is offline; it must clear."""
+        from homeassistant.helpers import issue_registry as ir
+
+        from custom_components.adjustable_bed import _async_clear_stale_octo_pin_issue
+        from custom_components.adjustable_bed.unsupported import (
+            update_octo_pin_required_issue,
+        )
+
+        issue_id = "octo_pin_required_aa_bb_cc_dd_ee_ff"
+        registry = ir.async_get(hass)
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
+        assert registry.async_get_issue(DOMAIN, issue_id) is not None
+
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Octo Test Bed",
+            data={**mock_octo_config_entry_data, CONF_OCTO_PIN: "1234"},
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id="octo_pin_saved_entry",
+        )
+        entry.add_to_hass(hass)
+
+        _async_clear_stale_octo_pin_issue(hass, entry)
+
+        assert registry.async_get_issue(DOMAIN, issue_id) is None
+
+    async def test_removing_the_entry_clears_the_repair(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+    ):
+        """A leftover issue would keep nagging about a bed that is gone."""
+        from homeassistant.helpers import issue_registry as ir
+
+        from custom_components.adjustable_bed import async_remove_entry
+        from custom_components.adjustable_bed.unsupported import (
+            update_octo_pin_required_issue,
+        )
+
+        issue_id = "octo_pin_required_aa_bb_cc_dd_ee_ff"
+        registry = ir.async_get(hass)
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
+        assert registry.async_get_issue(DOMAIN, issue_id) is not None
+
+        await async_remove_entry(hass, mock_octo_config_entry)
+
+        assert registry.async_get_issue(DOMAIN, issue_id) is None
+
+    async def test_inconclusive_discovery_keeps_an_existing_repair(
+        self,
+        hass: HomeAssistant,
+    ):
+        """One failed reconnect must not retract a warning we already earned."""
+        from homeassistant.helpers import issue_registry as ir
+
+        from custom_components.adjustable_bed.unsupported import (
+            update_octo_pin_required_issue,
+        )
+
+        issue_id = "octo_pin_required_aa_bb_cc_dd_ee_ff"
+        registry = ir.async_get(hass)
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
+        assert registry.async_get_issue(DOMAIN, issue_id) is not None
+
+        # Discovery timed out on a later connect: state unknown, not resolved.
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", None)
+
+        assert registry.async_get_issue(DOMAIN, issue_id) is not None
+
+    async def test_pin_repair_supplies_every_placeholder_its_text_uses(
+        self,
+        hass: HomeAssistant,
+    ):
+        """A placeholder with no value renders literally in the Repairs card."""
+        import json
+        import string as _string
+        from pathlib import Path
+
+        from homeassistant.helpers import issue_registry as ir
+
+        from custom_components.adjustable_bed.unsupported import (
+            update_octo_pin_required_issue,
+        )
+
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
+        issue = ir.async_get(hass).async_get_issue(
+            DOMAIN, "octo_pin_required_aa_bb_cc_dd_ee_ff"
+        )
+        assert issue is not None
+
+        # Derived from __file__ so the test does not depend on pytest's CWD.
+        strings_path = (
+            Path(__file__).parents[1] / "custom_components/adjustable_bed/strings.json"
+        )
+        strings = json.loads(strings_path.read_text(encoding="utf-8"))
+        text = strings["issues"]["octo_pin_required"]
+        referenced = {
+            field
+            for value in (text["title"], text["description"])
+            for _, field, _, _ in _string.Formatter().parse(value)
+            if field
+        }
+        assert referenced <= set(issue.translation_placeholders or {})
+
+        # hassfest rejects literal URLs in translation strings; the recovery
+        # link has to arrive as a placeholder instead.
+        assert "http" not in text["description"]
+        assert "http" in (issue.translation_placeholders or {})["recovery_url"]
+
+    async def test_star2_variant_clears_a_stale_standard_octo_repair(
+        self,
+        hass: HomeAssistant,
+        mock_octo_star2_config_entry_data: dict,
+    ):
+        """Star2 has no PIN, and its controller could never clear the issue."""
+        from homeassistant.helpers import issue_registry as ir
+
+        from custom_components.adjustable_bed import _async_clear_stale_octo_pin_issue
+        from custom_components.adjustable_bed.unsupported import (
+            update_octo_pin_required_issue,
+        )
+
+        issue_id = "octo_pin_required_aa_bb_cc_dd_ee_ff"
+        registry = ir.async_get(hass)
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
+        assert registry.async_get_issue(DOMAIN, issue_id) is not None
+
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Octo Star2",
+            data=mock_octo_star2_config_entry_data,
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id="octo_star2_stale_entry",
+        )
+        entry.add_to_hass(hass)
+
+        _async_clear_stale_octo_pin_issue(hass, entry)
+
+        assert registry.async_get_issue(DOMAIN, issue_id) is None
+
+    @pytest.mark.parametrize(
+        ("motor_count", "expected_mask"),
+        [(2, 0x06), (3, 0x0E), (4, 0x1E)],
+    )
+    async def test_flat_drives_every_motor_the_receiver_has(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry_data: dict,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        motor_count: int,
+        expected_mask: int,
+    ):
+        """M12-only flat leaves motors 3/4 parked on RC3, BM3 and 4M bases."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Octo Test Bed",
+            data={**mock_octo_config_entry_data, CONF_MOTOR_COUNT: motor_count},
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id=f"octo_flat_{motor_count}",
+        )
+        entry.add_to_hass(hass)
+
+        coordinator = AdjustableBedCoordinator(hass, entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await controller.preset_flat()
+
+        expected = controller._build_packet([0x02, 0x71], [expected_mask])
+        written = [c[0][1] for c in mock_bleak_client.write_gatt_char.call_args_list]
+        assert expected in written
+
+
+class TestOctoMemoryInfoAndCombinedStep:
+    """CAP_MEMINFO slot classes/names and the 4-motor M3+4 step."""
+
+    @staticmethod
+    def _meminfo_record(characteristic: list[int], value: list[int]) -> list[int]:
+        """Build a CAP_MEMINFO feature record as the bed reports it."""
+        # [cap_id(3), flag, char_len, characteristic..., value_type, value...]
+        return [0x00, 0x00, 0x04, 0x00, len(characteristic), *characteristic, 0x05, *value]
+
+    def _controller(self) -> OctoController:
+        coordinator = MagicMock()
+        coordinator.address = "AA:BB:CC:DD:EE:FF"
+        coordinator.client = None
+        return OctoController(coordinator)
+
+    def test_slot_classes_partition_standard_then_fix_then_lock(self):
+        """Standard sits at the low indices; only locked slots block saving."""
+        controller = self._controller()
+        controller._memory_count = 6
+        controller._handle_feature_response(self._meminfo_record([6, 2, 1], [0] * 6))
+
+        assert controller._memory_fix_count == 2
+        assert controller._memory_lock_count == 1
+        # 6 slots, 2 fix, 1 lock -> slots 1-3 standard, 4-5 fix, 6 lock.
+        assert [controller._memory_slot_class(n) for n in range(1, 7)] == [
+            "standard",
+            "standard",
+            "standard",
+            "fix",
+            "fix",
+            "lock",
+        ]
+
+    def test_locked_slot_is_not_programmable(self):
+        """A locked slot must not get a Save button the bed would refuse."""
+        controller = self._controller()
+        controller._memory_count = 4
+        controller._handle_feature_response(self._meminfo_record([4, 1, 1], [0] * 4))
+
+        assert controller.is_memory_slot_programmable(1) is True
+        assert controller.is_memory_slot_programmable(3) is True  # fix: save allowed
+        assert controller.is_memory_slot_programmable(4) is False  # lock
+
+    def test_slot_names_come_from_description_ids(self):
+        """Known description IDs become names; unmapped ones stay unnamed."""
+        controller = self._controller()
+        controller._memory_count = 5
+        controller._handle_feature_response(
+            self._meminfo_record([5, 0, 0], [0x00, 0x01, 0x02, 0x03, 0x07])
+        )
+
+        assert controller.memory_slot_names == (None, "Anti-Snore", "Zero-G", "Lordose", None)
+
+    def test_short_characteristic_is_ignored_entirely(self):
+        """The app ignores the record unless the characteristic is 3 bytes."""
+        controller = self._controller()
+        controller._memory_count = 4
+        controller._handle_feature_response(self._meminfo_record([4, 1], [0] * 4))
+
+        assert controller._memory_fix_count == 0
+        assert controller._memory_lock_count == 0
+
+    def test_mismatched_value_length_drops_names_but_keeps_protection(self):
+        """A short value block must not downgrade a locked slot to writable."""
+        controller = self._controller()
+        controller._memory_count = 4
+        controller._handle_feature_response(self._meminfo_record([4, 0, 1], [0x01, 0x02]))
+
+        assert controller.memory_slot_names == ()
+        assert controller._memory_lock_count == 1
+        assert controller.is_memory_slot_programmable(4) is False
+
+    def test_class_counts_are_clamped_into_the_slot_range(self):
+        """Absurd counts must not push the partition out of range."""
+        controller = self._controller()
+        controller._memory_count = 3
+        controller._handle_feature_response(self._meminfo_record([3, 9, 9], [0] * 3))
+
+        assert controller._memory_fix_count == 3
+        assert controller._memory_lock_count == 0
+        assert [controller._memory_slot_class(n) for n in range(1, 4)] == ["fix"] * 3
+
+    async def test_memory_recall_is_streamed_and_released(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry_data: dict,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """MOTOR_MEMPOS is hold-to-run: firing once stalls the bed part-way."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Octo Test Bed",
+            data=mock_octo_config_entry_data,
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id="octo_mem_recall",
+        )
+        entry.add_to_hass(hass)
+
+        coordinator = AdjustableBedCoordinator(hass, entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+        controller._memory_count = 4
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await controller.preset_memory(2)
+
+        written = [c[0][1] for c in mock_bleak_client.write_gatt_char.call_args_list]
+        recall = controller._build_packet([0x02, 0x72], [0x01])  # 0-based slot
+        stop = controller._build_packet([0x02, 0x73])
+        # Streamed for the recall window, not the far shorter button cadence.
+        expected_repeats = int(
+            OCTO_MEMORY_RECALL_SECONDS * 1000 / OCTO_MEMORY_RECALL_INTERVAL_MS
+        )
+        assert written.count(recall) == expected_repeats
+        assert expected_repeats > 3
+        assert written[-1] == stop
+
+    async def test_four_motor_bed_exposes_the_combined_step(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry_data: dict,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """Motors 3+4 move together as one hardware step (CD_MOTOR34)."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Octo Test Bed",
+            data={**mock_octo_config_entry_data, CONF_MOTOR_COUNT: 4},
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id="octo_m34",
+        )
+        entry.add_to_hass(hass)
+
+        coordinator = AdjustableBedCoordinator(hass, entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+
+        assert [s.key for s in controller.motor_control_specs] == [
+            "back",
+            "legs",
+            "head",
+            "feet",
+            "head_feet",
+        ]
+
+        mock_bleak_client.write_gatt_char.reset_mock()
+        await controller._move_motor34_up()
+
+        written = [c[0][1] for c in mock_bleak_client.write_gatt_char.call_args_list]
+        assert controller._build_packet([0x02, 0x70], [0x18]) in written
+
+    async def test_two_motor_bed_has_no_combined_step(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_coordinator_connected,
+    ):
+        """The combined step exists only on the 4-motor layout."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+
+        assert "head_feet" not in [s.key for s in controller.motor_control_specs]
+
+    def test_meminfo_before_memcount_still_classifies_correctly(self):
+        """Capabilities arrive in the bed's order; MEMINFO must not need MEMCOUNT."""
+        controller = self._controller()
+        # No CAP_MEMCOUNT yet: _memory_count is still None.
+        controller._handle_feature_response(self._meminfo_record([4, 0, 1], [0] * 4))
+
+        assert [controller._memory_slot_class(n) for n in range(1, 5)] == [
+            "standard",
+            "standard",
+            "standard",
+            "lock",
+        ]
+        assert controller.is_memory_slot_programmable(4) is False
+
+    async def test_save_preset_service_path_refuses_a_locked_slot(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """The button is hidden, but automations call program_memory directly."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+        controller._memory_count = 4
+        controller._handle_feature_response(
+            TestOctoMemoryInfoAndCombinedStep._meminfo_record([4, 0, 1], [0] * 4)
+        )
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await controller.program_memory(4)  # locked slot
+
+        mock_bleak_client.write_gatt_char.assert_not_called()
+
+        await controller.program_memory(1)  # standard slot
+
+        expected = controller._build_packet([0x10, 0x70], [0x00])
+        assert expected in [c[0][1] for c in mock_bleak_client.write_gatt_char.call_args_list]
+
+    async def test_combined_cover_becomes_stale_when_motor_count_drops(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry_data: dict,
+        mock_coordinator_connected,
+    ):
+        """Reconfiguring 4 motors down must not leave a ghost entity behind."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Octo Test Bed",
+            data={**mock_octo_config_entry_data, CONF_MOTOR_COUNT: 2},
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id="octo_stale_m34",
+        )
+        entry.add_to_hass(hass)
+
+        coordinator = AdjustableBedCoordinator(hass, entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+
+        assert "head_feet" in controller.stale_motor_entity_keys
+
+    def test_absent_meminfo_leaves_every_slot_programmable(self):
+        """CAP_MEMINFO is optional; without it we must not infer any locking."""
+        controller = self._controller()
+        controller._memory_count = 4  # CAP_MEMCOUNT only, no CAP_MEMINFO
+
+        assert [controller._memory_slot_class(n) for n in range(1, 5)] == ["standard"] * 4
+        assert all(controller.is_memory_slot_programmable(n) for n in range(1, 5))
+
+    def test_invalid_meminfo_leaves_every_slot_programmable(self):
+        """A malformed record is 'unknown', which must not mean 'locked'."""
+        controller = self._controller()
+        controller._memory_count = 4
+        # Characteristic is not 3 bytes, so the record is rejected wholesale.
+        controller._handle_feature_response(self._meminfo_record([4, 1], [0] * 4))
+
+        assert all(controller.is_memory_slot_programmable(n) for n in range(1, 5))
+
+    async def test_long_recall_reauthenticates_so_the_link_survives(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """The recall holds the command lock, starving the PIN keep-alive task."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+        controller._memory_count = 4
+        controller._has_pin = True
+        controller._pin_locked = True
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await controller.preset_memory(1)
+
+        written = [c[0][1] for c in mock_bleak_client.write_gatt_char.call_args_list]
+        pin_packet = controller._build_packet([0x20, 0x43], [1, 2, 3, 4])
+        recall = controller._build_packet([0x02, 0x72], [0x00])
+        # A 30s recall spans more than one ~25s authentication window.
+        assert written.count(pin_packet) >= 2
+        assert written.index(pin_packet) < written.index(recall)
+
+    async def test_cancelled_recall_stops_streaming(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """Stop must end the recall, not just pause one chunk of it."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+        controller._memory_count = 4
+        coordinator.cancel_command.set()
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await controller.preset_memory(1)
+
+        written = [c[0][1] for c in mock_bleak_client.write_gatt_char.call_args_list]
+        recall = controller._build_packet([0x02, 0x72], [0x00])
+        stop = controller._build_packet([0x02, 0x73])
+        assert recall not in written
+        assert written == [stop]

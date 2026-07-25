@@ -121,6 +121,12 @@ async def async_get_config_entry_diagnostics(
         if is_synchro_active is not None:
             controller_info["synchro_active"] = is_synchro_active
 
+        # Whatever the connect-time protocol handshake resolved to (capabilities,
+        # authentication state, ...). Empty for controllers with no handshake.
+        protocol_state = controller.protocol_diagnostics
+        if protocol_state:
+            controller_info["protocol_state"] = protocol_state
+
     # Get position data
     position_data = dict(coordinator.position_data)
 

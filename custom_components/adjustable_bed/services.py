@@ -698,17 +698,59 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
 
         download_url = register_download(hass, filepath)
         notification_count = len(report.get("notifications", []))
-        evidence_warnings = report.get("evidence", {}).get("warnings", [])
+        evidence = report.get("evidence", {})
+        evidence_warnings = evidence.get("warnings", [])
         warning_summary = ""
         if evidence_warnings:
             warning_summary = "\n\n**Capture warnings:**\n" + "\n".join(
                 f"- {warning}" for warning in evidence_warnings
             )
+
+        # A bundle without logs usually cannot explain why a command failed, and
+        # the user only learns that after a maintainer asks for a second one. Say
+        # it up front, at the moment they still have the bed in front of them.
+        logs_missing = include_logs and evidence.get("log_capture_status") == "unavailable"
+        logging_notice = ""
+        if logs_missing:
+            log_error = evidence.get("log_capture_error")
+            _LOGGER.warning(
+                "Support bundle for %s was generated without logs: %s",
+                address,
+                log_error or "the Home Assistant log file could not be read",
+            )
+            if evidence.get("log_capture_reason") == "unreadable":
+                # `logger:` only changes levels; it cannot fix a permission
+                # problem or a log path Home Assistant is not writing to.
+                logging_notice = (
+                    "\n\n⚠️ **This bundle contains no logs.** The Home Assistant log "
+                    f"file could not be read (`{log_error}`), so the reason a command "
+                    "failed is usually not recoverable from it. Check the file's "
+                    "permissions and the configured log path, then run this service "
+                    "again."
+                )
+            else:
+                # `logger:` only sets levels - it does not create a file handler,
+                # so it cannot help an install that logs to stdout instead of
+                # home-assistant.log. Point at the flow that always yields a
+                # downloadable log.
+                logging_notice = (
+                    "\n\n⚠️ **This bundle contains no logs.** Home Assistant is not "
+                    "writing a `home-assistant.log` file (common on container "
+                    "installs that log to stdout), so the reason a command failed is "
+                    "usually not recoverable from it.\n\n"
+                    "Use **Settings → Devices & services → Adjustable Bed → ⋮ → "
+                    "Enable debug logging** instead, reproduce the problem, then "
+                    "**Disable debug logging** to download the captured log and "
+                    "attach it alongside this bundle. The full log is also available "
+                    "under **Settings → System → Logs → Load full logs**."
+                )
+
         async_create(
             hass,
             f"[**Download support bundle**]({download_url})\n\n"
             f"Captured {notification_count} notifications over "
             f"{capture_duration} seconds."
+            f"{logging_notice}"
             f"{warning_summary}\n\n"
             "Attach this JSON file when reporting unsupported or broken beds.\n\n"
             f"File path: `{filepath}`",
