@@ -297,9 +297,51 @@ The integration queries capabilities via `[0x20, 0x71]`. Known feature IDs:
 | `0x000002` | CAP_MEMCOUNT | Memory preset count |
 | `0x000003` | CAP_BLE_PIN | PIN state + lock state (see below) |
 | `0x000101` | CAP_SYNCHRO | Synchro/linked mode support |
+| `0x000004` | CAP_MEMINFO | Memory slot classes and per-slot names |
 | `0x000102` | CAP_LIGHT | Under-bed light support (on/off) |
 | `0x000104` | CAP_LIGHT_RGBWI | RGB + White + Intensity light control |
 | `0xFFFFFF` | End sentinel | Marks end of feature list |
+
+#### Memory slots (`CAP_MEMINFO`, `0x000004`)
+
+Beds that report `CAP_MEMINFO` describe their memory slots in more detail than
+the bare count in `CAP_MEMCOUNT`:
+
+- `characteristic[]` is exactly three bytes, `[memCount, fixCount, lockCount]`.
+  A record with any other length is ignored entirely.
+- `value[]` holds one description ID per slot. It is used only when there is
+  exactly one entry per slot.
+
+The three classes partition the slot range contiguously, standard first:
+
+```text
+lockStart = memCount - lockCount
+fixStart  = lockStart - fixCount
+
+slot index <  fixStart   -> standard   (recall + save)
+fixStart <= index < lockStart -> fix   (recall + save, fixed name)
+index >= lockStart       -> lock       (recall only)
+```
+
+The integration hides the Save button for locked slots. If the value block is
+the wrong length the descriptions are dropped but the class protection is kept,
+so a malformed response cannot silently turn a locked slot into a writable one.
+
+Known description IDs are `0x01` Anti-Snore, `0x02` Zero-G, `0x03` Lordose and
+`0x04` Flat (`0x00` means unnamed). A named slot is used as the entity name, so
+you get a "Zero-G" button rather than "Memory 3". Unrecognised IDs fall back to
+the generic name.
+
+Recall and save differ by packet **type**, not just command byte:
+
+| Action | Packet | Data | Notes |
+|--------|--------|------|-------|
+| Recall slot | `NORMAL` `[0x02, 0x72]` | `[slot]` | **Hold-to-run**, repeated on the motor cadence and released with `[0x02, 0x73]` |
+| Save slot | `CONFIG` `[0x10, 0x70]` | `[slot]` | One-shot |
+
+`slot` is 0-based on the wire while the UI counts from 1. Recall being
+hold-to-run matters: sending it once moves the bed a fraction of the way and
+then stalls.
 
 #### RGBWI Light Commands
 

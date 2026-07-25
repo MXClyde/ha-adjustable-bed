@@ -448,7 +448,9 @@ class TestOctoCommands:
         assert controller.supports_memory_presets is False
         assert controller.memory_slot_count == 0
         assert controller.supports_synchro is False
-        assert controller.stale_motor_entity_keys == frozenset({"back", "legs", "head", "feet"})
+        assert controller.stale_motor_entity_keys == frozenset(
+            {"back", "legs", "head", "feet", "head_feet"}
+        )
 
         mock_bleak_client.write_gatt_char.reset_mock()
         await controller.motor_control_specs[0].open_fn(controller)
@@ -1466,3 +1468,165 @@ class TestOctoPinLockDiagnostics:
         expected = controller._build_packet([0x02, 0x71], [expected_mask])
         written = [c[0][1] for c in mock_bleak_client.write_gatt_char.call_args_list]
         assert expected in written
+
+
+class TestOctoMemoryInfoAndCombinedStep:
+    """CAP_MEMINFO slot classes/names and the 4-motor M3+4 step."""
+
+    @staticmethod
+    def _meminfo_record(characteristic: list[int], value: list[int]) -> list[int]:
+        """Build a CAP_MEMINFO feature record as the bed reports it."""
+        # [cap_id(3), flag, char_len, characteristic..., value_type, value...]
+        return [0x00, 0x00, 0x04, 0x00, len(characteristic), *characteristic, 0x05, *value]
+
+    def _controller(self) -> OctoController:
+        coordinator = MagicMock()
+        coordinator.address = "AA:BB:CC:DD:EE:FF"
+        coordinator.client = None
+        return OctoController(coordinator)
+
+    def test_slot_classes_partition_standard_then_fix_then_lock(self):
+        """Standard sits at the low indices; only locked slots block saving."""
+        controller = self._controller()
+        controller._memory_count = 6
+        controller._handle_feature_response(self._meminfo_record([6, 2, 1], [0] * 6))
+
+        assert controller._memory_fix_count == 2
+        assert controller._memory_lock_count == 1
+        # 6 slots, 2 fix, 1 lock -> slots 1-3 standard, 4-5 fix, 6 lock.
+        assert [controller._memory_slot_class(n) for n in range(1, 7)] == [
+            "standard",
+            "standard",
+            "standard",
+            "fix",
+            "fix",
+            "lock",
+        ]
+
+    def test_locked_slot_is_not_programmable(self):
+        """A locked slot must not get a Save button the bed would refuse."""
+        controller = self._controller()
+        controller._memory_count = 4
+        controller._handle_feature_response(self._meminfo_record([4, 1, 1], [0] * 4))
+
+        assert controller.is_memory_slot_programmable(1) is True
+        assert controller.is_memory_slot_programmable(3) is True  # fix: save allowed
+        assert controller.is_memory_slot_programmable(4) is False  # lock
+
+    def test_slot_names_come_from_description_ids(self):
+        """Known description IDs become names; unmapped ones stay unnamed."""
+        controller = self._controller()
+        controller._memory_count = 5
+        controller._handle_feature_response(
+            self._meminfo_record([5, 0, 0], [0x00, 0x01, 0x02, 0x03, 0x07])
+        )
+
+        assert controller.memory_slot_names == (None, "Anti-Snore", "Zero-G", "Lordose", None)
+
+    def test_short_characteristic_is_ignored_entirely(self):
+        """The app ignores the record unless the characteristic is 3 bytes."""
+        controller = self._controller()
+        controller._memory_count = 4
+        controller._handle_feature_response(self._meminfo_record([4, 1], [0] * 4))
+
+        assert controller._memory_fix_count == 0
+        assert controller._memory_lock_count == 0
+
+    def test_mismatched_value_length_drops_names_but_keeps_protection(self):
+        """A short value block must not downgrade a locked slot to writable."""
+        controller = self._controller()
+        controller._memory_count = 4
+        controller._handle_feature_response(self._meminfo_record([4, 0, 1], [0x01, 0x02]))
+
+        assert controller.memory_slot_names == ()
+        assert controller._memory_lock_count == 1
+        assert controller.is_memory_slot_programmable(4) is False
+
+    def test_class_counts_are_clamped_into_the_slot_range(self):
+        """Absurd counts must not push the partition out of range."""
+        controller = self._controller()
+        controller._memory_count = 3
+        controller._handle_feature_response(self._meminfo_record([3, 9, 9], [0] * 3))
+
+        assert controller._memory_fix_count == 3
+        assert controller._memory_lock_count == 0
+        assert [controller._memory_slot_class(n) for n in range(1, 4)] == ["fix"] * 3
+
+    async def test_memory_recall_is_streamed_and_released(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry_data: dict,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """MOTOR_MEMPOS is hold-to-run: firing once stalls the bed part-way."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Octo Test Bed",
+            data={**mock_octo_config_entry_data, CONF_MOTOR_PULSE_COUNT: 3},
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id="octo_mem_recall",
+        )
+        entry.add_to_hass(hass)
+
+        coordinator = AdjustableBedCoordinator(hass, entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+        controller._memory_count = 4
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await controller.preset_memory(2)
+
+        written = [c[0][1] for c in mock_bleak_client.write_gatt_char.call_args_list]
+        recall = controller._build_packet([0x02, 0x72], [0x01])  # 0-based slot
+        stop = controller._build_packet([0x02, 0x73])
+        assert written.count(recall) == 3
+        assert written[-1] == stop
+
+    async def test_four_motor_bed_exposes_the_combined_step(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry_data: dict,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """Motors 3+4 move together as one hardware step (CD_MOTOR34)."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Octo Test Bed",
+            data={**mock_octo_config_entry_data, CONF_MOTOR_COUNT: 4},
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id="octo_m34",
+        )
+        entry.add_to_hass(hass)
+
+        coordinator = AdjustableBedCoordinator(hass, entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+
+        assert [s.key for s in controller.motor_control_specs] == [
+            "back",
+            "legs",
+            "head",
+            "feet",
+            "head_feet",
+        ]
+
+        mock_bleak_client.write_gatt_char.reset_mock()
+        await controller._move_motor34_up()
+
+        written = [c[0][1] for c in mock_bleak_client.write_gatt_char.call_args_list]
+        assert controller._build_packet([0x02, 0x70], [0x18]) in written
+
+    async def test_two_motor_bed_has_no_combined_step(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_coordinator_connected,
+    ):
+        """The combined step exists only on the 4-motor layout."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+
+        assert "head_feet" not in [s.key for s in controller.motor_control_specs]

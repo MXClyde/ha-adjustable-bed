@@ -540,6 +540,9 @@
       "feet": {
         "name": "Feet"
       },
+      "head_feet": {
+        "name": "Head + Feet"
+      },
       "lumbar": {
         "name": "Lumbar"
       },

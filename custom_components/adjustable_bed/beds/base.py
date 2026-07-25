@@ -1175,6 +1175,26 @@ class BedController(ABC):
         return False
 
     @property
+    def memory_slot_names(self) -> tuple[str | None, ...]:
+        """Return per-slot display names discovered from the bed.
+
+        Indexed from slot 1, so element 0 names memory slot 1. ``None`` (or a
+        short tuple) means the bed reported no name for that slot and the
+        generic "Memory N" label should stand. Empty by default: most protocols
+        have no concept of a named slot.
+        """
+        return ()
+
+    def is_memory_slot_programmable(self, memory_num: int) -> bool:
+        """Return whether a specific 1-based memory slot can be overwritten.
+
+        Defaults to the controller-wide capability. Override where the bed
+        reports per-slot protection, so a locked slot does not get a Save
+        button that the hardware would refuse.
+        """
+        return self.supports_memory_programming
+
+    @property
     def foundation_preset_sides(self) -> tuple[str, ...]:
         """Return the bed sides exposing named foundation presets.
 

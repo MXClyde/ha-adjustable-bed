@@ -44,10 +44,23 @@ OCTO_MOTOR_HEAD = 0x02
 OCTO_MOTOR_LEGS = 0x04
 OCTO_MOTOR_3 = 0x08  # Third motor (lumbar/tilt) - for beds with CAP_MOTORCOUNT > 2
 OCTO_MOTOR_4 = 0x10  # Fourth motor - for beds with CAP_MOTORCOUNT > 3
+OCTO_MOTOR_34 = OCTO_MOTOR_3 | OCTO_MOTOR_4  # CD_MOTOR34 - 4-motor combined step
+
+# CAP_MEMINFO description IDs. Source: clean-room analysis of OCTO Smart
+# Control 1.03.01; the app resolves these through translation keys md00-md04
+# and renders the raw key ("md07") for anything unmapped, so unknown IDs are
+# treated as unnamed here instead.
+OCTO_MEMORY_DESCRIPTIONS: dict[int, str] = {
+    0x01: "Anti-Snore",
+    0x02: "Zero-G",
+    0x03: "Lordose",
+    0x04: "Flat",
+}
 
 # Feature IDs
 OCTO_FEATURE_MOTORCOUNT = 0x000001  # Number of motors (CAP_MOTORCOUNT)
 OCTO_FEATURE_MEMCOUNT = 0x000002  # Number of memory positions
+OCTO_FEATURE_MEMINFO = 0x000004  # Per-slot classes and description IDs (CAP_MEMINFO)
 OCTO_FEATURE_PIN = 0x000003
 OCTO_FEATURE_SYNCHRO = 0x000101  # Synchro/linked mode capability (CAP_SYNCHRO)
 OCTO_FEATURE_LIGHT = 0x000102
@@ -107,6 +120,10 @@ class OctoController(BedController):
         self._has_rgbwi: bool = False  # True if CAP_LIGHT_RGBWI (0x000104) detected
         self._rgbwi_value_type: int | None = None  # valueType byte from discovery response
         self._memory_count: int | None = None  # None = not yet discovered
+        # CAP_MEMINFO: slot classes and per-slot description IDs
+        self._memory_fix_count: int = 0
+        self._memory_lock_count: int = 0
+        self._memory_descriptions: tuple[int, ...] = ()
         self._discovered_motor_count: int | None = None  # None = not yet discovered
         self._has_synchro: bool | None = None  # None = not yet discovered
         self._synchro_active: bool | None = None  # None = unknown
@@ -396,6 +413,8 @@ class OctoController(BedController):
             # Presence of synchro feature means bed supports linked mode
             self._has_synchro = True
             _LOGGER.info("Synchro feature detected: bed supports linked/sync mode")
+        elif feature_id == OCTO_FEATURE_MEMINFO:
+            self._handle_meminfo_response(data, value)
         elif feature_id == OCTO_FEATURE_MEMCOUNT:
             # value[0] = number of memory slots (typically 1-4)
             self._memory_count = value[0] if value else 0
@@ -419,6 +438,69 @@ class OctoController(BedController):
 
         # Signal that we received at least one feature response
         self._features_loaded.set()
+
+    def _handle_meminfo_response(self, data: list[int], value: list[int]) -> None:
+        """Parse CAP_MEMINFO (0x000004): slot classes and description IDs.
+
+        The characteristic block is three bytes, [memCount, fixCount, lockCount],
+        and the value block holds one description ID per slot. The official app
+        ignores the whole record unless the characteristic is exactly three
+        bytes, and ignores the descriptions unless there is exactly one per
+        slot, so both guards are reproduced here: a short value block must not
+        silently downgrade a locked slot into a writable one.
+        """
+        # data = [cap_id(3), flag, char_len, characteristic..., value_type, value...]
+        char_len = data[4] if len(data) > 4 else 0
+        characteristic = data[5 : 5 + char_len]
+        if len(characteristic) != 3:
+            _LOGGER.debug("Ignoring CAP_MEMINFO with %d characteristic bytes", len(characteristic))
+            return
+
+        mem_count, fix_count, lock_count = characteristic
+        # The app clamps both class counts into the slot range before use.
+        fix_count = min(fix_count, mem_count)
+        lock_count = min(lock_count, mem_count - fix_count)
+
+        self._memory_fix_count = fix_count
+        self._memory_lock_count = lock_count
+        self._memory_descriptions = tuple(value) if len(value) == mem_count else ()
+
+        _LOGGER.info(
+            "Memory info feature detected: %d slots (%d fixed, %d locked), descriptions=%s",
+            mem_count,
+            fix_count,
+            lock_count,
+            list(self._memory_descriptions) or "not reported",
+        )
+
+    def _memory_slot_class(self, memory_num: int) -> str:
+        """Return "standard", "fix" or "lock" for a 1-based memory slot.
+
+        Classes partition the slot range contiguously with standard slots at
+        the low indices: standard, then fix, then lock.
+        """
+        mem_count = self._memory_count or 0
+        lock_start = mem_count - self._memory_lock_count
+        fix_start = lock_start - self._memory_fix_count
+        index = memory_num - 1
+        if index >= lock_start:
+            return "lock"
+        if index >= fix_start:
+            return "fix"
+        return "standard"
+
+    @property
+    def memory_slot_names(self) -> tuple[str | None, ...]:
+        """Return per-slot names from the CAP_MEMINFO description IDs."""
+        return tuple(
+            OCTO_MEMORY_DESCRIPTIONS.get(description) for description in self._memory_descriptions
+        )
+
+    def is_memory_slot_programmable(self, memory_num: int) -> bool:
+        """Return False for locked slots, which the bed will not let us save."""
+        if not self.supports_memory_programming:
+            return False
+        return self._memory_slot_class(memory_num) != "lock"
 
     def _on_notification(self, _sender: BleakGATTCharacteristic, data: bytearray) -> None:
         """Handle BLE notifications from the bed."""
@@ -551,6 +633,9 @@ class OctoController(BedController):
             "has_lights": self._has_lights,
             "has_rgbwi": self._has_rgbwi,
             "memory_count": self._memory_count,
+            "memory_fix_count": self._memory_fix_count,
+            "memory_lock_count": self._memory_lock_count,
+            "memory_slot_names": list(self.memory_slot_names),
             "discovered_motor_count": self._discovered_motor_count,
             "has_synchro": self._has_synchro,
             "synchro_active": self._synchro_active,
@@ -641,6 +726,16 @@ class OctoController(BedController):
         if self._is_one_motor_lift:
             return 0
         return self._memory_count if self._memory_count is not None else 0
+
+    @property
+    def supports_memory_programming(self) -> bool:
+        """Return True if the bed exposes saveable memory slots.
+
+        Octo saves a position with CONFIG/SAVE_MOTORPOS. Slots the bed reports
+        as locked via CAP_MEMINFO are excluded individually by
+        is_memory_slot_programmable().
+        """
+        return self.supports_memory_presets
 
     @property
     def discovered_motor_count(self) -> int | None:
@@ -747,6 +842,9 @@ class OctoController(BedController):
         self._has_rgbwi = False
         self._rgbwi_value_type = None
         self._memory_count = None
+        self._memory_fix_count = 0
+        self._memory_lock_count = 0
+        self._memory_descriptions = ()
         self._discovered_motor_count = None
         self._has_synchro = None
         self._pin_sent = False
@@ -923,6 +1021,18 @@ class OctoController(BedController):
         """Stop fourth motor."""
         await self._stop_motors()
 
+    async def _move_motor34_up(self) -> None:
+        """Move motors 3 and 4 up together (CD_MOTOR34)."""
+        await self._octo_move_with_stop(OCTO_MOTOR_34, "up")
+
+    async def _move_motor34_down(self) -> None:
+        """Move motors 3 and 4 down together (CD_MOTOR34)."""
+        await self._octo_move_with_stop(OCTO_MOTOR_34, "down")
+
+    async def _move_motor34_stop(self) -> None:
+        """Stop motors 3 and 4."""
+        await self._stop_motors()
+
     async def _move_tv_lift_up(self) -> None:
         """Raise an OCTO one-motor TV lift."""
         await self._octo_move_with_stop(OCTO_MOTOR_HEAD, "up")
@@ -1005,6 +1115,19 @@ class OctoController(BedController):
                     max_angle=45,
                 )
             )
+            # The official 4-motor layout offers motors 3+4 as one hardware
+            # synchronised step (CD_MOTOR34), which is not the same as driving
+            # the two covers one after the other. The app labels this step with
+            # a pictogram rather than text, so the name here is ours.
+            specs.append(
+                MotorControlSpec(
+                    key="head_feet",
+                    translation_key="head_feet",
+                    open_fn=lambda ctrl: cast(OctoController, ctrl)._move_motor34_up(),
+                    close_fn=lambda ctrl: cast(OctoController, ctrl)._move_motor34_down(),
+                    stop_fn=lambda ctrl: cast(OctoController, ctrl)._move_motor34_stop(),
+                )
+            )
 
         return tuple(specs)
 
@@ -1022,7 +1145,7 @@ class OctoController(BedController):
     def stale_motor_entity_keys(self) -> frozenset[str]:
         """Return entity keys belonging to the other OCTO actuator layout."""
         if self._is_one_motor_lift:
-            return frozenset({"back", "legs", "head", "feet"})
+            return frozenset({"back", "legs", "head", "feet", "head_feet"})
         return frozenset({"tv_lift"})
 
     # Preset methods
@@ -1076,10 +1199,21 @@ class OctoController(BedController):
 
         # Protocol uses 0-based slot index
         slot = memory_num - 1
-        await self._write_octo_command(
-            command=[0x02, 0x72],  # NORMAL packet, MOTOR_MEMPOS command
-            data=[slot],
-        )
+        # MOTOR_MEMPOS is hold-to-run, not one-shot: the official app streams
+        # it on the same 350ms cadence as a motor button and releases with
+        # MOTORS_STOP. Firing it once moves the bed a fraction of the way and
+        # then stalls, so drive it like any other movement.
+        pulse_count = max(1, self._coordinator.motor_pulse_count)
+        pulse_delay = max(1, self._coordinator.motor_pulse_delay_ms)
+        try:
+            await self._write_octo_command(
+                command=[0x02, 0x72],  # NORMAL packet, MOTOR_MEMPOS command
+                data=[slot],
+                repeat_count=pulse_count,
+                repeat_delay_ms=pulse_delay,
+            )
+        finally:
+            await self._stop_motors()
 
     async def program_memory(self, memory_num: int) -> None:
         """Save current position to memory slot.
