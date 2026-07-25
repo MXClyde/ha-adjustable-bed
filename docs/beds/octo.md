@@ -39,9 +39,49 @@ not established by the app.
 
 The integration raises a repair notification when capability discovery reports
 `CAP_BLE_PIN` locked while no PIN is configured. Enter the PIN in the
-integration options to fix it. There is no documented factory-default PIN;
-some users report `0000` on receivers that were never given one, and the app
-links to `https://octo-customer.com/pinlost/` for recovery.
+integration options to fix it.
+
+### Lost PIN: factory reset
+
+There is **no factory-default PIN**. OCTO's recovery page
+(<https://octo-customer.com/pinlost/>, linked from the app) publishes a reset
+procedure per receiver instead of a default code. A factory-reset receiver has
+no PIN set (`CAP_BLE_PIN` `value[0]` becomes 0), so it is no longer locked.
+
+> ⚠️ Every one of these is a **factory reset**. OCTO's wording: "this resets
+> your controller to the factory settings! After this procedure, all data is
+> irrevocably deleted and remotes must be reteached!" For Brick 2 that also
+> includes "other connected peripherals (base station, cable remote control)".
+>
+> Find the PIN in the OCTO Smart Control app first. Treat the reset as the
+> fallback.
+
+| OCTO product | Likely BLE name | Procedure | Confirmation |
+|--------------|-----------------|-----------|--------------|
+| `CTL_RCV2` (Receiver II) | `RC2` | Button on the controller **10x in quick succession** | Light flashes 1x |
+| `CTL_BMB` (BrickMini Basic) | `BMB` | Button on the controller **10x in quick succession** | Light flashes 1x |
+| `CTL_BRICK2` (Brick 2) | `OCTOBrick2` | Button **1x briefly, then 1x long (approx. 10 s)** | Beeps 3x briefly |
+| `9021` | not established | Button **1x briefly, then 1x long (approx. 10 s)** | Light flashes 1x |
+| `1001` | not established | Button **1x briefly, then 1x long (approx. 10 s)** | Beeps 3x briefly |
+| `CTL_LIFT_MICRO` | not established | Reset from the **remote**, not the controller (below) | See below |
+
+The BLE-name column is a best-effort match against the official name prefixes;
+only the first three are confident. If your receiver is not one of those, pick
+it by its photo on the recovery page.
+
+`CTL_LIFT_MICRO` is reset from the remote instead. All four hold for approx.
+10 s, and the status LED starts flashing after 3 s then goes out at 10 s to
+confirm:
+
+| Remote | Keys to hold |
+|--------|--------------|
+| `2002` | `1` + `2` together. The remote must be in **SD mode** first (blue ring flashing; press `D` to activate it) |
+| `2003` | Both side buttons together |
+| `2007` | **Back up** + **Back down** together |
+| `2008` | **Back up** + **Back down** together |
+
+Procedures transcribed from <https://octo-customer.com/pinlost/> (retrieved
+2026-07-25).
 
 If a support bundle is needed, `controller.protocol_state` in the bundle records
 what discovery resolved: `has_pin`, `pin_locked`, `pin_configured`, `pin_sent`,
