@@ -729,14 +729,20 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
                     "again."
                 )
             else:
+                # `logger:` only sets levels - it does not create a file handler,
+                # so it cannot help an install that logs to stdout instead of
+                # home-assistant.log. Point at the flow that always yields a
+                # downloadable log.
                 logging_notice = (
-                    "\n\n⚠️ **This bundle contains no logs.** No Home Assistant log "
-                    "file was found, so the reason a command failed is usually not "
-                    "recoverable from it. To capture a complete bundle, add\n\n"
-                    "```yaml\nlogger:\n  default: warning\n  logs:\n"
-                    "    custom_components.adjustable_bed: debug\n```\n\n"
-                    "to `configuration.yaml`, restart Home Assistant, reproduce the "
-                    "problem, then run this service again."
+                    "\n\n⚠️ **This bundle contains no logs.** Home Assistant is not "
+                    "writing a `home-assistant.log` file (common on container "
+                    "installs that log to stdout), so the reason a command failed is "
+                    "usually not recoverable from it.\n\n"
+                    "Use **Settings → Devices & services → Adjustable Bed → ⋮ → "
+                    "Enable debug logging** instead, reproduce the problem, then "
+                    "**Disable debug logging** to download the captured log and "
+                    "attach it alongside this bundle. The full log is also available "
+                    "under **Settings → System → Logs → Load full logs**."
                 )
 
         async_create(

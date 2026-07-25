@@ -233,7 +233,7 @@ def update_octo_pin_required_issue(
     hass: HomeAssistant,
     address: str,
     name: str,
-    pin_locked_without_pin: bool,
+    pin_locked_without_pin: bool | None,
 ) -> None:
     """Raise or clear the "Octo receiver is PIN locked" Repairs issue.
 
@@ -241,7 +241,14 @@ def update_octo_pin_required_issue(
     switches its under-bed light, but it silently drops every motor packet. That
     is indistinguishable from a broken protocol implementation unless we say so,
     and the fix (enter the PIN in the options flow) is not discoverable.
+
+    ``None`` means capability discovery did not resolve the lock state, and the
+    last known state is left untouched. Retracting the warning on a transient
+    discovery timeout would be a claim we have not earned.
     """
+    if pin_locked_without_pin is None:
+        return
+
     issue_id = _octo_pin_required_issue_id(address)
 
     if not pin_locked_without_pin:

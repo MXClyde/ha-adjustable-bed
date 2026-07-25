@@ -37,8 +37,10 @@ options to fix it. Receivers reset to factory defaults commonly use `0000`.
 
 If a support bundle is needed, `controller.protocol_state` in the bundle records
 what discovery resolved: `has_pin`, `pin_locked`, `pin_configured`, `pin_sent`,
-and whether `feature_discovery_complete` was reached at all. The PIN value is
-never included.
+and whether `feature_discovery_complete` was reached at all. `null` means the
+capability was never reported (usually a discovery timeout) rather than absent,
+and the repair is left untouched in that case rather than being retracted. The
+PIN value is never included.
 
 ### How to Configure Your PIN
 

@@ -505,15 +505,23 @@ class OctoController(BedController):
         return bool(self._pin)
 
     @property
-    def pin_locked_without_pin(self) -> bool:
-        """Return True if the bed is PIN locked but no PIN is configured.
+    def pin_locked_without_pin(self) -> bool | None:
+        """Return whether the bed is PIN locked with no PIN configured.
 
         A locked Octo receiver silently ignores motor packets while still
         accepting light and capability packets, so this state looks like a bed
-        that connects fine but never moves. Only reported once capability
-        discovery has actually resolved CAP_PIN.
+        that connects fine but never moves.
+
+        Returns None when capability discovery has not resolved CAP_PIN. That
+        is deliberately distinct from False: a transient discovery timeout must
+        not be read as "the lock was resolved", or one failed reconnect would
+        retract a correct warning.
         """
-        return bool(self._has_pin) and bool(self._pin_locked) and not self._pin
+        if self._pin:
+            return False
+        if self._has_pin is None:
+            return None
+        return bool(self._has_pin) and bool(self._pin_locked)
 
     @property
     def protocol_diagnostics(self) -> dict[str, Any]:

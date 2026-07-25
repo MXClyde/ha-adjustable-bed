@@ -1178,11 +1178,12 @@ class TestOctoPinLockDiagnostics:
             (True, True, "1234", False),
             (True, False, "", False),
             (False, False, "", False),
-            (None, None, "", False),
+            # Discovery never resolved CAP_PIN: unknown, not "unlocked".
+            (None, None, "", None),
         ],
     )
     def test_pin_locked_without_pin(
-        self, has_pin: bool | None, pin_locked: bool | None, pin: str, expected: bool
+        self, has_pin: bool | None, pin_locked: bool | None, pin: str, expected: bool | None
     ):
         """Only a discovered lock with no configured PIN counts as the bad state."""
         coordinator = MagicMock()
@@ -1379,3 +1380,24 @@ class TestOctoPinLockDiagnostics:
         await async_remove_entry(hass, mock_octo_config_entry)
 
         assert registry.async_get_issue(DOMAIN, issue_id) is None
+
+    async def test_inconclusive_discovery_keeps_an_existing_repair(
+        self,
+        hass: HomeAssistant,
+    ):
+        """One failed reconnect must not retract a warning we already earned."""
+        from homeassistant.helpers import issue_registry as ir
+
+        from custom_components.adjustable_bed.unsupported import (
+            update_octo_pin_required_issue,
+        )
+
+        issue_id = "octo_pin_required_aa_bb_cc_dd_ee_ff"
+        registry = ir.async_get(hass)
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
+        assert registry.async_get_issue(DOMAIN, issue_id) is not None
+
+        # Discovery timed out on a later connect: state unknown, not resolved.
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", None)
+
+        assert registry.async_get_issue(DOMAIN, issue_id) is not None

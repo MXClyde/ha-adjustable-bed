@@ -1475,7 +1475,9 @@ class TestSupportBundleLoggingWarning:
         title, message = created[0]
         assert title == "Adjustable Bed Support Bundle Ready"
         assert "This bundle contains no logs" in message
-        assert "logger:" in message
+        assert "Enable debug logging" in message
+        # `logger:` only sets levels; it cannot create a missing log file.
+        assert "logger:" not in message
         assert "[Errno 2] No such file or directory" in caplog.text
 
     async def test_notification_reports_a_read_error_instead_of_logger_advice(
