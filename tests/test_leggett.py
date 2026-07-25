@@ -139,24 +139,88 @@ class TestLeggettOkinController:
 
         assert controller.supports_massage_off_control is False
 
-    async def test_motor_uses_configured_lp_control_cadence(self):
-        """Motor repeats use the APK-derived 200ms default through coordinator settings."""
+    async def test_motor_streams_then_sends_four_release_frames(self):
+        """Held keycodes stream at the configured cadence, then release with four zeros.
+
+        The app's output thread writes the held keycode every 100ms and emits
+        exactly four keycode-0 frames on release (MaxZeroCount = 3). There is no
+        distinct stop opcode; the release frame is an ordinary frame carrying 0.
+        """
         coordinator = MagicMock()
-        coordinator.motor_pulse_count = 5
-        coordinator.motor_pulse_delay_ms = 200
+        coordinator.motor_pulse_count = 10
+        coordinator.motor_pulse_delay_ms = 100
         controller = LeggettOkinController(coordinator)
         controller.write_command = AsyncMock()
 
         await controller.move_head_up()
 
-        move_call, stop_call = controller.write_command.await_args_list
+        move_call, release_call = controller.write_command.await_args_list
         assert move_call.args == (bytes.fromhex("040200000001"),)
         assert move_call.kwargs == {
-            "repeat_count": 5,
-            "repeat_delay_ms": 200,
+            "repeat_count": 10,
+            "repeat_delay_ms": 100,
         }
-        assert stop_call.args == (bytes.fromhex("040200000000"),)
-        assert stop_call.kwargs["cancel_event"].is_set() is False
+        assert release_call.args == (bytes.fromhex("040200000000"),)
+        assert release_call.kwargs["repeat_count"] == 4
+        assert release_call.kwargs["cancel_event"].is_set() is False
+
+    @pytest.mark.parametrize(
+        ("slot", "keycode"),
+        [(1, "00001000"), (2, "00002000"), (3, "00004000"), (4, "00008000")],
+    )
+    async def test_memory_recall_ladder_and_burst(self, slot: int, keycode: str):
+        """Recall is a 10-frame burst of the slot bit with no terminator.
+
+        The ladder previously started at 0x2000 and ran to 0x10000, so every slot
+        recalled its neighbour and "memory 4" actually sent the store-arm keycode
+        (issue #368). Recall is also autonomous: appending a release frame could
+        cancel the move the box just started.
+        """
+        controller = LeggettOkinController(MagicMock())
+        controller.write_command = AsyncMock()
+
+        await controller.preset_memory(slot)
+
+        controller.write_command.assert_awaited_once()
+        call = controller.write_command.await_args
+        assert call.args == (bytes.fromhex(f"0402{keycode}"),)
+        assert call.kwargs == {"repeat_count": 10, "repeat_delay_ms": 100}
+
+    async def test_store_keycode_is_never_a_recall(self):
+        """0x10000 arms an overwrite and must not appear in the recall ladder."""
+        assert LeggettOkinCommands.MEMORY_STORE == 0x10000
+        assert LeggettOkinCommands.MEMORY_STORE not in {
+            LeggettOkinCommands.PRESET_MEMORY_1,
+            LeggettOkinCommands.PRESET_MEMORY_2,
+            LeggettOkinCommands.PRESET_MEMORY_3,
+            LeggettOkinCommands.PRESET_MEMORY_4,
+            LeggettOkinCommands.PRESET_ZERO_G,
+            LeggettOkinCommands.PRESET_ANTI_SNORE,
+        }
+
+    async def test_program_memory_is_a_two_stage_hold(self):
+        """Programming arms with the store keycode, releases, then holds the slot."""
+        controller = LeggettOkinController(MagicMock())
+        controller.write_command = AsyncMock()
+
+        await controller.program_memory(2)
+
+        arm, arm_release, slot, slot_release = controller.write_command.await_args_list
+        # ~5s of the store keycode...
+        assert arm.args == (bytes.fromhex("040200010000"),)
+        assert arm.kwargs == {"repeat_count": 50, "repeat_delay_ms": 100}
+        assert arm_release.args == (bytes.fromhex("040200000000"),)
+        # ...a release, then ~2s of the slot keycode, then a release.
+        assert slot.args == (bytes.fromhex("040200002000"),)
+        assert slot.kwargs == {"repeat_count": 20, "repeat_delay_ms": 100}
+        assert slot_release.args == (bytes.fromhex("040200000000"),)
+
+    async def test_massage_timer_step_is_not_exposed(self):
+        """0x200 is a constant the app never builds or writes, so it is not a command."""
+        controller = LeggettOkinController(MagicMock())
+
+        assert not hasattr(LeggettOkinCommands, "MASSAGE_TIMER_STEP")
+        assert not hasattr(controller, "massage_timer_step")
 
 
 class TestLeggettGen2CommandFormat:

@@ -38,18 +38,27 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class LeggettOkinCommands:
-    """Leggett & Platt Okin command constants (32-bit values).
+    """Leggett & Platt Okin keycode constants (32-bit values).
 
-    Same as Keeson/Okimat since they share the Okin protocol.
+    Semantics come from the layout bindings in com.leggett.prodigy4 1.2.0, not
+    from the app's own ``FBP_KEYCODE_*`` identifiers: several of those names are
+    demonstrably wrong for this hardware (0x800000 is declared
+    LIGHT_INTENSITY_DOWN but is bound to the head massage-down button). See
+    docs/beds/leggett-okin.md.
     """
 
-    # Presets
+    # Presets. FLAT is a held button rather than a one-shot recall; the memory
+    # slots and SNORE are one-shot recalls the control box completes on its own.
     PRESET_FLAT = 0x8000000
-    PRESET_ZERO_G = 0x1000
-    PRESET_MEMORY_1 = 0x2000
-    PRESET_MEMORY_2 = 0x4000
-    PRESET_MEMORY_3 = 0x8000
-    PRESET_MEMORY_4 = 0x10000
+    PRESET_ZERO_G = 0x1000  # Deliberate alias of memory 1
+    PRESET_MEMORY_1 = 0x1000
+    PRESET_MEMORY_2 = 0x2000
+    PRESET_MEMORY_3 = 0x4000  # Ships pre-assigned as the snore position
+    PRESET_MEMORY_4 = 0x8000
+    PRESET_ANTI_SNORE = 0x4000  # Deliberate alias of memory 3
+    # Arms the control box to overwrite the next recalled slot. This is NOT a
+    # recall: sending it alone and then a slot code reprograms that slot.
+    MEMORY_STORE = 0x10000
 
     # Motor controls
     MOTOR_HEAD_UP = 0x1
@@ -67,11 +76,33 @@ class LeggettOkinCommands:
     MASSAGE_FOOT_UP = 0x400
     MASSAGE_FOOT_DOWN = 0x1000000
     MASSAGE_STEP = 0x100
-    MASSAGE_TIMER_STEP = 0x200
     MASSAGE_WAVE_STEP = 0x10000000
 
     # Lights
     TOGGLE_LIGHTS = 0x20000
+
+
+# The app streams a held keycode until release, then emits exactly four
+# keycode-0 frames (OutputThread.runNormal, MaxZeroCount = 3). There is no
+# distinct stop opcode: the release frame is an ordinary frame carrying 0.
+RELEASE_FRAME_COUNT = 4
+
+# A memory recall is a fixed 10-frame burst with no terminator at all. The
+# control box drives the move to completion by itself, so appending a release
+# frame here could cancel the motion the recall just started.
+RECALL_FRAME_COUNT = 10
+RECALL_FRAME_DELAY_MS = 100
+
+# Programming a slot is a two-stage hold, not an opcode: arm with MEMORY_STORE
+# for ~5s, release, then hold the slot keycode for ~2s.
+MEMORY_STORE_HOLD_S = 5.0
+MEMORY_SLOT_HOLD_S = 2.0
+MEMORY_PROGRAM_FRAME_DELAY_MS = 100
+
+# FLAT is a held button with no app-defined duration - the user holds it until
+# the bed is down. This is how long the integration streams it for; it is a
+# usability choice, not a protocol constant.
+FLAT_HOLD_S = 30.0
 
 
 class MotorDirection(Enum):
@@ -107,7 +138,8 @@ class LeggettOkinController(BedController):
 
     @property
     def supports_preset_anti_snore(self) -> bool:
-        return False  # Okin variant doesn't support Anti-Snore
+        """Return True - 0x4000 is bound to the app's dedicated snore button."""
+        return True
 
     @property
     def supports_lights(self) -> bool:
@@ -131,8 +163,8 @@ class LeggettOkinController(BedController):
 
     @property
     def supports_memory_programming(self) -> bool:
-        """Return False - Okin beds don't support programming memory positions."""
-        return False
+        """Return True - slots are programmed by the two-stage store hold."""
+        return True
 
     @property
     def has_tilt_support(self) -> bool:
@@ -195,18 +227,34 @@ class LeggettOkinController(BedController):
                 )
         finally:
             self._motor_state = {}
-            # Shield the STOP command to ensure it runs even if cancelled
-            try:
-                await asyncio.shield(
-                    self.write_command(
-                        self._build_command(0),
-                        cancel_event=asyncio.Event(),
-                    )
+            await self._send_release_frames("motor movement")
+
+    async def _send_release_frames(self, context: str) -> None:
+        """Send the release burst that ends a held keycode.
+
+        The app emits exactly four keycode-0 frames when a button is released,
+        so mirror that rather than a single frame. Shielded and given a fresh
+        cancel event so a stop request cannot suppress the release itself.
+        """
+        try:
+            await asyncio.shield(
+                self.write_command(
+                    self._build_command(0),
+                    repeat_count=RELEASE_FRAME_COUNT,
+                    repeat_delay_ms=RECALL_FRAME_DELAY_MS,
+                    cancel_event=asyncio.Event(),
                 )
-            except asyncio.CancelledError:
-                raise
-            except BleakError:
-                _LOGGER.debug("Failed to send stop command during cleanup", exc_info=True)
+            )
+        except asyncio.CancelledError:
+            raise
+        except BleakError:
+            # The release burst is this protocol's only stop, so a failure can
+            # leave the bed still moving. That is worth surfacing, not hiding.
+            _LOGGER.warning(
+                "Failed to send release frames after %s; the bed may still be moving",
+                context,
+                exc_info=True,
+            )
 
     # Motor control methods
     async def move_head_up(self) -> None:
@@ -258,100 +306,96 @@ class LeggettOkinController(BedController):
         await self.move_legs_stop()
 
     async def stop_all(self) -> None:
-        """Stop all motors."""
+        """Stop all motors by sending the release burst."""
         self._motor_state = {}
-        await self.write_command(
-            self._build_command(0),
-            cancel_event=asyncio.Event(),
-        )
+        await self._send_release_frames("stop_all")
 
     # Preset methods
+    _MEMORY_SLOTS = {
+        1: LeggettOkinCommands.PRESET_MEMORY_1,
+        2: LeggettOkinCommands.PRESET_MEMORY_2,
+        3: LeggettOkinCommands.PRESET_MEMORY_3,
+        4: LeggettOkinCommands.PRESET_MEMORY_4,
+    }
+
+    async def _recall(self, command: int) -> None:
+        """Send a one-shot recall burst.
+
+        Recall is 10 frames at 100ms and then silence: the control box drives
+        the move to completion on its own. This is the one command family the
+        app deliberately leaves unterminated, so no release frames follow -
+        they could cancel the motion the recall just started.
+        """
+        await self.write_command(
+            self._build_command(command),
+            repeat_count=RECALL_FRAME_COUNT,
+            repeat_delay_ms=RECALL_FRAME_DELAY_MS,
+        )
+
     async def preset_flat(self) -> None:
-        """Go to flat position."""
+        """Go to flat position.
+
+        Unlike the memory slots, FLAT is a held button rather than an
+        autonomous recall: the bed moves only while frames keep arriving, so
+        this streams for roughly the time a full recline takes and then
+        releases.
+        """
+        _, pulse_delay_ms = self.motor_pulse_settings()
+        repeat_count = max(1, round(FLAT_HOLD_S * 1000 / pulse_delay_ms))
         try:
             await self.write_command(
                 self._build_command(LeggettOkinCommands.PRESET_FLAT),
-                repeat_count=100,
-                repeat_delay_ms=300,
+                repeat_count=repeat_count,
+                repeat_delay_ms=pulse_delay_ms,
             )
         finally:
-            try:
-                await asyncio.shield(
-                    self.write_command(
-                        self._build_command(0),
-                        cancel_event=asyncio.Event(),
-                    )
-                )
-            except asyncio.CancelledError:
-                raise
-            except BleakError:
-                _LOGGER.debug(
-                    "Failed to send STOP command during preset_flat cleanup", exc_info=True
-                )
+            await self._send_release_frames("preset_flat")
 
     async def preset_memory(self, memory_num: int) -> None:
         """Go to memory preset."""
-        commands = {
-            1: LeggettOkinCommands.PRESET_MEMORY_1,
-            2: LeggettOkinCommands.PRESET_MEMORY_2,
-            3: LeggettOkinCommands.PRESET_MEMORY_3,
-            4: LeggettOkinCommands.PRESET_MEMORY_4,
-        }
-        if command := commands.get(memory_num):
-            try:
-                await self.write_command(
-                    self._build_command(command),
-                    repeat_count=100,
-                    repeat_delay_ms=300,
-                )
-            finally:
-                try:
-                    await asyncio.shield(
-                        self.write_command(
-                            self._build_command(0),
-                            cancel_event=asyncio.Event(),
-                        )
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except BleakError:
-                    _LOGGER.debug(
-                        "Failed to send STOP command during preset_memory cleanup", exc_info=True
-                    )
+        command = self._MEMORY_SLOTS.get(memory_num)
+        if command is None:
+            _LOGGER.warning("Invalid memory slot for recall: %d", memory_num)
+            return
+        await self._recall(command)
 
     async def program_memory(self, memory_num: int) -> None:
-        """Program current position to memory (not supported on Okin)."""
-        _LOGGER.warning(
-            "Okin beds don't support programming memory presets (requested slot: %d)",
-            memory_num,
+        """Store the current position into a memory slot.
+
+        There is no program opcode. The box is armed by holding MEMORY_STORE
+        for ~5s, then records whichever slot keycode is held for the following
+        ~2s. Both stages are ordinary held keycodes, so each ends with the
+        normal release burst.
+        """
+        command = self._MEMORY_SLOTS.get(memory_num)
+        if command is None:
+            _LOGGER.warning("Invalid memory slot for programming: %d", memory_num)
+            return
+
+        _LOGGER.debug("Arming memory store for slot %d", memory_num)
+        try:
+            await self._hold_keycode(LeggettOkinCommands.MEMORY_STORE, MEMORY_STORE_HOLD_S)
+            await self._send_release_frames("memory store arm")
+            await self._hold_keycode(command, MEMORY_SLOT_HOLD_S)
+        finally:
+            await self._send_release_frames("memory store slot")
+
+    async def _hold_keycode(self, command: int, hold_seconds: float) -> None:
+        """Stream a keycode for a fixed duration, as a held button would."""
+        repeat_count = max(1, round(hold_seconds * 1000 / MEMORY_PROGRAM_FRAME_DELAY_MS))
+        await self.write_command(
+            self._build_command(command),
+            repeat_count=repeat_count,
+            repeat_delay_ms=MEMORY_PROGRAM_FRAME_DELAY_MS,
         )
 
     async def preset_zero_g(self) -> None:
-        """Go to zero gravity position."""
-        try:
-            await self.write_command(
-                self._build_command(LeggettOkinCommands.PRESET_ZERO_G),
-                repeat_count=100,
-                repeat_delay_ms=300,
-            )
-        finally:
-            try:
-                await asyncio.shield(
-                    self.write_command(
-                        self._build_command(0),
-                        cancel_event=asyncio.Event(),
-                    )
-                )
-            except asyncio.CancelledError:
-                raise
-            except BleakError:
-                _LOGGER.debug(
-                    "Failed to send STOP command during preset_zero_g cleanup", exc_info=True
-                )
+        """Go to zero gravity position (memory slot 1 on this protocol)."""
+        await self._recall(LeggettOkinCommands.PRESET_ZERO_G)
 
     async def preset_anti_snore(self) -> None:
-        """Go to anti-snore position (not supported on Okin)."""
-        _LOGGER.warning("Anti-snore preset not available on Okin beds")
+        """Go to anti-snore position (memory slot 3 on this protocol)."""
+        await self._recall(LeggettOkinCommands.PRESET_ANTI_SNORE)
 
     # Light methods
     async def lights_toggle(self) -> None:
@@ -396,10 +440,6 @@ class LeggettOkinController(BedController):
     async def massage_wave_step(self) -> None:
         """Step through massage wave patterns."""
         await self.write_command(self._build_command(LeggettOkinCommands.MASSAGE_WAVE_STEP))
-
-    async def massage_timer_step(self) -> None:
-        """Step through massage timer options."""
-        await self.write_command(self._build_command(LeggettOkinCommands.MASSAGE_TIMER_STEP))
 
     # Tilt motor control
     async def move_tilt_up(self) -> None:

@@ -49,6 +49,8 @@ from custom_components.adjustable_bed.const import (
     DEFAULT_MOTOR_PULSE_COUNT,
     DEFAULT_MOTOR_PULSE_DELAY_MS,
     DOMAIN,
+    LEGGETT_OKIN_PULSE_DEFAULTS,
+    LEGGETT_OKIN_SUPERSEDED_PULSE_DEFAULTS,
     LEGGETT_VARIANT_OKIN,
     NORDIC_DFU_SERVICE_UUID,
     OKIMAT_SERVICE_UUID,
@@ -2949,18 +2951,22 @@ class TestRuntimeBedTypeCorrection:
             coordinator.motor_pulse_delay_ms,
         ) == new_okin_defaults
 
-    async def test_existing_leggett_okin_migrates_persisted_generic_pulse_defaults(
+    async def test_existing_leggett_okin_migrates_superseded_pulse_defaults(
         self,
         hass: HomeAssistant,
         mock_config_entry_data: dict,
     ):
-        """Existing Leggett Okin entries should adopt LP Control's proven cadence."""
+        """Entries carrying the superseded cadence adopt the Prodigy CE one.
+
+        (5, 200) was written into these entries by an earlier release of this
+        same migration, not by the user, so correcting it is safe.
+        """
         coordinator = self._make_coordinator(
             hass,
             mock_config_entry_data,
             {
-                CONF_MOTOR_PULSE_COUNT: DEFAULT_MOTOR_PULSE_COUNT,
-                CONF_MOTOR_PULSE_DELAY_MS: DEFAULT_MOTOR_PULSE_DELAY_MS,
+                CONF_MOTOR_PULSE_COUNT: LEGGETT_OKIN_SUPERSEDED_PULSE_DEFAULTS[0],
+                CONF_MOTOR_PULSE_DELAY_MS: LEGGETT_OKIN_SUPERSEDED_PULSE_DEFAULTS[1],
             },
             bed_type=BED_TYPE_LEGGETT_OKIN,
         )
@@ -2968,9 +2974,12 @@ class TestRuntimeBedTypeCorrection:
         changed = coordinator._apply_runtime_bed_type_correction(BED_TYPE_LEGGETT_OKIN)
 
         assert changed is True
-        assert (coordinator.motor_pulse_count, coordinator.motor_pulse_delay_ms) == (5, 200)
-        assert coordinator.entry.data[CONF_MOTOR_PULSE_COUNT] == 5
-        assert coordinator.entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 200
+        assert (
+            coordinator.motor_pulse_count,
+            coordinator.motor_pulse_delay_ms,
+        ) == LEGGETT_OKIN_PULSE_DEFAULTS
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_COUNT] == LEGGETT_OKIN_PULSE_DEFAULTS[0]
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_DELAY_MS] == LEGGETT_OKIN_PULSE_DEFAULTS[1]
 
     async def test_existing_leggett_okin_preserves_user_saved_generic_cadence(
         self,
@@ -3038,8 +3047,8 @@ class TestRuntimeBedTypeCorrection:
             mock_config_entry_data,
             {
                 CONF_PROTOCOL_VARIANT: LEGGETT_VARIANT_OKIN,
-                CONF_MOTOR_PULSE_COUNT: DEFAULT_MOTOR_PULSE_COUNT,
-                CONF_MOTOR_PULSE_DELAY_MS: DEFAULT_MOTOR_PULSE_DELAY_MS,
+                CONF_MOTOR_PULSE_COUNT: LEGGETT_OKIN_SUPERSEDED_PULSE_DEFAULTS[0],
+                CONF_MOTOR_PULSE_DELAY_MS: LEGGETT_OKIN_SUPERSEDED_PULSE_DEFAULTS[1],
             },
             bed_type=BED_TYPE_LEGGETT_PLATT,
         )
@@ -3048,9 +3057,12 @@ class TestRuntimeBedTypeCorrection:
 
         assert changed is True
         assert coordinator.bed_type == BED_TYPE_LEGGETT_PLATT
-        assert (coordinator.motor_pulse_count, coordinator.motor_pulse_delay_ms) == (5, 200)
-        assert coordinator.entry.data[CONF_MOTOR_PULSE_COUNT] == 5
-        assert coordinator.entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 200
+        assert (
+            coordinator.motor_pulse_count,
+            coordinator.motor_pulse_delay_ms,
+        ) == LEGGETT_OKIN_PULSE_DEFAULTS
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_COUNT] == LEGGETT_OKIN_PULSE_DEFAULTS[0]
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_DELAY_MS] == LEGGETT_OKIN_PULSE_DEFAULTS[1]
 
     async def test_correction_updates_shared_okin_bed_type(
         self,
@@ -3571,10 +3583,10 @@ class TestRuntimeBedTypeCorrection:
         assert coordinator.disable_angle_sensing is True
         assert entry.data[CONF_BED_TYPE] == BED_TYPE_LEGGETT_OKIN
         assert entry.data[CONF_DISABLE_ANGLE_SENSING] is True
-        assert coordinator.motor_pulse_count == 5
-        assert coordinator.motor_pulse_delay_ms == 200
-        assert entry.data[CONF_MOTOR_PULSE_COUNT] == 5
-        assert entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 200
+        assert coordinator.motor_pulse_count == LEGGETT_OKIN_PULSE_DEFAULTS[0]
+        assert coordinator.motor_pulse_delay_ms == LEGGETT_OKIN_PULSE_DEFAULTS[1]
+        assert entry.data[CONF_MOTOR_PULSE_COUNT] == LEGGETT_OKIN_PULSE_DEFAULTS[0]
+        assert entry.data[CONF_MOTOR_PULSE_DELAY_MS] == LEGGETT_OKIN_PULSE_DEFAULTS[1]
 
 
 

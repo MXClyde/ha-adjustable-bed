@@ -121,6 +121,7 @@ from .const import (
     DEVICE_INFO_CHARS,
     DEVICE_INFO_READ_TIMEOUT,
     DOMAIN,
+    LEGGETT_OKIN_SUPERSEDED_PULSE_DEFAULTS,
     LEGGETT_VARIANT_GEN2,
     LEGGETT_VARIANT_OKIN,
     MALOUF_LAYOUT_AUTO,
@@ -418,27 +419,26 @@ class AdjustableBedCoordinator:
             CONF_MOTOR_PULSE_COUNT in self.entry.data
             or CONF_MOTOR_PULSE_DELAY_MS in self.entry.data
         )
-        # Config flows historically persisted the generic defaults even when the
-        # user did not customize them. Existing Leggett Okin entries and LP BED
-        # entries misclassified as CST therefore carry (10, 100), with no provenance
-        # that distinguishes those generated values from an override. Restrict this
-        # migration to these Leggett Okin upgrade paths so unrelated explicit
-        # settings remain intact.
+        # Config flows historically persisted generated defaults even when the
+        # user did not customize them, so the presence of the pulse keys proves
+        # nothing on its own. Restrict this migration to the Leggett Okin upgrade
+        # paths so unrelated explicit settings remain intact.
         previous_uses_leggett_okin = previous_bed_type == BED_TYPE_LEGGETT_OKIN or (
             previous_bed_type == BED_TYPE_LEGGETT_PLATT
             and self._protocol_variant == LEGGETT_VARIANT_OKIN
         )
-        # This migration runs on every connect, not just on an actual bed-type
-        # change, and it matches on the generic (10, 100) defaults. Without the
-        # provenance marker it therefore reverted a user who deliberately chose
-        # (10, 100) each time they reconnected, so the option looked unsavable
-        # (issue #368). Values the user saved from the options flow are theirs.
+        # Entries carrying the superseded (5, 200) cadence got it from an earlier
+        # release of this migration rather than from the user, so move them to the
+        # cadence the Prodigy CE analysis proved. CONF_MOTOR_PULSE_USER_SET is the
+        # provenance that keeps a deliberate choice out of this: without it the
+        # migration reverted the user's own values on every connect, which is why
+        # the option looked unsavable (issue #368).
         migrate_leggett_okin_defaults = (
             not self.entry.data.get(CONF_MOTOR_PULSE_USER_SET, False)
             and (previous_uses_leggett_okin or previous_bed_type == BED_TYPE_OKIN_CST)
             and corrected_uses_leggett_okin
             and (self._motor_pulse_count, self._motor_pulse_delay_ms)
-            == (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
+            == LEGGETT_OKIN_SUPERSEDED_PULSE_DEFAULTS
         )
         if (
             corrected_defaults is not None

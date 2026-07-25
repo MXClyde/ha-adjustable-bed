@@ -2062,6 +2062,11 @@ CONNECTION_PROFILES: Final = {
 DEFAULT_MOTOR_PULSE_COUNT: Final = 10  # Default for most beds
 DEFAULT_MOTOR_PULSE_DELAY_MS: Final = 100  # Default for most beds
 
+# Leggett Okin cadence, split out because the coordinator has to recognise the
+# value an earlier release wrote into existing entries in order to correct it.
+LEGGETT_OKIN_PULSE_DEFAULTS: Final = (10, 100)
+LEGGETT_OKIN_SUPERSEDED_PULSE_DEFAULTS: Final = (5, 200)
+
 # Per-bed-type motor pulse defaults based on app disassembly analysis
 # Target: ~1.0 second total motor movement duration (repeat_count = 1000ms / delay_ms)
 BED_MOTOR_PULSE_DEFAULTS: Final = {
@@ -2107,9 +2112,15 @@ BED_MOTOR_PULSE_DEFAULTS: Final = {
     # Leggett WiLinke: 110ms delay → 10 repeats = 1.1s total
     # Source: RICHMAT_MASTER_ANALYSIS.md - MLRM devices use 110ms timing
     BED_TYPE_LEGGETT_WILINKE: (10, 110),
-    # Leggett Okin: LP Control repeats held actuator commands every 200ms.
-    # Source: com.leggett.android.universal 2.9.0 (OkinControlBoxInterface)
-    BED_TYPE_LEGGETT_OKIN: (5, 200),
+    # Leggett Okin: the Prodigy CE app's single output thread writes the held
+    # keycode every 100ms (OutputThread.runNormal, Thread.sleep(100L)), and
+    # every one-shot burst in that app is 10 frames. Source: clean-room analysis
+    # of com.leggett.prodigy4 1.2.0, §11.
+    # LP Control (com.leggett.android.universal 2.9.0) uses 200ms for the same
+    # hardware family, which is where the previous (5, 200) came from. Both are
+    # official apps; 100ms is the safer of the two, because a shorter refresh
+    # cannot fall outside a keep-alive window that a longer one satisfies.
+    BED_TYPE_LEGGETT_OKIN: LEGGETT_OKIN_PULSE_DEFAULTS,
     # OCTO: 350ms delay → 3 repeats = 1.05s total
     # Source: de.octoactuators.octosmartcontrolapp ANALYSIS.md
     BED_TYPE_OCTO: (3, 350),
