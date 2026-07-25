@@ -1741,3 +1741,68 @@ class TestOctoMemoryInfoAndCombinedStep:
         controller = cast(OctoController, coordinator.controller)
 
         assert "head_feet" in controller.stale_motor_entity_keys
+
+    def test_absent_meminfo_leaves_every_slot_programmable(self):
+        """CAP_MEMINFO is optional; without it we must not infer any locking."""
+        controller = self._controller()
+        controller._memory_count = 4  # CAP_MEMCOUNT only, no CAP_MEMINFO
+
+        assert [controller._memory_slot_class(n) for n in range(1, 5)] == ["standard"] * 4
+        assert all(controller.is_memory_slot_programmable(n) for n in range(1, 5))
+
+    def test_invalid_meminfo_leaves_every_slot_programmable(self):
+        """A malformed record is 'unknown', which must not mean 'locked'."""
+        controller = self._controller()
+        controller._memory_count = 4
+        # Characteristic is not 3 bytes, so the record is rejected wholesale.
+        controller._handle_feature_response(self._meminfo_record([4, 1], [0] * 4))
+
+        assert all(controller.is_memory_slot_programmable(n) for n in range(1, 5))
+
+    async def test_long_recall_reauthenticates_so_the_link_survives(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """The recall holds the command lock, starving the PIN keep-alive task."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+        controller._memory_count = 4
+        controller._has_pin = True
+        controller._pin_locked = True
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await controller.preset_memory(1)
+
+        written = [c[0][1] for c in mock_bleak_client.write_gatt_char.call_args_list]
+        pin_packet = controller._build_packet([0x20, 0x43], [1, 2, 3, 4])
+        recall = controller._build_packet([0x02, 0x72], [0x00])
+        # A 30s recall spans more than one ~25s authentication window.
+        assert written.count(pin_packet) >= 2
+        assert written.index(pin_packet) < written.index(recall)
+
+    async def test_cancelled_recall_stops_streaming(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """Stop must end the recall, not just pause one chunk of it."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+        controller._memory_count = 4
+        coordinator.cancel_command.set()
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await controller.preset_memory(1)
+
+        written = [c[0][1] for c in mock_bleak_client.write_gatt_char.call_args_list]
+        recall = controller._build_packet([0x02, 0x72], [0x00])
+        stop = controller._build_packet([0x02, 0x73])
+        assert recall not in written
+        assert written == [stop]

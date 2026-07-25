@@ -497,6 +497,12 @@ class OctoController(BedController):
         Classes partition the slot range contiguously with standard slots at
         the low indices: standard, then fix, then lock.
         """
+        # CAP_MEMINFO is optional. Without a valid record we know nothing about
+        # slot protection, and must not infer any: treating unknown as locked
+        # would hide every Save button on a bed that simply never reports it.
+        if self._memory_mem_count == 0:
+            return "standard"
+
         # Partition on the count this MEMINFO record carried, not on
         # CAP_MEMCOUNT: the two capabilities arrive in whatever order the bed
         # sends them, and using a count of 0 here would drive lock_start
@@ -1235,13 +1241,28 @@ class OctoController(BedController):
         repeat_count = max(
             1, int(OCTO_MEMORY_RECALL_SECONDS * 1000 / OCTO_MEMORY_RECALL_INTERVAL_MS)
         )
+        # The recall runs under the coordinator command lock, which the PIN
+        # keep-alive task also needs. A 30s hold would starve it past the
+        # receiver's ~30s authentication timeout and drop the link mid-recall,
+        # so re-authenticate here instead, in chunks shorter than that window.
+        # send_pin() is a no-op unless the bed actually requires a PIN.
+        chunk_repeats = max(
+            1, int(OCTO_PIN_KEEPALIVE_INTERVAL * 1000 / OCTO_MEMORY_RECALL_INTERVAL_MS)
+        )
         try:
-            await self._write_octo_command(
-                command=[0x02, 0x72],  # NORMAL packet, MOTOR_MEMPOS command
-                data=[slot],
-                repeat_count=repeat_count,
-                repeat_delay_ms=OCTO_MEMORY_RECALL_INTERVAL_MS,
-            )
+            sent = 0
+            while sent < repeat_count:
+                if self._coordinator.cancel_command.is_set():
+                    break
+                await self.send_pin()
+                chunk = min(chunk_repeats, repeat_count - sent)
+                await self._write_octo_command(
+                    command=[0x02, 0x72],  # NORMAL packet, MOTOR_MEMPOS command
+                    data=[slot],
+                    repeat_count=chunk,
+                    repeat_delay_ms=OCTO_MEMORY_RECALL_INTERVAL_MS,
+                )
+                sent += chunk
         finally:
             await self._stop_motors()
 
