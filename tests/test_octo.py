@@ -18,6 +18,8 @@ from custom_components.adjustable_bed.beds.octo import (
     OCTO_FEATURE_LIGHT,
     OCTO_FEATURE_LIGHT_RGBWI,
     OCTO_MAX_RESPONSE_BUFFER_SIZE,
+    OCTO_MEMORY_RECALL_INTERVAL_MS,
+    OCTO_MEMORY_RECALL_SECONDS,
     OCTO_MOTOR_HEAD,
     OCTO_PACKET_CHAR,
     OctoController,
@@ -470,7 +472,9 @@ class TestOctoCommands:
         coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
         controller = OctoController(coordinator)
 
-        assert controller.stale_motor_entity_keys == frozenset({"tv_lift"})
+        # This fixture is a 2-motor bed, so the 4-motor combined step is stale
+        # here too and must not linger in the registry.
+        assert controller.stale_motor_entity_keys == frozenset({"tv_lift", "head_feet"})
 
     async def test_star2_layout_marks_tv_lift_entity_as_stale(
         self,
@@ -1404,6 +1408,46 @@ class TestOctoPinLockDiagnostics:
 
         assert registry.async_get_issue(DOMAIN, issue_id) is not None
 
+    async def test_pin_repair_supplies_every_placeholder_its_text_uses(
+        self,
+        hass: HomeAssistant,
+    ):
+        """A placeholder with no value renders literally in the Repairs card."""
+        import json
+        import string as _string
+        from pathlib import Path
+
+        from homeassistant.helpers import issue_registry as ir
+
+        from custom_components.adjustable_bed.unsupported import (
+            update_octo_pin_required_issue,
+        )
+
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
+        issue = ir.async_get(hass).async_get_issue(
+            DOMAIN, "octo_pin_required_aa_bb_cc_dd_ee_ff"
+        )
+        assert issue is not None
+
+        # Derived from __file__ so the test does not depend on pytest's CWD.
+        strings_path = (
+            Path(__file__).parents[1] / "custom_components/adjustable_bed/strings.json"
+        )
+        strings = json.loads(strings_path.read_text(encoding="utf-8"))
+        text = strings["issues"]["octo_pin_required"]
+        referenced = {
+            field
+            for value in (text["title"], text["description"])
+            for _, field, _, _ in _string.Formatter().parse(value)
+            if field
+        }
+        assert referenced <= set(issue.translation_placeholders or {})
+
+        # hassfest rejects literal URLs in translation strings; the recovery
+        # link has to arrive as a placeholder instead.
+        assert "http" not in text["description"]
+        assert "http" in (issue.translation_placeholders or {})["recovery_url"]
+
     async def test_star2_variant_clears_a_stale_standard_octo_repair(
         self,
         hass: HomeAssistant,
@@ -1563,7 +1607,7 @@ class TestOctoMemoryInfoAndCombinedStep:
         entry = MockConfigEntry(
             domain=DOMAIN,
             title="Octo Test Bed",
-            data={**mock_octo_config_entry_data, CONF_MOTOR_PULSE_COUNT: 3},
+            data=mock_octo_config_entry_data,
             unique_id="AA:BB:CC:DD:EE:FF",
             entry_id="octo_mem_recall",
         )
@@ -1580,7 +1624,12 @@ class TestOctoMemoryInfoAndCombinedStep:
         written = [c[0][1] for c in mock_bleak_client.write_gatt_char.call_args_list]
         recall = controller._build_packet([0x02, 0x72], [0x01])  # 0-based slot
         stop = controller._build_packet([0x02, 0x73])
-        assert written.count(recall) == 3
+        # Streamed for the recall window, not the far shorter button cadence.
+        expected_repeats = int(
+            OCTO_MEMORY_RECALL_SECONDS * 1000 / OCTO_MEMORY_RECALL_INTERVAL_MS
+        )
+        assert written.count(recall) == expected_repeats
+        assert expected_repeats > 3
         assert written[-1] == stop
 
     async def test_four_motor_bed_exposes_the_combined_step(
@@ -1631,40 +1680,64 @@ class TestOctoMemoryInfoAndCombinedStep:
 
         assert "head_feet" not in [s.key for s in controller.motor_control_specs]
 
-    async def test_pin_repair_supplies_every_placeholder_its_text_uses(
+    def test_meminfo_before_memcount_still_classifies_correctly(self):
+        """Capabilities arrive in the bed's order; MEMINFO must not need MEMCOUNT."""
+        controller = self._controller()
+        # No CAP_MEMCOUNT yet: _memory_count is still None.
+        controller._handle_feature_response(self._meminfo_record([4, 0, 1], [0] * 4))
+
+        assert [controller._memory_slot_class(n) for n in range(1, 5)] == [
+            "standard",
+            "standard",
+            "standard",
+            "lock",
+        ]
+        assert controller.is_memory_slot_programmable(4) is False
+
+    async def test_save_preset_service_path_refuses_a_locked_slot(
         self,
         hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
     ):
-        """A placeholder with no value renders literally in the Repairs card."""
-        import json
-        import string as _string
-        from pathlib import Path
-
-        from homeassistant.helpers import issue_registry as ir
-
-        from custom_components.adjustable_bed.unsupported import (
-            update_octo_pin_required_issue,
+        """The button is hidden, but automations call program_memory directly."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+        controller._memory_count = 4
+        controller._handle_feature_response(
+            TestOctoMemoryInfoAndCombinedStep._meminfo_record([4, 0, 1], [0] * 4)
         )
+        mock_bleak_client.write_gatt_char.reset_mock()
 
-        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
-        issue = ir.async_get(hass).async_get_issue(
-            DOMAIN, "octo_pin_required_aa_bb_cc_dd_ee_ff"
+        await controller.program_memory(4)  # locked slot
+
+        mock_bleak_client.write_gatt_char.assert_not_called()
+
+        await controller.program_memory(1)  # standard slot
+
+        expected = controller._build_packet([0x10, 0x70], [0x00])
+        assert expected in [c[0][1] for c in mock_bleak_client.write_gatt_char.call_args_list]
+
+    async def test_combined_cover_becomes_stale_when_motor_count_drops(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry_data: dict,
+        mock_coordinator_connected,
+    ):
+        """Reconfiguring 4 motors down must not leave a ghost entity behind."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Octo Test Bed",
+            data={**mock_octo_config_entry_data, CONF_MOTOR_COUNT: 2},
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id="octo_stale_m34",
         )
-        assert issue is not None
+        entry.add_to_hass(hass)
 
-        strings = json.loads(
-            Path("custom_components/adjustable_bed/strings.json").read_text(encoding="utf-8")
-        )
-        text = strings["issues"]["octo_pin_required"]
-        referenced = {
-            field
-            for value in (text["title"], text["description"])
-            for _, field, _, _ in _string.Formatter().parse(value)
-            if field
-        }
-        assert referenced <= set(issue.translation_placeholders or {})
+        coordinator = AdjustableBedCoordinator(hass, entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
 
-        # hassfest rejects literal URLs in translation strings; the recovery
-        # link has to arrive as a placeholder instead.
-        assert "http" not in text["description"]
-        assert "http" in (issue.translation_placeholders or {})["recovery_url"]
+        assert "head_feet" in controller.stale_motor_entity_keys

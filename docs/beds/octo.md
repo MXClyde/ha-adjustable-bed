@@ -266,7 +266,7 @@ The all-motors step is down-only in the app, which is what "Flat" means for
 this protocol: the integration's Flat control sends `0x06`, `0x0E` or `0x1E`
 according to the configured motor count, so 3M and 4M receivers (`RC3`, `BM3`
 and 4-motor bases) actually reach flat instead of leaving the extra actuators
-parked. A motor count the app does not recognise renders no controls at all.
+parked. A motor count the app does not recognize renders no controls at all.
 
 #### Light Commands
 
@@ -296,8 +296,8 @@ The integration queries capabilities via `[0x20, 0x71]`. Known feature IDs:
 | `0x000001` | CAP_MOTORCOUNT | Motor count reported by the device (1-4; Standard OCTO supports 1-4) |
 | `0x000002` | CAP_MEMCOUNT | Memory preset count |
 | `0x000003` | CAP_BLE_PIN | PIN state + lock state (see below) |
-| `0x000101` | CAP_SYNCHRO | Synchro/linked mode support |
 | `0x000004` | CAP_MEMINFO | Memory slot classes and per-slot names |
+| `0x000101` | CAP_SYNCHRO | Synchro/linked mode support |
 | `0x000102` | CAP_LIGHT | Under-bed light support (on/off) |
 | `0x000104` | CAP_LIGHT_RGBWI | RGB + White + Intensity light control |
 | `0xFFFFFF` | End sentinel | Marks end of feature list |
@@ -329,19 +329,31 @@ so a malformed response cannot silently turn a locked slot into a writable one.
 
 Known description IDs are `0x01` Anti-Snore, `0x02` Zero-G, `0x03` Lordose and
 `0x04` Flat (`0x00` means unnamed). A named slot is used as the entity name, so
-you get a "Zero-G" button rather than "Memory 3". Unrecognised IDs fall back to
+you get a "Zero-G" button rather than "Memory 3". Unrecognized IDs fall back to
 the generic name.
 
 Recall and save differ by packet **type**, not just command byte:
 
 | Action | Packet | Data | Notes |
 |--------|--------|------|-------|
-| Recall slot | `NORMAL` `[0x02, 0x72]` | `[slot]` | **Hold-to-run**, repeated on the motor cadence and released with `[0x02, 0x73]` |
+| Recall slot | `NORMAL` `[0x02, 0x72]` | `[slot]` | **Hold-to-run**, repeated every 350 ms and released with `[0x02, 0x73]` |
 | Save slot | `CONFIG` `[0x10, 0x70]` | `[slot]` | One-shot |
 
 `slot` is 0-based on the wire while the UI counts from 1. Recall being
 hold-to-run matters: sending it once moves the bed a fraction of the way and
 then stalls.
+
+**There is no arrival signal.** In the official app, recall is a press-and-hold
+control that streams for exactly as long as the user holds the button. The
+protocol has no completion or position notification (the inbound `NORMAL`
+branch is empty and no position capability exists) and no timeout, so a
+headless client cannot know when the bed has reached the stored position.
+
+The integration therefore streams the recall for a fixed 30 second window and
+then releases the motors. That bound is **ours, not OCTO's**: it is chosen to
+outlast a full-travel move rather than to match the ~1 second a button press
+implies. The bed stops itself at its end stops, the STOP frame is always sent
+afterwards, and pressing Stop cancels the recall immediately.
 
 #### RGBWI Light Commands
 
