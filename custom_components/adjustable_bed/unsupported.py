@@ -224,6 +224,11 @@ async def delete_pairing_required_issue(hass: HomeAssistant, address: str) -> No
     async_delete_issue(hass, DOMAIN, _pairing_required_issue_id(address))
 
 
+# OCTO's own lost-PIN recovery page. Passed to the Repairs issue as a
+# placeholder because hassfest rejects literal URLs inside translation strings.
+OCTO_PIN_RECOVERY_URL = "https://octo-customer.com/pinlost/"
+
+
 def _octo_pin_required_issue_id(address: str) -> str:
     """Return the stable Repairs issue id for a PIN-locked Octo receiver."""
     return f"octo_pin_required_{address.replace(':', '_').lower()}"
@@ -280,10 +285,11 @@ def update_octo_pin_required_issue(
         translation_placeholders={
             "name": name,
             "address": address,
+            "recovery_url": OCTO_PIN_RECOVERY_URL,
         },
         learn_more_url=(
             "https://github.com/kristofferR/ha-adjustable-bed/blob/master/docs/beds/octo.md"
-            "#pin-configuration"
+            "#lost-pin-factory-reset"
         ),
     )
 

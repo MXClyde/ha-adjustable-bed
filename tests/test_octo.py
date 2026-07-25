@@ -1630,3 +1630,41 @@ class TestOctoMemoryInfoAndCombinedStep:
         controller = cast(OctoController, coordinator.controller)
 
         assert "head_feet" not in [s.key for s in controller.motor_control_specs]
+
+    async def test_pin_repair_supplies_every_placeholder_its_text_uses(
+        self,
+        hass: HomeAssistant,
+    ):
+        """A placeholder with no value renders literally in the Repairs card."""
+        import json
+        import string as _string
+        from pathlib import Path
+
+        from homeassistant.helpers import issue_registry as ir
+
+        from custom_components.adjustable_bed.unsupported import (
+            update_octo_pin_required_issue,
+        )
+
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
+        issue = ir.async_get(hass).async_get_issue(
+            DOMAIN, "octo_pin_required_aa_bb_cc_dd_ee_ff"
+        )
+        assert issue is not None
+
+        strings = json.loads(
+            Path("custom_components/adjustable_bed/strings.json").read_text(encoding="utf-8")
+        )
+        text = strings["issues"]["octo_pin_required"]
+        referenced = {
+            field
+            for value in (text["title"], text["description"])
+            for _, field, _, _ in _string.Formatter().parse(value)
+            if field
+        }
+        assert referenced <= set(issue.translation_placeholders or {})
+
+        # hassfest rejects literal URLs in translation strings; the recovery
+        # link has to arrive as a placeholder instead.
+        assert "http" not in text["description"]
+        assert "http" in (issue.translation_placeholders or {})["recovery_url"]
