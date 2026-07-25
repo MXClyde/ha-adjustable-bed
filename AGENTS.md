@@ -123,6 +123,11 @@ The supported-protocol list lives in the README's "Supported Beds" table — tha
    - Extend `BedController`
    - Implement all abstract methods
    - Define command bytes as a class (see existing controllers)
+   - Declare capabilities by **overriding the properties `BedController` already
+     defines** (`supports_massage`, `memory_slot_count`, `auto_stops_on_idle`, …).
+     Entity platforms read these directly, so a typo is a type error rather than a
+     silently-wrong default. Do not invent a new capability by setting an
+     undeclared attribute — add it to the base class first.
 
 4. **Add detection to `detection.py`** in `detect_bed_type()`:
 
@@ -131,13 +136,20 @@ The supported-protocol list lives in the README's "Supported Beds" table — tha
        return BED_TYPE_NEWBED
    ```
 
-5. **Update `controller_factory.py`** `create_controller()`:
+5. **Register the controller in `controller_factory.py`.** Most beds are one line
+   in the `_SIMPLE_CONTROLLERS` registry, which lazily imports the module so
+   integration startup does not pay for ~50 unused controllers:
 
    ```python
-   if bed_type == BED_TYPE_NEWBED:
-       from .beds.newbed import NewbedController
-       return NewbedController(coordinator)
+   BED_TYPE_NEWBED: _ControllerSpec("newbed", "NewbedController"),
    ```
+
+   Pass fixed constructor kwargs as a third argument when needed. Only add an
+   explicit branch in `create_controller()` when construction needs runtime
+   detection, variant resolution, or arguments derived from the advertisement.
+   A bed type must not be both registered and branched on: the registry is
+   consulted last, so the entry would be silently unreachable.
+   `tests/test_controller_contract.py` enforces this and resolves every entry.
 
 6. **Add to `const.py`** `SUPPORTED_BED_TYPES` list
 
@@ -145,7 +157,27 @@ The supported-protocol list lives in the README's "Supported Beds" table — tha
 
 8. **Update `beds/__init__.py`** to export the new controller
 
-9. **Create documentation** in `docs/beds/newbed.md`
+9. **If the bed reports motor positions**, override `position_number_specs` to
+   return the sliders, building each with `build_position_number_spec()`:
+
+   ```python
+   @property
+   def position_number_specs(self) -> tuple[PositionNumberSpec, ...]:
+       return (
+           build_position_number_spec("back", max_value=68.0, unit=POSITION_UNIT_DEGREES),
+           build_position_number_spec("legs", max_value=45.0, unit=POSITION_UNIT_DEGREES),
+       )
+   ```
+
+   Pass `position_key=` when the firmware reports an axis under a different name.
+   Also add the bed type to `BEDS_WITH_POSITION_FEEDBACK` in `const.py`, and to
+   `BEDS_WITH_PERCENTAGE_POSITIONS` if it reports 0-100 percentages rather than
+   degrees. A bed that reports no position data at all belongs in neither, or in
+   `BEDS_WITHOUT_ANGLE_FEEDBACK` if angle sensing would otherwise create degree
+   sensors stuck at "unknown". Note that `position_number_specs` requires a live
+   controller, so these entities only appear once the bed has connected.
+
+10. **Create documentation** in `docs/beds/newbed.md`
 
 ## Configuration Options
 

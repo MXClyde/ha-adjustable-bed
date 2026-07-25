@@ -13,6 +13,7 @@ import pytest
 
 from custom_components.adjustable_bed import const, controller_factory
 from custom_components.adjustable_bed.beds.base import BedController
+from custom_components.adjustable_bed.beds.keeson import KeesonController
 from custom_components.adjustable_bed.const import (
     BED_TYPE_COOLBASE,
     BED_TYPE_KEESON,
@@ -217,6 +218,27 @@ async def test_factory_resolves_every_supported_bed_type(bed_type: str) -> None:
     """Every supported bed type should resolve through create_controller."""
     controller = await _create_controller_for_bed_type(bed_type)
     assert isinstance(controller, BedController)
+
+
+@pytest.mark.parametrize("bed_type", SUPPORTED_BED_TYPES)
+async def test_keeson_protocol_bed_types_are_listed_as_percentage_beds(
+    bed_type: str,
+) -> None:
+    """Every bed type running KeesonController must be a known percentage bed.
+
+    sensor.py consults BEDS_WITH_PERCENTAGE_POSITIONS by bed type rather than asking
+    the controller, so a Keeson-protocol bed type missing from the set gets degree
+    angle sensors. Only the ergomotion variant reports positions at all, so for the
+    others those sensors would sit at "unknown" forever. BED_TYPE_OKIN_FFE was absent
+    this way despite running KeesonController like Keeson and Serta.
+    """
+    controller = await _create_controller_for_bed_type(bed_type)
+    if not isinstance(controller, KeesonController):
+        return
+    assert bed_type in const.BEDS_WITH_PERCENTAGE_POSITIONS, (
+        f"{bed_type} runs KeesonController but is not in BEDS_WITH_PERCENTAGE_POSITIONS, "
+        "so angle sensing would create degree angle sensors for it"
+    )
 
 
 @pytest.mark.parametrize("bed_type", sorted(_SIMPLE_CONTROLLERS))

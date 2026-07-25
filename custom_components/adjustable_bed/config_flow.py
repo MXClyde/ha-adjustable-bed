@@ -952,8 +952,12 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         # Get available Bluetooth adapters
         adapters = get_available_adapters(self.hass)
 
-        # Default angle sensing to enabled for beds that support position feedback
-        default_disable_angle = bed_type not in BEDS_WITH_POSITION_FEEDBACK
+        # Default angle sensing to enabled for beds that support position feedback.
+        # The variant selector below always defaults to VARIANT_AUTO here (detection
+        # does not resolve a variant), so the Keeson/ergomotion case cannot apply yet
+        # and this matches plain BEDS_WITH_POSITION_FEEDBACK membership. Going through
+        # the shared predicate keeps this in step with the paths that do know a variant.
+        default_disable_angle = not bed_type_has_position_feedback(bed_type, VARIANT_AUTO)
 
         # Get bed-type-specific motor pulse defaults
         pulse_defaults = (

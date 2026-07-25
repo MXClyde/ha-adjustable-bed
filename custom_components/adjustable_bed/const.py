@@ -1988,12 +1988,17 @@ def bed_type_has_position_feedback(
 BEDS_WITHOUT_ANGLE_FEEDBACK: Final = frozenset({BED_TYPE_SLEEP_NUMBER_MCR})
 
 # Bed types that report positions as 0-100 percentages (not angle degrees)
-# These bed types return percentage values directly, so no angle-to-percent conversion is needed
+# These bed types return percentage values directly, so no angle-to-percent conversion is needed.
+# Keeson, Serta and OKIN FFE all run KeesonController, so all three belong here.
+# Only the Ergomotion variant actually reports positions; for the others this keeps
+# angle sensing from creating degree sensors that would sit at "unknown" forever,
+# since KeesonController.start_notify() never subscribes outside that variant.
 BEDS_WITH_PERCENTAGE_POSITIONS: Final = frozenset(
     {
         BED_TYPE_KEESON,
         BED_TYPE_ERGOMOTION,
         BED_TYPE_SERTA,
+        BED_TYPE_OKIN_FFE,
         BED_TYPE_JENSEN,
         BED_TYPE_SLEEP_NUMBER,
         BED_TYPE_SLEEPYS_BOX25,
