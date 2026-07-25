@@ -8,7 +8,7 @@ This document provides an overview of supported bed brands. Click on a brand nam
 | [Keeson](beds/keeson.md) | ✅ Supported | Position feedback (Ergomotion), 4 presets, massage, lights |
 | [Richmat](beds/richmat.md) | ✅ Supported | 1-5 memory presets, massage (discrete), RGB lights + timer, sync mode, motors 5-7 |
 | [MotoSleep](beds/motosleep.md) | ✅ Supported | 2 memory presets, massage, lights, Zero-G |
-| [Octo](beds/octo.md) | ✅ Supported | Two protocol variants, optional PIN auth, RGBW lights. Sold as bett1.de, Dunlopillo, Hüsler Nest, Swiss Sense, Velda, Werkmeister, sleepling and more ([full brand list](beds/octo.md#bed-brands-that-ship-octo-actuators)) |
+| [Octo](beds/octo.md) | ✅ Supported | Two protocol variants, optional PIN auth, RGBW lights. Sold as bett1.de, Dunlopillo, Hüsler Nest, Swiss Sense, Velda, Werkmeister, sleepling and more ([known brand list](beds/octo.md#bed-brands-that-ship-octo-actuators)) |
 | [Solace](beds/solace.md) | ✅ Supported | 5 memory presets, lift/tilt, Zero-G, massage (zones + timers), lights (11 levels) |
 | [Leggett & Platt](beds/leggett-platt.md) | ✅ Supported | Gen2: motor control + RGB lighting; Okin: tilt/lumbar, massage |
 | [Reverie](beds/reverie.md) | ✅ Supported | Position control (0-100%), 4 presets, wave massage |

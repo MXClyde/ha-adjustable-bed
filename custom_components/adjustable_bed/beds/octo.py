@@ -77,6 +77,22 @@ OCTO_DRIVEMODE_TIMEOUT = 3.0
 # Feature discovery timeout
 OCTO_FEATURE_TIMEOUT = 5.0
 
+# How long to stream a memory recall before releasing the motors.
+#
+# This bound is ours, not OCTO's. In the official app a memory recall is a
+# press-and-hold control: it repeats MOTOR_MEMPOS every 350ms for exactly as
+# long as the user holds the button, and stops on release. There is no arrival
+# or completion signal anywhere in the protocol (the inbound NORMAL branch is
+# empty, and no position capability exists), and no timeout or watchdog, so a
+# headless client has no in-band way to learn that the bed has arrived.
+#
+# We therefore stream for a generous fixed window instead, long enough for a
+# full-travel move rather than the ~1s that a motor button press implies. The
+# bed stops itself at its end stops, the STOP frame is always sent afterwards,
+# and pressing Stop cancels the stream immediately.
+OCTO_MEMORY_RECALL_SECONDS = 30.0
+OCTO_MEMORY_RECALL_INTERVAL_MS = 350
+
 # Maximum encoded OCTO packet size: two delimiters plus the worst case where
 # every byte in the five-byte header and 16-bit-length data field is escaped.
 # This retains every protocol-valid packet while bounding a missing delimiter.
@@ -121,6 +137,7 @@ class OctoController(BedController):
         self._rgbwi_value_type: int | None = None  # valueType byte from discovery response
         self._memory_count: int | None = None  # None = not yet discovered
         # CAP_MEMINFO: slot classes and per-slot description IDs
+        self._memory_mem_count: int = 0  # memCount as reported by CAP_MEMINFO
         self._memory_fix_count: int = 0
         self._memory_lock_count: int = 0
         self._memory_descriptions: tuple[int, ...] = ()
@@ -461,6 +478,7 @@ class OctoController(BedController):
         fix_count = min(fix_count, mem_count)
         lock_count = min(lock_count, mem_count - fix_count)
 
+        self._memory_mem_count = mem_count
         self._memory_fix_count = fix_count
         self._memory_lock_count = lock_count
         self._memory_descriptions = tuple(value) if len(value) == mem_count else ()
@@ -479,7 +497,11 @@ class OctoController(BedController):
         Classes partition the slot range contiguously with standard slots at
         the low indices: standard, then fix, then lock.
         """
-        mem_count = self._memory_count or 0
+        # Partition on the count this MEMINFO record carried, not on
+        # CAP_MEMCOUNT: the two capabilities arrive in whatever order the bed
+        # sends them, and using a count of 0 here would drive lock_start
+        # negative and classify every slot as locked.
+        mem_count = self._memory_mem_count
         lock_start = mem_count - self._memory_lock_count
         fix_start = lock_start - self._memory_fix_count
         index = memory_num - 1
@@ -842,6 +864,7 @@ class OctoController(BedController):
         self._has_rgbwi = False
         self._rgbwi_value_type = None
         self._memory_count = None
+        self._memory_mem_count = 0
         self._memory_fix_count = 0
         self._memory_lock_count = 0
         self._memory_descriptions = ()
@@ -1146,7 +1169,12 @@ class OctoController(BedController):
         """Return entity keys belonging to the other OCTO actuator layout."""
         if self._is_one_motor_lift:
             return frozenset({"back", "legs", "head", "feet", "head_feet"})
-        return frozenset({"tv_lift"})
+        stale = {"tv_lift"}
+        if self._coordinator.motor_count < 4:
+            # Reconfiguring 4 motors down to 2 or 3 drops the combined step, and
+            # without this it lingers in the registry as an unavailable ghost.
+            stale.add("head_feet")
+        return frozenset(stale)
 
     # Preset methods
     async def preset_both_up(self) -> None:
@@ -1199,18 +1227,20 @@ class OctoController(BedController):
 
         # Protocol uses 0-based slot index
         slot = memory_num - 1
-        # MOTOR_MEMPOS is hold-to-run, not one-shot: the official app streams
-        # it on the same 350ms cadence as a motor button and releases with
-        # MOTORS_STOP. Firing it once moves the bed a fraction of the way and
-        # then stalls, so drive it like any other movement.
-        pulse_count = max(1, self._coordinator.motor_pulse_count)
-        pulse_delay = max(1, self._coordinator.motor_pulse_delay_ms)
+        # MOTOR_MEMPOS is hold-to-run, not one-shot. The motor-button cadence
+        # bounds a button press, which is far shorter than a memory travel, so
+        # stream for OCTO_MEMORY_RECALL_SECONDS instead and release afterwards.
+        # Interruptible: write_command honours the coordinator cancel event, so
+        # the Stop button ends the recall early.
+        repeat_count = max(
+            1, int(OCTO_MEMORY_RECALL_SECONDS * 1000 / OCTO_MEMORY_RECALL_INTERVAL_MS)
+        )
         try:
             await self._write_octo_command(
                 command=[0x02, 0x72],  # NORMAL packet, MOTOR_MEMPOS command
                 data=[slot],
-                repeat_count=pulse_count,
-                repeat_delay_ms=pulse_delay,
+                repeat_count=repeat_count,
+                repeat_delay_ms=OCTO_MEMORY_RECALL_INTERVAL_MS,
             )
         finally:
             await self._stop_motors()
@@ -1230,6 +1260,15 @@ class OctoController(BedController):
                 "Invalid memory slot %d (bed has %d slots)",
                 memory_num,
                 self.memory_slot_count,
+            )
+            return
+
+        if not self.is_memory_slot_programmable(memory_num):
+            # The Save button is hidden for locked slots, but adjustable_bed.
+            # save_preset and automations reach this directly.
+            _LOGGER.warning(
+                "Memory slot %d is locked on this Octo bed and cannot be overwritten",
+                memory_num,
             )
             return
 
