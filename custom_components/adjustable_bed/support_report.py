@@ -342,15 +342,25 @@ def _read_log_file(log_path: str) -> list[dict[str, str]]:
         raw = _tail_text(log_path, _LOG_TAIL_BYTES)
     except OSError as err:
         _LOGGER.debug("Could not read %s: %s", log_path, err)
+        # A missing file and an unreadable one need different remedies, so keep
+        # the distinction (and the original error) instead of always blaming
+        # disabled logging.
+        missing = isinstance(err, FileNotFoundError)
+        hint = (
+            "File logging may be disabled; enable it and reproduce the issue to "
+            "capture logs."
+            if missing
+            else "The log file exists but could not be read; check its permissions "
+            "and the configured log path."
+        )
         return [
             {
                 "timestamp": datetime.now(UTC).isoformat(),
                 "level": "INFO",
                 "name": DOMAIN,
-                "message": (
-                    f"Could not read {log_path}: {err}. File logging may be "
-                    "disabled; enable it and reproduce the issue to capture logs."
-                ),
+                "message": f"Could not read {log_path}: {err}. {hint}",
+                "log_read_error": str(err),
+                "log_read_reason": "missing" if missing else "unreadable",
             }
         ]
 

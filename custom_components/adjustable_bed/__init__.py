@@ -18,6 +18,7 @@ from .const import (
     BED_TYPE_BEDTECH,
     BED_TYPE_DIAGNOSTIC,
     BED_TYPE_KAIDI,
+    BED_TYPE_OCTO,
     BED_TYPE_RICHMAT,
     BED_TYPE_VIBRADORM,
     BEDTECH_MANUFACTURER_ID,
@@ -34,6 +35,7 @@ from .const import (
     CONF_KAIDI_TARGET_VADDR,
     CONF_KAIDI_VARIANT_SOURCE,
     CONF_MOTOR_COUNT,
+    CONF_OCTO_PIN,
     CONF_PROTOCOL_VARIANT,
     CONF_RICHMAT_REMOTE,
     DOMAIN,
@@ -68,6 +70,7 @@ from .services import (
 )
 from .unsupported import (
     async_clear_unsupported_device_issues,
+    clear_octo_pin_required_issue,
     create_pairing_required_issue,
 )
 
@@ -298,6 +301,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await _async_maybe_reclassify_bedtech_qrrm_entry(hass, entry)
     _maybe_cache_kaidi_metadata(hass, entry)
+    _async_clear_stale_octo_pin_issue(hass, entry)
 
     _LOGGER.info(
         "Setting up Adjustable Bed integration for %s (address: %s, type: %s, motors: %s, massage: %s)",
@@ -543,6 +547,26 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Successfully unloaded Adjustable Bed integration for %s", entry.title)
 
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Clean up Repairs issues that would otherwise outlive the entry."""
+    address = entry.data.get(CONF_ADDRESS)
+    if address:
+        clear_octo_pin_required_issue(hass, address)
+
+
+def _async_clear_stale_octo_pin_issue(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Drop the Octo PIN repair when the configuration already resolves it.
+
+    Runs on every setup, so saving a PIN (which reloads the entry) clears the
+    issue even when the bed is unreachable and the connect path never runs.
+    """
+    address = entry.data.get(CONF_ADDRESS)
+    if not address:
+        return
+    if entry.data.get(CONF_BED_TYPE) != BED_TYPE_OCTO or entry.data.get(CONF_OCTO_PIN):
+        clear_octo_pin_required_issue(hass, address)
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:

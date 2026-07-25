@@ -1302,3 +1302,80 @@ class TestOctoPinLockDiagnostics:
             response=False,
         )
         assert controller.protocol_diagnostics["pin_sent"] is True
+
+    async def test_pin_lock_warning_is_logged_once_per_transition(
+        self,
+        hass: HomeAssistant,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """A locked bed reconnects every ~30s; the warning must not flood logs."""
+        from custom_components.adjustable_bed.unsupported import (
+            update_octo_pin_required_issue,
+        )
+
+        caplog.set_level(logging.WARNING)
+        caplog.clear()
+
+        for _ in range(3):
+            update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
+
+        assert caplog.text.count("is PIN locked but no PIN is configured") == 1
+
+        # Resolving and re-entering the state warns again - that is a real change.
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", False)
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
+
+        assert caplog.text.count("is PIN locked but no PIN is configured") == 2
+
+    async def test_saving_a_pin_clears_the_repair_without_reconnecting(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry_data: dict,
+    ):
+        """The user follows the repair while the bed is offline; it must clear."""
+        from homeassistant.helpers import issue_registry as ir
+
+        from custom_components.adjustable_bed import _async_clear_stale_octo_pin_issue
+        from custom_components.adjustable_bed.unsupported import (
+            update_octo_pin_required_issue,
+        )
+
+        issue_id = "octo_pin_required_aa_bb_cc_dd_ee_ff"
+        registry = ir.async_get(hass)
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
+        assert registry.async_get_issue(DOMAIN, issue_id) is not None
+
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Octo Test Bed",
+            data={**mock_octo_config_entry_data, CONF_OCTO_PIN: "1234"},
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id="octo_pin_saved_entry",
+        )
+        entry.add_to_hass(hass)
+
+        _async_clear_stale_octo_pin_issue(hass, entry)
+
+        assert registry.async_get_issue(DOMAIN, issue_id) is None
+
+    async def test_removing_the_entry_clears_the_repair(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+    ):
+        """A leftover issue would keep nagging about a bed that is gone."""
+        from homeassistant.helpers import issue_registry as ir
+
+        from custom_components.adjustable_bed import async_remove_entry
+        from custom_components.adjustable_bed.unsupported import (
+            update_octo_pin_required_issue,
+        )
+
+        issue_id = "octo_pin_required_aa_bb_cc_dd_ee_ff"
+        registry = ir.async_get(hass)
+        update_octo_pin_required_issue(hass, "AA:BB:CC:DD:EE:FF", "Bed", True)
+        assert registry.async_get_issue(DOMAIN, issue_id) is not None
+
+        await async_remove_entry(hass, mock_octo_config_entry)
+
+        assert registry.async_get_issue(DOMAIN, issue_id) is None

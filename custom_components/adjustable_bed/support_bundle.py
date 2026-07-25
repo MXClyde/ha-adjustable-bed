@@ -665,14 +665,20 @@ def _build_evidence_summary(
     notification_count = diagnostic_report.get("notification_summary", {}).get(
         "total_notifications", 0
     )
-    log_capture_failed = bool(
-        recent_logs
-        and any(
-            log.get("name") == DOMAIN
-            and log.get("message", "").startswith("Could not read ")
+    log_failure = next(
+        (
+            log
             for log in recent_logs
-        )
+            if log.get("name") == DOMAIN
+            and log.get("message", "").startswith("Could not read ")
+        ),
+        None,
     )
+    log_capture_failed = log_failure is not None
+    log_capture_error = log_failure.get("log_read_error") if log_failure else None
+    # "missing" (logging likely off) vs "unreadable" (permissions/log path):
+    # only the first is fixed by configuring `logger:`.
+    log_capture_reason = log_failure.get("log_read_reason") if log_failure else None
     if not include_logs:
         log_status = "not_requested"
     elif log_capture_failed:
@@ -695,11 +701,17 @@ def _build_evidence_summary(
         )
     if log_status == "not_requested":
         warnings.append("Recent logs were not requested for this bundle.")
+    elif log_status == "unavailable" and log_capture_reason == "unreadable":
+        warnings.append(
+            f"The Home Assistant log file could not be read ({log_capture_error}), "
+            "so the bundle contains no log. Check the file's permissions and the "
+            "configured log path."
+        )
     elif log_status == "unavailable":
         warnings.append(
-            "Home Assistant file logging is disabled, so the bundle contains no log. "
-            "Add `logger:` to configuration.yaml, restart, reproduce the problem, "
-            "then generate the bundle again."
+            "No Home Assistant log file was found, so the bundle contains no log "
+            f"({log_capture_error}). Add `logger:` to configuration.yaml, restart, "
+            "reproduce the problem, then generate the bundle again."
         )
     elif log_status == "empty":
         warnings.append("No relevant Adjustable Bed or Bluetooth log entries were found.")
@@ -732,6 +744,8 @@ def _build_evidence_summary(
         ),
         "notification_count": notification_count,
         "log_capture_status": log_status,
+        "log_capture_reason": log_capture_reason,
+        "log_capture_error": log_capture_error,
         "recent_log_entry_count": len(recent_logs),
         "usable_recent_log_entry_count": 0 if log_capture_failed else len(recent_logs),
         "pairing_status": pairing.get("status"),

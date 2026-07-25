@@ -248,6 +248,20 @@ def update_octo_pin_required_issue(
         async_delete_issue(hass, DOMAIN, issue_id)
         return
 
+    # A locked receiver drops the link roughly every 30 seconds and every
+    # reconnect rediscovers the same lock, so log only on the transition.
+    # The issue registry survives the controller being recreated; an instance
+    # flag would not.
+    if async_get_issue_registry(hass).async_get_issue(DOMAIN, issue_id) is None:
+        _LOGGER.warning(
+            "Octo bed %s (%s) is PIN locked but no PIN is configured. The bed will "
+            "accept the under-bed light and stay connected, but it silently ignores "
+            "every motor command. Enter the receiver's 4-digit OCTO app PIN in the "
+            "integration options to enable movement",
+            name,
+            address,
+        )
+
     async_create_issue(
         hass,
         DOMAIN,
@@ -271,3 +285,15 @@ def update_octo_pin_required_issue(
         name,
         address,
     )
+
+
+def clear_octo_pin_required_issue(hass: HomeAssistant, address: str) -> None:
+    """Drop the PIN-locked repair without needing a successful connection.
+
+    The issue is otherwise only cleared from the connect path, so a user who
+    follows the repair and saves a PIN while the bed is unreachable would keep
+    seeing an issue claiming no PIN is configured. Callers use this when the
+    configuration itself makes the issue moot (a PIN was saved, the bed type
+    changed) or when the entry goes away.
+    """
+    async_delete_issue(hass, DOMAIN, _octo_pin_required_issue_id(address))

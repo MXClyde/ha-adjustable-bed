@@ -712,20 +712,32 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
         logs_missing = include_logs and evidence.get("log_capture_status") == "unavailable"
         logging_notice = ""
         if logs_missing:
+            log_error = evidence.get("log_capture_error")
             _LOGGER.warning(
-                "Support bundle for %s was generated without logs: Home Assistant "
-                "file logging is disabled",
+                "Support bundle for %s was generated without logs: %s",
                 address,
+                log_error or "the Home Assistant log file could not be read",
             )
-            logging_notice = (
-                "\n\n⚠️ **This bundle contains no logs.** Home Assistant file logging "
-                "is disabled, so the reason a command failed is usually not "
-                "recoverable from it. To capture a complete bundle, add\n\n"
-                "```yaml\nlogger:\n  default: warning\n  logs:\n"
-                "    custom_components.adjustable_bed: debug\n```\n\n"
-                "to `configuration.yaml`, restart Home Assistant, reproduce the "
-                "problem, then run this service again."
-            )
+            if evidence.get("log_capture_reason") == "unreadable":
+                # `logger:` only changes levels; it cannot fix a permission
+                # problem or a log path Home Assistant is not writing to.
+                logging_notice = (
+                    "\n\n⚠️ **This bundle contains no logs.** The Home Assistant log "
+                    f"file could not be read (`{log_error}`), so the reason a command "
+                    "failed is usually not recoverable from it. Check the file's "
+                    "permissions and the configured log path, then run this service "
+                    "again."
+                )
+            else:
+                logging_notice = (
+                    "\n\n⚠️ **This bundle contains no logs.** No Home Assistant log "
+                    "file was found, so the reason a command failed is usually not "
+                    "recoverable from it. To capture a complete bundle, add\n\n"
+                    "```yaml\nlogger:\n  default: warning\n  logs:\n"
+                    "    custom_components.adjustable_bed: debug\n```\n\n"
+                    "to `configuration.yaml`, restart Home Assistant, reproduce the "
+                    "problem, then run this service again."
+                )
 
         async_create(
             hass,

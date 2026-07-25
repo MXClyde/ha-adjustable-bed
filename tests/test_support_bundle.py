@@ -1374,9 +1374,9 @@ class TestSupportBundle:
 class TestSupportBundleLoggingWarning:
     """A bundle without logs rarely explains a failure - say so immediately."""
 
-    def test_evidence_warning_tells_the_user_how_to_enable_logging(self):
-        """The warning has to be actionable, not just descriptive."""
-        evidence = _build_evidence_summary(
+    @staticmethod
+    def _evidence_for_log_failure(reason: str, error: str) -> dict:
+        return _build_evidence_summary(
             capture_duration=0,
             include_logs=True,
             recent_logs=[
@@ -1384,7 +1384,9 @@ class TestSupportBundleLoggingWarning:
                     "timestamp": "2026-07-25T00:00:00+00:00",
                     "level": "INFO",
                     "name": "adjustable_bed",
-                    "message": "Could not read /config/home-assistant.log: missing",
+                    "message": f"Could not read /config/home-assistant.log: {error}.",
+                    "log_read_error": error,
+                    "log_read_reason": reason,
                 }
             ],
             diagnostic_report={"command_trace": [], "notification_summary": {}},
@@ -1395,9 +1397,26 @@ class TestSupportBundleLoggingWarning:
             controller={"initialized": True},
         )
 
+    def test_evidence_warning_tells_the_user_how_to_enable_logging(self):
+        """A missing log file is the case `logger:` actually fixes."""
+        evidence = self._evidence_for_log_failure(
+            "missing", "[Errno 2] No such file or directory"
+        )
+
         assert evidence["log_capture_status"] == "unavailable"
-        warning = next(w for w in evidence["warnings"] if "file logging" in w)
+        assert evidence["log_capture_reason"] == "missing"
+        warning = next(w for w in evidence["warnings"] if "no log" in w)
         assert "configuration.yaml" in warning
+        assert "[Errno 2]" in warning
+
+    def test_evidence_warning_does_not_blame_logging_for_a_read_error(self):
+        """`logger:` cannot fix a permission problem, so it must not be advised."""
+        evidence = self._evidence_for_log_failure("unreadable", "[Errno 13] Permission denied")
+
+        assert evidence["log_capture_status"] == "unavailable"
+        warning = next(w for w in evidence["warnings"] if "could not be read" in w)
+        assert "[Errno 13] Permission denied" in warning
+        assert "configuration.yaml" not in warning
 
     async def test_notification_flags_a_bundle_generated_without_logs(
         self,
@@ -1413,7 +1432,12 @@ class TestSupportBundleLoggingWarning:
 
         report = {
             "notifications": [],
-            "evidence": {"log_capture_status": "unavailable", "warnings": []},
+            "evidence": {
+                "log_capture_status": "unavailable",
+                "log_capture_reason": "missing",
+                "log_capture_error": "[Errno 2] No such file or directory",
+                "warnings": [],
+            },
         }
         created: list[tuple[str, str]] = []
 
@@ -1452,4 +1476,57 @@ class TestSupportBundleLoggingWarning:
         assert title == "Adjustable Bed Support Bundle Ready"
         assert "This bundle contains no logs" in message
         assert "logger:" in message
-        assert "file logging is disabled" in caplog.text
+        assert "[Errno 2] No such file or directory" in caplog.text
+
+    async def test_notification_reports_a_read_error_instead_of_logger_advice(
+        self,
+        hass: HomeAssistant,
+    ):
+        """A permission problem must not be answered with a logger: snippet."""
+        from homeassistant.core import ServiceCall
+
+        from custom_components.adjustable_bed.services import (
+            handle_generate_support_bundle,
+        )
+
+        report = {
+            "notifications": [],
+            "evidence": {
+                "log_capture_status": "unavailable",
+                "log_capture_reason": "unreadable",
+                "log_capture_error": "[Errno 13] Permission denied",
+                "warnings": [],
+            },
+        }
+        created: list[str] = []
+
+        call = ServiceCall(
+            hass,
+            DOMAIN,
+            "generate_support_bundle",
+            {"target_address": "AA:BB:CC:DD:EE:FF", "capture_duration": 5},
+        )
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.support_bundle.generate_support_bundle",
+                AsyncMock(return_value=report),
+            ),
+            patch(
+                "custom_components.adjustable_bed.support_bundle.save_support_bundle",
+                MagicMock(return_value="/config/bundle.json"),
+            ),
+            patch(
+                "custom_components.adjustable_bed.download.register_download",
+                MagicMock(return_value="/api/download/bundle.json"),
+            ),
+            patch(
+                "homeassistant.components.persistent_notification.async_create",
+                lambda _hass, message, title=None, notification_id=None: created.append(message),
+            ),
+        ):
+            await handle_generate_support_bundle(call)
+
+        assert len(created) == 1
+        assert "[Errno 13] Permission denied" in created[0]
+        assert "logger:" not in created[0]

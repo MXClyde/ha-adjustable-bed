@@ -767,13 +767,10 @@ class OctoController(BedController):
                     self._has_synchro,
                 )
 
-                if self.pin_locked_without_pin:
-                    _LOGGER.warning(
-                        "Octo bed is PIN locked but no PIN is configured. The bed will "
-                        "accept the under-bed light and stay connected, but it silently "
-                        "ignores every motor command. Enter the receiver's 4-digit OCTO "
-                        "app PIN in the integration options to enable movement"
-                    )
+                # The PIN-lock warning is deliberately not logged here: a locked
+                # receiver drops the link every ~30s, and each reconnect
+                # rediscovers the same lock. update_octo_pin_required_issue()
+                # logs it once per transition instead.
 
                 # Query current drivemode if synchro is supported
                 if self._has_synchro:
