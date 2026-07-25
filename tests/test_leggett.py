@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from bleak.exc import BleakError
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -214,6 +215,48 @@ class TestLeggettOkinController:
         assert slot.args == (bytes.fromhex("040200002000"),)
         assert slot.kwargs == {"repeat_count": 20, "repeat_delay_ms": 100}
         assert slot_release.args == (bytes.fromhex("040200000000"),)
+
+    async def test_stop_all_propagates_write_failures(self):
+        """An explicit stop must not report success when it never reached the bed.
+
+        The release burst is this protocol's only stop, and the shared helper
+        logs and swallows BleakError for cleanup callers. stop_all opts out, or
+        async_stop_command would log "Stop command sent" while the bed kept
+        moving.
+        """
+        controller = LeggettOkinController(MagicMock())
+        controller.write_command = AsyncMock(side_effect=BleakError("write failed"))
+
+        with pytest.raises(BleakError):
+            await controller.stop_all()
+
+    async def test_cleanup_release_failures_do_not_mask_the_real_error(self):
+        """A failed release burst during cleanup stays logged, not raised."""
+        controller = LeggettOkinController(MagicMock())
+        controller.write_command = AsyncMock(side_effect=BleakError("write failed"))
+
+        # move_head_up's own write fails; the release burst in the finally block
+        # must not replace that with its own exception.
+        with pytest.raises(BleakError, match="write failed"):
+            await controller.move_head_up()
+
+    async def test_preset_flat_survives_a_nonpositive_pulse_delay(self):
+        """A stored delay of 0 must not turn Flat into a ZeroDivisionError.
+
+        The setup and options flows accept any integer for the delay, so the
+        duration maths has to tolerate values the UI should not have allowed.
+        """
+        coordinator = MagicMock()
+        coordinator.motor_pulse_count = 10
+        coordinator.motor_pulse_delay_ms = 0
+        controller = LeggettOkinController(coordinator)
+        controller.write_command = AsyncMock()
+
+        await controller.preset_flat()
+
+        flat_call = controller.write_command.await_args_list[0]
+        assert flat_call.args == (bytes.fromhex("040208000000"),)
+        assert flat_call.kwargs["repeat_count"] >= 1
 
     async def test_massage_timer_step_is_not_exposed(self):
         """0x200 is a constant the app never builds or writes, so it is not a command."""

@@ -892,6 +892,9 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_PREFERRED_ADAPTER: preferred_adapter,
                     CONF_MOTOR_PULSE_COUNT: motor_pulse_count,
                     CONF_MOTOR_PULSE_DELAY_MS: motor_pulse_delay_ms,
+                    # The user saw and submitted these, so a protocol
+                    # migration must not treat them as generated defaults.
+                    CONF_MOTOR_PULSE_USER_SET: True,
                     CONF_DISCONNECT_AFTER_COMMAND: user_input.get(
                         CONF_DISCONNECT_AFTER_COMMAND, DEFAULT_DISCONNECT_AFTER_COMMAND
                     ),
@@ -1591,6 +1594,9 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_PREFERRED_ADAPTER: preferred_adapter,
                     CONF_MOTOR_PULSE_COUNT: motor_pulse_count,
                     CONF_MOTOR_PULSE_DELAY_MS: motor_pulse_delay_ms,
+                    # The user saw and submitted these, so a protocol
+                    # migration must not treat them as generated defaults.
+                    CONF_MOTOR_PULSE_USER_SET: True,
                     CONF_DISCONNECT_AFTER_COMMAND: user_input.get(
                         CONF_DISCONNECT_AFTER_COMMAND, DEFAULT_DISCONNECT_AFTER_COMMAND
                     ),
@@ -1832,6 +1838,9 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_PREFERRED_ADAPTER: preferred_adapter,
                         CONF_MOTOR_PULSE_COUNT: motor_pulse_count,
                         CONF_MOTOR_PULSE_DELAY_MS: motor_pulse_delay_ms,
+                        # The user saw and submitted these, so a protocol
+                        # migration must not treat them as generated defaults.
+                        CONF_MOTOR_PULSE_USER_SET: True,
                         CONF_DISCONNECT_AFTER_COMMAND: user_input.get(
                             CONF_DISCONNECT_AFTER_COMMAND, DEFAULT_DISCONNECT_AFTER_COMMAND
                         ),

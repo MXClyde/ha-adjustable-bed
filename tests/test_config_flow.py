@@ -898,6 +898,10 @@ class TestBluetoothDiscoveryFlow:
         assert result["data"][CONF_BED_TYPE] == BED_TYPE_LINAK
         assert result["data"][CONF_MOTOR_COUNT] == 4
         assert result["data"][CONF_HAS_MASSAGE] is True
+        # Creating an entry is also a user choice of cadence, so the provenance
+        # marker must be set here and not only in the options flow: otherwise a
+        # protocol migration would treat a deliberate value as legacy data.
+        assert result["data"][CONF_MOTOR_PULSE_USER_SET] is True
         assert result["data"][CONF_DISABLE_ANGLE_SENSING] is False
 
     async def test_bluetooth_confirm_bed_type_dropdown_uses_display_names(

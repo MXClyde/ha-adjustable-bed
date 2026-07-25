@@ -21,6 +21,7 @@ specification.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -86,6 +87,10 @@ class LeggettOkinCommands:
 # keycode-0 frames (OutputThread.runNormal, MaxZeroCount = 3). There is no
 # distinct stop opcode: the release frame is an ordinary frame carrying 0.
 RELEASE_FRAME_COUNT = 4
+# Same 100ms as the recall cadence today, but deliberately a separate constant:
+# these are independent findings about different command families, and retuning
+# one must not silently retune the other.
+RELEASE_FRAME_DELAY_MS = 100
 
 # A memory recall is a fixed 10-frame burst with no terminator at all. The
 # control box drives the move to completion by itself, so appending a release
@@ -229,23 +234,36 @@ class LeggettOkinController(BedController):
             self._motor_state = {}
             await self._send_release_frames("motor movement")
 
-    async def _send_release_frames(self, context: str) -> None:
+    async def _send_release_frames(self, context: str, *, raise_on_error: bool = False) -> None:
         """Send the release burst that ends a held keycode.
 
         The app emits exactly four keycode-0 frames when a button is released,
-        so mirror that rather than a single frame. Shielded and given a fresh
-        cancel event so a stop request cannot suppress the release itself.
+        so mirror that rather than a single frame. The burst gets a fresh cancel
+        event so a stop request cannot suppress the release itself.
+
+        ``raise_on_error`` is for callers where the burst *is* the operation, so
+        a failure must reach the user. Cleanup callers leave it False: they are
+        already unwinding and have their own error to report.
         """
-        try:
-            await asyncio.shield(
-                self.write_command(
-                    self._build_command(0),
-                    repeat_count=RELEASE_FRAME_COUNT,
-                    repeat_delay_ms=RECALL_FRAME_DELAY_MS,
-                    cancel_event=asyncio.Event(),
-                )
+        release = asyncio.ensure_future(
+            self.write_command(
+                self._build_command(0),
+                repeat_count=RELEASE_FRAME_COUNT,
+                repeat_delay_ms=RELEASE_FRAME_DELAY_MS,
+                cancel_event=asyncio.Event(),
             )
+        )
+        try:
+            await asyncio.shield(release)
         except asyncio.CancelledError:
+            # Returning here would hand the command lock back mid-burst: the
+            # coordinator would start the replacement command while the shielded
+            # task was still emitting zero frames, and those frames would stop
+            # the movement it had just started. The burst is bounded (~300ms),
+            # so wait it out before propagating.
+            while not release.done():
+                with contextlib.suppress(asyncio.CancelledError, BleakError):
+                    await asyncio.shield(release)
             raise
         except BleakError:
             # The release burst is this protocol's only stop, so a failure can
@@ -255,6 +273,8 @@ class LeggettOkinController(BedController):
                 context,
                 exc_info=True,
             )
+            if raise_on_error:
+                raise
 
     # Motor control methods
     async def move_head_up(self) -> None:
@@ -306,9 +326,13 @@ class LeggettOkinController(BedController):
         await self.move_legs_stop()
 
     async def stop_all(self) -> None:
-        """Stop all motors by sending the release burst."""
+        """Stop all motors by sending the release burst.
+
+        An explicit stop must not report success when it never reached the bed,
+        so failures propagate here rather than being logged and swallowed.
+        """
         self._motor_state = {}
-        await self._send_release_frames("stop_all")
+        await self._send_release_frames("stop_all", raise_on_error=True)
 
     # Preset methods
     _MEMORY_SLOTS = {
@@ -341,6 +365,9 @@ class LeggettOkinController(BedController):
         releases.
         """
         _, pulse_delay_ms = self.motor_pulse_settings()
+        # The setup flows accept any integer here, so a stored 0 would divide by
+        # zero and a negative would collapse the hold to a single frame.
+        pulse_delay_ms = max(1, pulse_delay_ms)
         repeat_count = max(1, round(FLAT_HOLD_S * 1000 / pulse_delay_ms))
         try:
             await self.write_command(

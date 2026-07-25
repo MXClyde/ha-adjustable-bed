@@ -43,8 +43,16 @@ export class AdjustableBedCard extends LitElement {
   private _watched: string[] = [];
   // Press-and-hold state for the motor buttons. The generation counter is what
   // stops an in-flight repeat loop: releasing bumps it, so the loop's next
-  // iteration sees a stale value and exits.
-  private _heldMotor: MotorEntity | null = null;
+  // iteration sees a stale value and exits. Ownership is tracked by
+  // MotorEntity.key rather than object identity, because the first press
+  // completing updates that entity's state, which re-renders the card and
+  // rebuilds every MotorEntity - the release handler would then hold a
+  // different object for the same motor and never stop the loop.
+  private _heldMotorKey: string | null = null;
+  // The held motor's cover entity, if it has one. Kept separately because
+  // disconnectedCallback still has to stop it, and by then the MotorEntity the
+  // hold started with may no longer be the object the card would rebuild.
+  private _heldCover: string | null = null;
   private _holdGeneration = 0;
 
   public static async getConfigElement(): Promise<HTMLElement> {
@@ -71,8 +79,13 @@ export class AdjustableBedCard extends LitElement {
   public override disconnectedCallback(): void {
     super.disconnectedCallback();
     // Navigating away mid-hold never delivers pointerup, which would leave
-    // _pulseWhileHeld re-issuing presses forever.
-    this._cancelHold(this._heldMotor);
+    // _pulseWhileHeld re-issuing presses forever and a cover-backed motor
+    // running with nothing left to stop it.
+    const cover = this._heldCover;
+    this._heldMotorKey = null;
+    this._heldCover = null;
+    this._holdGeneration++;
+    if (cover) this._cover(cover, "stop_cover");
   }
 
   protected override shouldUpdate(changed: PropertyValues): boolean {
@@ -661,31 +674,42 @@ export class AdjustableBedCard extends LitElement {
       (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
       e.preventDefault();
     }
-    if (this._heldMotor) return;
+    if (this._heldMotorKey !== null) return;
 
-    this._heldMotor = m;
-    const generation = ++this._holdGeneration;
-    if (m.cover) {
-      this._cover(m.cover, dir === "up" ? "open_cover" : "close_cover");
-      return;
-    }
-    void this._pulseWhileHeld(m, dir, generation);
+    this._heldMotorKey = m.key;
+    this._heldCover = m.cover ?? null;
+    void this._pulseWhileHeld(m, dir, ++this._holdGeneration);
   }
 
+  // One iteration moves the bed for a single configured pulse and then stops,
+  // for cover-backed motors too: cover.py runs open_cover/close_cover as one
+  // finite controller command that performs its own STOP/release cleanup rather
+  // than running until stop_cover. So both kinds of motor need re-issuing.
   private async _pulseWhileHeld(
     m: MotorEntity,
     dir: "up" | "down",
     generation: number,
   ): Promise<void> {
-    const id = dir === "up" ? m.up : m.down;
-    if (!id) return;
-    // Awaiting each press before issuing the next is what keeps the motion
-    // smooth: the service call resolves once the bed has finished that burst,
-    // so commands never queue up behind each other and the integration never
-    // has to cancel one mid-flight.
+    const cover = m.cover;
+    const buttonId = dir === "up" ? m.up : m.down;
+    const call = cover
+      ? () =>
+          this.hass?.callService(
+            "cover",
+            dir === "up" ? "open_cover" : "close_cover",
+            { entity_id: cover },
+          )
+      : buttonId
+        ? () => this.hass?.callService("button", "press", { entity_id: buttonId })
+        : null;
+    if (!call) return;
+    // Awaiting each call before issuing the next is what keeps the motion
+    // smooth: it resolves once the bed has finished that pulse, so commands
+    // never queue up behind each other and the integration never has to cancel
+    // one mid-flight.
     while (generation === this._holdGeneration) {
       try {
-        await this.hass?.callService("button", "press", { entity_id: id });
+        await call();
       } catch {
         // The bed rejected the command (usually a dropped BLE link). Stop
         // hammering it; the user can press again.
@@ -704,8 +728,9 @@ export class AdjustableBedCard extends LitElement {
   // not cancel a hold another button owns: a blur on some other motor's control
   // would otherwise stop the motor that is running.
   private _cancelHold(m: MotorEntity | null): boolean {
-    if (!m || this._heldMotor !== m) return false;
-    this._heldMotor = null;
+    if (!m || this._heldMotorKey !== m.key) return false;
+    this._heldMotorKey = null;
+    this._heldCover = null;
     this._holdGeneration++;
     return true;
   }
