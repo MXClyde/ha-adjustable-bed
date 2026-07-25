@@ -1432,3 +1432,37 @@ class TestOctoPinLockDiagnostics:
         _async_clear_stale_octo_pin_issue(hass, entry)
 
         assert registry.async_get_issue(DOMAIN, issue_id) is None
+
+    @pytest.mark.parametrize(
+        ("motor_count", "expected_mask"),
+        [(2, 0x06), (3, 0x0E), (4, 0x1E)],
+    )
+    async def test_flat_drives_every_motor_the_receiver_has(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry_data: dict,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        motor_count: int,
+        expected_mask: int,
+    ):
+        """M12-only flat leaves motors 3/4 parked on RC3, BM3 and 4M bases."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Octo Test Bed",
+            data={**mock_octo_config_entry_data, CONF_MOTOR_COUNT: motor_count},
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id=f"octo_flat_{motor_count}",
+        )
+        entry.add_to_hass(hass)
+
+        coordinator = AdjustableBedCoordinator(hass, entry)
+        await coordinator.async_connect()
+        controller = cast(OctoController, coordinator.controller)
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await controller.preset_flat()
+
+        expected = controller._build_packet([0x02, 0x71], [expected_mask])
+        written = [c[0][1] for c in mock_bleak_client.write_gatt_char.call_args_list]
+        assert expected in written

@@ -1030,13 +1030,31 @@ class OctoController(BedController):
         """Move both head and legs up simultaneously."""
         await self._octo_move_with_stop(OCTO_MOTOR_HEAD | OCTO_MOTOR_LEGS, "up")
 
+    @property
+    def _all_motors_mask(self) -> int:
+        """Return the bitmask covering every motor this receiver has.
+
+        Clean-room analysis of OCTO Smart Control 1.03.01 shows the official app
+        drives an all-motors step as M12 0x06 (2 motors), M123 0x0E (3) or
+        M1234 0x1E (4), and exposes it as a down-only control.
+        """
+        mask = OCTO_MOTOR_HEAD | OCTO_MOTOR_LEGS
+        motor_count = self._coordinator.motor_count
+        if motor_count >= 3:
+            mask |= OCTO_MOTOR_3
+        if motor_count >= 4:
+            mask |= OCTO_MOTOR_4
+        return mask
+
     async def preset_flat(self) -> None:
         """Go to flat position.
 
-        Octo doesn't have a flat preset, so we move both motors down.
+        Octo has no flat preset, so every motor is driven down at once. This
+        must cover motors 3 and 4 as well: sending only M12 on a 3M/4M receiver
+        (RC3, BM3, and 4-motor bases) leaves the extra actuators where they
+        were, so the bed never actually reaches flat.
         """
-        # Move both head and legs down simultaneously
-        await self._octo_move_with_stop(OCTO_MOTOR_HEAD | OCTO_MOTOR_LEGS, "down")
+        await self._octo_move_with_stop(self._all_motors_mask, "down")
 
     async def preset_memory(self, memory_num: int) -> None:
         """Go to memory preset position.

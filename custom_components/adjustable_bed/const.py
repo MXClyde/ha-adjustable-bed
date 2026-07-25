@@ -786,7 +786,22 @@ RICHMAT_NAME_PATTERNS: Final = ("qrrm", "sleep function", "x1rm", "dhn-")
 ERGOMOTION_NAME_PATTERNS: Final = ("ergomotion", "ergo", "serta-i")
 
 # Octo name patterns
-# Source: blenames.json from de.octoactuators.octosmartcontrolapp APK
+# Source: the official OCTO device table, verified 2026-07-25 against both the
+# bundled assets/www/data/blenames.json in de.octoactuators.octosmartcontrolapp
+# 1.03.01 (versionCode 10301) and the live endpoint the app refreshes it from,
+# https://octo-customer.com/getble/act= . Both returned byte-identical JSON, so
+# this list is complete and current: 14 entries, 13 of them visible.
+#
+# Two deliberate differences from that table:
+# - OCTOHDev ("OCTO hidden device", visible=0) is omitted. It is OCTO's own
+#   hidden development device, and the app suppresses it in the scanner.
+# - da1458x is ours only. It is the default name of the Dialog Semiconductor
+#   SoC used in some receivers, reported by users rather than listed by OCTO.
+#
+# Note the app matches these names with `===` on the full advertised name and
+# uses the table only to pretty-print the pairing list; it discovers devices by
+# the FFE0 service UUID. We match by prefix instead, because we need the name to
+# disambiguate FFE0 from the other protocol families that share it.
 # These are the official BLE device name prefixes for Octo controllers:
 # - RTV: Lift 1M
 # - RC2: Receiver II

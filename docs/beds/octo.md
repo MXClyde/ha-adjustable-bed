@@ -213,6 +213,22 @@ Motors are controlled via bit masks (CAP_MOTORCOUNT determines how many are avai
 | Move Down | `[0x02, 0x71]` | `[motor_bits]` | Move motor(s) down |
 | Stop | `[0x02, 0x73]` | none | Stop all motors |
 
+The official app builds its control layout from `CAP_MOTORCOUNT` alone, and the
+combined steps it offers are:
+
+| Motors | Steps offered |
+|--------|---------------|
+| 1 | M1 `0x02` |
+| 2 | M1 `0x02`, M2 `0x04`, M1+2 `0x06` |
+| 3 | M3 `0x08`, M1, M2, M1+2, then M1+2+3 `0x0E` **down only** |
+| 4 | M1, M2, M3, M4 `0x10`, M1+2, M3+4 `0x18`, then M1+2+3+4 `0x1E` **down only** |
+
+The all-motors step is down-only in the app, which is what "Flat" means for
+this protocol: the integration's Flat control sends `0x06`, `0x0E` or `0x1E`
+according to the configured motor count, so 3M and 4M receivers (`RC3`, `BM3`
+and 4-motor bases) actually reach flat instead of leaving the extra actuators
+parked. A motor count the app does not recognise renders no controls at all.
+
 #### Light Commands
 
 | Command | Command Bytes | Data | Description |
