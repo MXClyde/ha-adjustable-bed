@@ -775,6 +775,36 @@ class AdjustableBedCoordinator:
             if isinstance(pairing, dict):
                 pairing["bond_verification"] = dict(result)
 
+    def _persist_bond_flags(
+        self,
+        *,
+        established: bool | None = None,
+        unreliable: bool | None = None,
+    ) -> None:
+        """Apply bond-state changes to runtime state and entry data in ONE write.
+
+        Every config-entry update reloads the integration, so writing the two
+        flags separately would queue two reloads for a single logical transition
+        and could tear down the coordinator that is still mid-connect.
+        """
+        data = dict(self.entry.data)
+        if established is not None:
+            self._ble_bond_established = established
+            # Only persist False where a True is actually stored: writing the
+            # key into an entry that never had it is pure reload churn.
+            if established:
+                data[CONF_BLE_BOND_ESTABLISHED] = True
+            elif data.get(CONF_BLE_BOND_ESTABLISHED):
+                data[CONF_BLE_BOND_ESTABLISHED] = False
+        if unreliable is not None:
+            self._ble_bond_marker_unreliable = unreliable
+            if unreliable:
+                data[CONF_BLE_BOND_MARKER_UNRELIABLE] = True
+            else:
+                data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
+        if data != dict(self.entry.data):
+            self.hass.config_entries.async_update_entry(self.entry, data=data)
+
     def _mark_ble_bond_established(self) -> None:
         """Record that future connections should skip `pair=True`."""
         if self._ble_bond_marker_unreliable:
@@ -786,80 +816,29 @@ class AdjustableBedCoordinator:
         if self._ble_bond_established:
             return
 
-        self._ble_bond_established = True
-        if self.entry.data.get(CONF_BLE_BOND_ESTABLISHED):
-            return
-
-        self.hass.config_entries.async_update_entry(
-            self.entry,
-            data={
-                **self.entry.data,
-                CONF_BLE_BOND_ESTABLISHED: True,
-            },
-        )
+        self._persist_bond_flags(established=True)
 
     def _clear_ble_bond_established(self) -> None:
         """Clear the persisted bond marker after an authentication failure."""
         if not self._ble_bond_established and not self.entry.data.get(CONF_BLE_BOND_ESTABLISHED):
             return
 
-        self._ble_bond_established = False
-        if not self.entry.data.get(CONF_BLE_BOND_ESTABLISHED):
-            return
+        self._persist_bond_flags(established=False)
 
-        self.hass.config_entries.async_update_entry(
-            self.entry,
-            data={
-                **self.entry.data,
-                CONF_BLE_BOND_ESTABLISHED: False,
-            },
-        )
-
-    def _mark_bond_marker_unreliable(self) -> None:
-        """Latch that this device must request pairing on every connection.
-
-        Called when the auth-gated probe fails on a connection that skipped
-        ``pair=True`` because the marker claimed we were already bonded. That
-        combination proves the bond did not survive, so the marker is worthless
-        here and honouring it only buys a failed attempt per connect (issue #368).
-        """
-        if self._ble_bond_marker_unreliable:
-            return
-
+    def _log_bond_marker_unreliable(self) -> None:
+        """Log the latch transition. The write itself is batched by the caller."""
         _LOGGER.info(
             "Cached bond marker for %s did not survive to this connection; "
             "requesting pairing on every future connection attempt",
             self._address,
         )
-        self._ble_bond_marker_unreliable = True
-        self.hass.config_entries.async_update_entry(
-            self.entry,
-            data={
-                **self.entry.data,
-                CONF_BLE_BOND_MARKER_UNRELIABLE: True,
-            },
-        )
 
-    def _clear_bond_marker_unreliable(self) -> None:
-        """Release the always-pair latch after the bond demonstrably persisted."""
-        if not self._ble_bond_marker_unreliable:
-            return
-
+    def _log_bond_marker_reliable_again(self) -> None:
+        """Log the latch release. The write itself is batched by the caller."""
         _LOGGER.info(
             "Bond for %s survived a connection that did not request pairing; "
             "trusting the cached bond marker again",
             self._address,
-        )
-        self._ble_bond_marker_unreliable = False
-        if not self.entry.data.get(CONF_BLE_BOND_MARKER_UNRELIABLE):
-            return
-
-        self.hass.config_entries.async_update_entry(
-            self.entry,
-            data={
-                **self.entry.data,
-                CONF_BLE_BOND_MARKER_UNRELIABLE: False,
-            },
         )
 
     async def _async_handle_ble_authentication_error(
@@ -891,9 +870,13 @@ class AdjustableBedCoordinator:
         # to skip a probe that timed out. The next paired connection should
         # verify the fresh bond again.
         self._bond_probe_timed_out = False
-        if self._attempt_trusted_bond_marker:
-            self._mark_bond_marker_unreliable()
-        self._clear_ble_bond_established()
+        latch = self._attempt_trusted_bond_marker and not self._ble_bond_marker_unreliable
+        if latch:
+            self._log_bond_marker_unreliable()
+        self._persist_bond_flags(
+            established=False,
+            unreliable=True if latch else None,
+        )
 
         try:
             await create_pairing_required_issue(
@@ -993,14 +976,18 @@ class AdjustableBedCoordinator:
             return True
 
         # Read succeeded → the encrypted link works → we are bonded.
-        if self._ble_bond_marker_unreliable and not self._attempt_used_pairing:
+        release_latch = self._ble_bond_marker_unreliable and not self._attempt_used_pairing
+        if release_latch:
             # The bond survived to a connection that never asked to pair, so
             # whatever made the marker unreliable no longer applies (a different
             # adapter, a firmware change, a proxy that now persists bonds). Let
             # the marker work again rather than requesting pairing forever.
-            self._clear_bond_marker_unreliable()
+            self._log_bond_marker_reliable_again()
         self._skip_pair_next_attempt = False
-        self._mark_ble_bond_established()
+        if release_latch:
+            self._persist_bond_flags(established=True, unreliable=False)
+        else:
+            self._mark_ble_bond_established()
         await delete_pairing_required_issue(self.hass, self._address)
         self._record_bond_verification("succeeded", attempt_details=attempt_details)
         _LOGGER.debug("Bond verification succeeded for %s", self._address)

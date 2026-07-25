@@ -403,6 +403,7 @@ class LeggettOkinController(BedController):
             return
 
         _LOGGER.debug("Arming memory store for slot %d", memory_num)
+        completed = False
         try:
             await self._hold_keycode(LeggettOkinCommands.MEMORY_STORE, MEMORY_STORE_HOLD_S)
             # This release is a stage boundary, not cleanup: without the zero
@@ -410,8 +411,13 @@ class LeggettOkinController(BedController):
             # slot hold would run an invalid sequence and still report success.
             await self._send_release_frames("memory store arm", raise_on_error=True)
             await self._hold_keycode(command, MEMORY_SLOT_HOLD_S)
+            completed = True
         finally:
-            await self._send_release_frames("memory store slot")
+            # On the success path this release ends the sequence, so a failure
+            # means the slot keycode may still be asserted and must surface. If
+            # we are already unwinding it is cleanup, and must not mask the
+            # exception that got us here.
+            await self._send_release_frames("memory store slot", raise_on_error=completed)
 
     async def _hold_keycode(self, command: int, hold_seconds: float) -> None:
         """Stream a keycode for a fixed duration, as a held button would."""
@@ -430,10 +436,23 @@ class LeggettOkinController(BedController):
         """Go to anti-snore position (memory slot 3 on this protocol)."""
         await self._recall(LeggettOkinCommands.PRESET_ANTI_SNORE)
 
+    async def _tap_keycode(self, command: int, context: str) -> None:
+        """Send a keycode as a short press, then release it.
+
+        Lights and massage are ordinary held keycodes in the app, not one-shot
+        recalls: a tap is one frame followed by the zero burst. Sending the
+        frame alone can leave the key asserted, so the next press of the same
+        control may not register.
+        """
+        try:
+            await self.write_command(self._build_command(command))
+        finally:
+            await self._send_release_frames(context)
+
     # Light methods
     async def lights_toggle(self) -> None:
         """Toggle lights."""
-        await self.write_command(self._build_command(LeggettOkinCommands.TOGGLE_LIGHTS))
+        await self._tap_keycode(LeggettOkinCommands.TOGGLE_LIGHTS, "lights_toggle")
 
     async def lights_on(self) -> None:
         """Turn on lights (via toggle - no discrete control)."""
@@ -452,27 +471,27 @@ class LeggettOkinController(BedController):
     # advertise a massage-off button that can only ever fail (issue #368).
     async def massage_head_up(self) -> None:
         """Increase head massage intensity."""
-        await self.write_command(self._build_command(LeggettOkinCommands.MASSAGE_HEAD_UP))
+        await self._tap_keycode(LeggettOkinCommands.MASSAGE_HEAD_UP, "massage_head_up")
 
     async def massage_head_down(self) -> None:
         """Decrease head massage intensity."""
-        await self.write_command(self._build_command(LeggettOkinCommands.MASSAGE_HEAD_DOWN))
+        await self._tap_keycode(LeggettOkinCommands.MASSAGE_HEAD_DOWN, "massage_head_down")
 
     async def massage_foot_up(self) -> None:
         """Increase foot massage intensity."""
-        await self.write_command(self._build_command(LeggettOkinCommands.MASSAGE_FOOT_UP))
+        await self._tap_keycode(LeggettOkinCommands.MASSAGE_FOOT_UP, "massage_foot_up")
 
     async def massage_foot_down(self) -> None:
         """Decrease foot massage intensity."""
-        await self.write_command(self._build_command(LeggettOkinCommands.MASSAGE_FOOT_DOWN))
+        await self._tap_keycode(LeggettOkinCommands.MASSAGE_FOOT_DOWN, "massage_foot_down")
 
     async def massage_toggle(self) -> None:
         """Toggle massage / step through modes."""
-        await self.write_command(self._build_command(LeggettOkinCommands.MASSAGE_STEP))
+        await self._tap_keycode(LeggettOkinCommands.MASSAGE_STEP, "massage_toggle")
 
     async def massage_wave_step(self) -> None:
         """Step through massage wave patterns."""
-        await self.write_command(self._build_command(LeggettOkinCommands.MASSAGE_WAVE_STEP))
+        await self._tap_keycode(LeggettOkinCommands.MASSAGE_WAVE_STEP, "massage_wave_step")
 
     # Tilt motor control
     async def move_tilt_up(self) -> None:

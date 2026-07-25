@@ -1824,16 +1824,26 @@ class TestBondMarkerReliability:
         # The fallback attempt connects without requesting pairing...
         coordinator._attempt_used_pairing = False
 
-        with patch(
-            "custom_components.adjustable_bed.coordinator.delete_pairing_required_issue",
-            new_callable=AsyncMock,
+        with (
+            patch(
+                "custom_components.adjustable_bed.coordinator.delete_pairing_required_issue",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                hass.config_entries,
+                "async_update_entry",
+                wraps=hass.config_entries.async_update_entry,
+            ) as update_entry,
         ):
             assert await coordinator._async_verify_bonded() is True
 
         # ...and the probe succeeding releases the latch and re-arms the marker.
         assert coordinator._ble_bond_marker_unreliable is False
-        assert coordinator.entry.data[CONF_BLE_BOND_MARKER_UNRELIABLE] is False
+        assert CONF_BLE_BOND_MARKER_UNRELIABLE not in coordinator.entry.data
         assert coordinator._ble_bond_established is True
+        # Both flags move in a single write: every entry update reloads the
+        # integration, so two writes would queue two reloads mid-connect.
+        assert update_entry.call_count == 1
 
     async def test_latch_holds_while_only_paired_connections_succeed(
         self,

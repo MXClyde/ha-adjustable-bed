@@ -289,6 +289,44 @@ class TestLeggettOkinController:
         sent = [call.args[0] for call in controller.write_command.await_args_list]
         assert bytes.fromhex("040200002000") not in sent
 
+    async def test_light_and_massage_taps_end_with_a_release_burst(self):
+        """Lights and massage are held keycodes, so a tap must release the key.
+
+        Sending the frame alone can leave the key asserted, and the receiver may
+        then not recognise the next press of the same control.
+        """
+        controller = LeggettOkinController(MagicMock())
+        controller.write_command = AsyncMock()
+
+        await controller.lights_toggle()
+
+        press, release = controller.write_command.await_args_list
+        assert press.args == (bytes.fromhex("040200020000"),)
+        assert release.args == (bytes.fromhex("040200000000"),)
+        assert release.kwargs["repeat_count"] == 4
+
+        controller.write_command.reset_mock()
+        await controller.massage_toggle()
+
+        press, release = controller.write_command.await_args_list
+        assert press.args == (bytes.fromhex("040200000100"),)
+        assert release.args == (bytes.fromhex("040200000000"),)
+
+    async def test_program_memory_surfaces_a_failed_final_release(self):
+        """On the success path the closing release is the operation, not cleanup.
+
+        If it fails the slot keycode may still be asserted, so the save must not
+        report success.
+        """
+        controller = LeggettOkinController(MagicMock())
+        # arm hold, arm release, slot hold all succeed; the final release fails.
+        controller.write_command = AsyncMock(
+            side_effect=[None, None, None, BleakError("final release failed")]
+        )
+
+        with pytest.raises(BleakError, match="final release failed"):
+            await controller.program_memory(2)
+
     async def test_massage_timer_step_is_not_exposed(self):
         """0x200 is a constant the app never builds or writes, so it is not a command."""
         controller = LeggettOkinController(MagicMock())
