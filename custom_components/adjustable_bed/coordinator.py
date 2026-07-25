@@ -83,6 +83,7 @@ from .const import (
     CONF_BACK_MAX_ANGLE,
     CONF_BED_TYPE,
     CONF_BLE_BOND_ESTABLISHED,
+    CONF_BLE_BOND_MARKER_UNRELIABLE,
     CONF_CB24_BED_SELECTION,
     CONF_CONNECTION_PROFILE,
     CONF_DISABLE_ANGLE_SENSING,
@@ -96,6 +97,7 @@ from .const import (
     CONF_MOTOR_COUNT,
     CONF_MOTOR_PULSE_COUNT,
     CONF_MOTOR_PULSE_DELAY_MS,
+    CONF_MOTOR_PULSE_USER_SET,
     CONF_OCTO_PIN,
     CONF_PASSIVE_POSITION_RECONCILIATION,
     CONF_POSITION_MODE,
@@ -328,6 +330,11 @@ class AdjustableBedCoordinator:
         # Track if pairing is supported by the Bluetooth adapter (None = unknown)
         self._pairing_supported: bool | None = None
         self._ble_bond_established: bool = bool(entry.data.get(CONF_BLE_BOND_ESTABLISHED, False))
+        # Sticky: this device has already demonstrated that a cached bond marker
+        # does not survive to the next connection, so stop skipping pair=True.
+        self._ble_bond_marker_unreliable: bool = bool(
+            entry.data.get(CONF_BLE_BOND_MARKER_UNRELIABLE, False)
+        )
         self._last_bond_verification: dict[str, Any] = {
             "status": "not_attempted",
             "timestamp": None,
@@ -340,6 +347,10 @@ class AdjustableBedCoordinator:
         # marker, this never poisons the config entry, so a transient pairing
         # failure cannot permanently prevent future pairing attempts.
         self._skip_pair_next_attempt: bool = False
+        # True when the most recent attempt skipped pair=True purely because
+        # CONF_BLE_BOND_ESTABLISHED said we were already bonded. An auth failure
+        # under that condition is what proves the marker unreliable.
+        self._attempt_trusted_bond_marker: bool = False
 
         # Connection history tracking for diagnostics (issue #168)
         self._connection_attempt_count: int = 0
@@ -417,8 +428,14 @@ class AdjustableBedCoordinator:
             previous_bed_type == BED_TYPE_LEGGETT_PLATT
             and self._protocol_variant == LEGGETT_VARIANT_OKIN
         )
+        # This migration runs on every connect, not just on an actual bed-type
+        # change, and it matches on the generic (10, 100) defaults. Without the
+        # provenance marker it therefore reverted a user who deliberately chose
+        # (10, 100) each time they reconnected, so the option looked unsavable
+        # (issue #368). Values the user saved from the options flow are theirs.
         migrate_leggett_okin_defaults = (
-            (previous_uses_leggett_okin or previous_bed_type == BED_TYPE_OKIN_CST)
+            not self.entry.data.get(CONF_MOTOR_PULSE_USER_SET, False)
+            and (previous_uses_leggett_okin or previous_bed_type == BED_TYPE_OKIN_CST)
             and corrected_uses_leggett_okin
             and (self._motor_pulse_count, self._motor_pulse_delay_ms)
             == (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
@@ -756,6 +773,12 @@ class AdjustableBedCoordinator:
 
     def _mark_ble_bond_established(self) -> None:
         """Record that future connections should skip `pair=True`."""
+        if self._ble_bond_marker_unreliable:
+            # Skipping pairing on this device has already been proven wrong once.
+            # Re-arming the marker here is what made it flip-flop: every connect
+            # spent a doomed unpaired attempt before succeeding on the retry.
+            return
+
         if self._ble_bond_established:
             return
 
@@ -788,6 +811,31 @@ class AdjustableBedCoordinator:
             },
         )
 
+    def _mark_bond_marker_unreliable(self) -> None:
+        """Latch that this device must request pairing on every connection.
+
+        Called when the auth-gated probe fails on a connection that skipped
+        ``pair=True`` because the marker claimed we were already bonded. That
+        combination proves the bond did not survive, so the marker is worthless
+        here and honouring it only buys a failed attempt per connect (issue #368).
+        """
+        if self._ble_bond_marker_unreliable:
+            return
+
+        _LOGGER.info(
+            "Cached bond marker for %s did not survive to this connection; "
+            "requesting pairing on every future connection attempt",
+            self._address,
+        )
+        self._ble_bond_marker_unreliable = True
+        self.hass.config_entries.async_update_entry(
+            self.entry,
+            data={
+                **self.entry.data,
+                CONF_BLE_BOND_MARKER_UNRELIABLE: True,
+            },
+        )
+
     async def _async_handle_ble_authentication_error(
         self,
         err: BleakError,
@@ -817,6 +865,8 @@ class AdjustableBedCoordinator:
         # to skip a probe that timed out. The next paired connection should
         # verify the fresh bond again.
         self._bond_probe_timed_out = False
+        if self._attempt_trusted_bond_marker:
+            self._mark_bond_marker_unreliable()
         self._clear_ble_bond_established()
 
         try:
@@ -966,6 +1016,7 @@ class AdjustableBedCoordinator:
                 self.entry.data.get(CONF_BLE_BOND_ESTABLISHED, False)
             ),
             "runtime_bond_established": self._ble_bond_established,
+            "bond_marker_unreliable": self._ble_bond_marker_unreliable,
             "adapter_pairing_supported": self._pairing_supported,
             "transient_skip_next_attempt": self._skip_pair_next_attempt,
             "bond_probe_timed_out": self._bond_probe_timed_out,
@@ -1314,6 +1365,8 @@ class AdjustableBedCoordinator:
             )
         if not bed_requires_pairing:
             pairing_decision = "not_required"
+        elif self._ble_bond_marker_unreliable:
+            pairing_decision = "bond_marker_unreliable"
         elif os_bond_reported and not bond_marker_before_attempt:
             pairing_decision = "existing_os_bond_detected"
         elif self._ble_bond_established:
@@ -1332,10 +1385,14 @@ class AdjustableBedCoordinator:
                 "adapter_pairing_supported": self._pairing_supported,
                 "bond_marker_before_attempt": bond_marker_before_attempt,
                 "bond_marker_after_detection": self._ble_bond_established,
+                "bond_marker_unreliable": self._ble_bond_marker_unreliable,
                 "os_bond_reported": os_bond_reported,
                 "transient_skip_was_set": transient_skip_was_set,
                 "ordering": pairing_ordering,
             }
+        )
+        self._attempt_trusted_bond_marker = (
+            bed_requires_pairing and not use_pairing and pairing_decision == "bond_marker_present"
         )
         # Consume the transient skip flag: it only suppresses pairing for the
         # single attempt immediately following a failed pair.
@@ -2657,14 +2714,33 @@ class AdjustableBedCoordinator:
         self._cancel_passive_position_reconciliation_task()
         await self.async_disconnect()
 
-    async def async_disconnect(self, reason: str = "intentional") -> None:
+    async def async_disconnect(
+        self,
+        reason: str = "intentional",
+        *,
+        serialize_with_commands: bool = False,
+    ) -> None:
         """Disconnect from the bed.
 
         Args:
             reason: The reason for disconnecting (for diagnostics).
                     Common values: "intentional", "idle_timeout"
+            serialize_with_commands: Take the command lock first so the teardown
+                    cannot land in the middle of a command. Required for
+                    externally triggered disconnects (the Disconnect button, the
+                    idle timer); must stay False for callers that already hold
+                    the command lock, such as disconnect-after-command.
         """
         _LOGGER.debug("async_disconnect called for %s", self._address)
+        if serialize_with_commands:
+            # Without this, a disconnect requested while a connect is in flight
+            # queues on self._lock and then tears the link down in the same tick
+            # that the command which triggered the reconnect issues its first
+            # GATT write, so the command fails (issue #368).
+            async with self._command_lock, self._lock:
+                await self._async_disconnect_locked(reason)
+            return
+
         async with self._lock:
             await self._async_disconnect_locked(reason)
 
@@ -2749,6 +2825,10 @@ class AdjustableBedCoordinator:
         The task is tied to the config entry so it is tracked by HA and
         cancelled automatically if the entry unloads before it finishes.
         """
+        # The handle has run, so drop it: _async_idle_disconnect uses a non-None
+        # _disconnect_timer to mean "a command re-armed the timer while I waited
+        # for the command lock", which only works if a fired handle is cleared.
+        self._disconnect_timer = None
         self.entry.async_create_background_task(
             self.hass,
             self._async_idle_disconnect(),
@@ -2789,7 +2869,17 @@ class AdjustableBedCoordinator:
             self._idle_disconnect_seconds,
             self._address,
         )
-        await self.async_disconnect(reason="idle_timeout")
+        async with self._command_lock:
+            if self._disconnect_timer is not None:
+                # A command ran while this firing waited for the command lock and
+                # re-armed the timer, so the bed is no longer idle.
+                _LOGGER.debug(
+                    "Skipping stale idle disconnect for %s: the timer was re-armed",
+                    self._address,
+                )
+                return
+            async with self._lock:
+                await self._async_disconnect_locked("idle_timeout")
 
     async def async_ensure_connected(self, reset_timer: bool = True) -> bool:
         """Ensure we are connected to the bed."""

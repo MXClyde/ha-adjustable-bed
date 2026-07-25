@@ -627,7 +627,7 @@ class AdjustableBedButton(AdjustableBedEntity, ButtonEntity):
         if self.entity_description.is_coordinator_action:
             try:
                 if self.entity_description.key == "disconnect":
-                    await self._coordinator.async_disconnect()
+                    await self._coordinator.async_disconnect(serialize_with_commands=True)
                     _LOGGER.info("Disconnected from bed - physical remote should now work")
                 elif self.entity_description.key == "connect":
                     if not await self._coordinator.async_ensure_connected():

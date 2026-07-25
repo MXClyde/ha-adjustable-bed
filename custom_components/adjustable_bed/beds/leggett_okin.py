@@ -367,13 +367,12 @@ class LeggettOkinController(BedController):
         await self.lights_toggle()
 
     # Massage methods
-    async def massage_off(self) -> None:
-        """Turn off massage (not directly supported on Okin beds)."""
-        raise NotImplementedError(
-            "Okin beds don't have a direct massage-off command. "
-            "Use massage_toggle to cycle through modes."
-        )
-
+    #
+    # There is deliberately no ``massage_off`` override: massage power is a
+    # single toggle keycode with no discrete off. ``supports_massage_off_control``
+    # detects the capability by checking whether the subclass overrides
+    # ``massage_off``, so overriding it just to raise NotImplementedError would
+    # advertise a massage-off button that can only ever fail (issue #368).
     async def massage_head_up(self) -> None:
         """Increase head massage intensity."""
         await self.write_command(self._build_command(LeggettOkinCommands.MASSAGE_HEAD_UP))

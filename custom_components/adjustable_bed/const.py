@@ -72,6 +72,17 @@ CONF_RICHMAT_REMOTE: Final = "richmat_remote"
 CONF_JENSEN_PIN: Final = "jensen_pin"
 CONF_CB24_BED_SELECTION: Final = "cb24_bed_selection"
 CONF_BLE_BOND_ESTABLISHED: Final = "ble_bond_established"
+# Latched once a connection that skipped pair=True on the strength of
+# CONF_BLE_BOND_ESTABLISHED was proven unbonded by the auth-gated probe. Some
+# stacks (notably ESPHome proxies) do not carry a bond across connections, so
+# trusting the marker there costs a guaranteed-failed attempt on every connect.
+CONF_BLE_BOND_MARKER_UNRELIABLE: Final = "ble_bond_marker_unreliable"
+# Provenance for the motor pulse settings: True once the user has saved them from
+# the options flow. Legacy config flows persisted generated defaults into entry
+# data, so the mere presence of the pulse keys proves nothing, and a protocol
+# migration could not tell a generated (10, 100) from a deliberate one. It kept
+# reverting the user's choice on every connect (issue #368).
+CONF_MOTOR_PULSE_USER_SET: Final = "motor_pulse_user_set"
 CONF_BACK_MAX_ANGLE: Final = "back_max_angle"
 CONF_LEGS_MAX_ANGLE: Final = "legs_max_angle"
 CONF_KAIDI_ROOM_ID: Final = "kaidi_room_id"

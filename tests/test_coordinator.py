@@ -34,12 +34,14 @@ from custom_components.adjustable_bed.const import (
     BED_TYPE_SLEEPYS_BOX25,
     CONF_BED_TYPE,
     CONF_BLE_BOND_ESTABLISHED,
+    CONF_BLE_BOND_MARKER_UNRELIABLE,
     CONF_DISABLE_ANGLE_SENSING,
     CONF_DISCONNECT_AFTER_COMMAND,
     CONF_HAS_MASSAGE,
     CONF_MOTOR_COUNT,
     CONF_MOTOR_PULSE_COUNT,
     CONF_MOTOR_PULSE_DELAY_MS,
+    CONF_MOTOR_PULSE_USER_SET,
     CONF_PASSIVE_POSITION_RECONCILIATION,
     CONF_PREFERRED_ADAPTER,
     CONF_PROTOCOL_VARIANT,
@@ -1725,6 +1727,184 @@ class TestCoordinatorDisconnectTimer:
         assert coordinator._disconnect_timer is None
 
 
+class TestBondMarkerReliability:
+    """A bond marker that does not survive must stop suppressing pairing.
+
+    Issue #368: the persisted marker made attempt 1 connect without pair=True,
+    the auth-gated probe then failed with GATT error 5, the marker was cleared,
+    the retry paired successfully and re-armed the marker. Every single connect
+    therefore burned one guaranteed-failed attempt plus its backoff.
+    """
+
+    def _make_bonded_coordinator(self, hass: HomeAssistant) -> AdjustableBedCoordinator:
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title=TEST_NAME,
+            data={
+                CONF_ADDRESS: TEST_ADDRESS,
+                CONF_NAME: TEST_NAME,
+                CONF_BED_TYPE: BED_TYPE_LEGGETT_OKIN,
+                CONF_MOTOR_COUNT: 2,
+                CONF_HAS_MASSAGE: False,
+                CONF_DISABLE_ANGLE_SENSING: True,
+                CONF_PREFERRED_ADAPTER: "auto",
+                CONF_BLE_BOND_ESTABLISHED: True,
+            },
+            unique_id=TEST_ADDRESS,
+            entry_id="bond_marker_reliability_test",
+        )
+        entry.add_to_hass(hass)
+        return AdjustableBedCoordinator(hass, entry)
+
+    async def test_auth_failure_on_trusted_marker_latches_pairing(
+        self,
+        hass: HomeAssistant,
+    ):
+        """After the marker is disproven, every later attempt must request pairing."""
+        coordinator = self._make_bonded_coordinator(hass)
+        device = MagicMock()
+        device.details = {}
+
+        _, use_pairing, _ = coordinator._prepare_pairing_attempt(device, {})
+        assert use_pairing is False
+        assert coordinator._attempt_trusted_bond_marker is True
+
+        with patch(
+            "custom_components.adjustable_bed.coordinator.create_pairing_required_issue",
+            new_callable=AsyncMock,
+        ):
+            await coordinator._async_handle_ble_authentication_error(
+                BleakError(
+                    "Bluetooth GATT Error address=AA:BB:CC:DD:EE:FF "
+                    "handle=26 error=5 description=Insufficient authentication"
+                )
+            )
+
+        assert coordinator._ble_bond_marker_unreliable is True
+        assert coordinator.entry.data[CONF_BLE_BOND_MARKER_UNRELIABLE] is True
+        assert coordinator._ble_bond_established is False
+
+        # A later successful probe must not re-arm the marker...
+        coordinator._mark_ble_bond_established()
+        assert coordinator._ble_bond_established is False
+
+        # ...so the next attempt pairs instead of repeating the failed one.
+        pairing_details: dict[str, Any] = {}
+        _, use_pairing, _ = coordinator._prepare_pairing_attempt(device, pairing_details)
+        assert use_pairing is True
+        assert pairing_details["decision"] == "bond_marker_unreliable"
+
+    async def test_auth_failure_while_pairing_keeps_marker_trusted(
+        self,
+        hass: HomeAssistant,
+    ):
+        """An auth failure on an attempt that did pair says nothing about the marker."""
+        coordinator = self._make_bonded_coordinator(hass)
+        coordinator._ble_bond_established = False
+        device = MagicMock()
+        device.details = {}
+
+        _, use_pairing, _ = coordinator._prepare_pairing_attempt(device, {})
+        assert use_pairing is True
+        assert coordinator._attempt_trusted_bond_marker is False
+
+        with patch(
+            "custom_components.adjustable_bed.coordinator.create_pairing_required_issue",
+            new_callable=AsyncMock,
+        ):
+            await coordinator._async_handle_ble_authentication_error(
+                BleakError("handle=26 error=5 description=Insufficient authentication")
+            )
+
+        assert coordinator._ble_bond_marker_unreliable is False
+        coordinator._mark_ble_bond_established()
+        assert coordinator._ble_bond_established is True
+
+
+class TestDisconnectCommandSerialization:
+    """Externally triggered disconnects must not interleave with a command.
+
+    Issue #368: pressing Disconnect while a connect was in flight queued the
+    teardown on the connection lock only. It then fired in the same tick that the
+    command which triggered the reconnect issued its first GATT write, and the
+    command failed with a user-visible error.
+    """
+
+    async def test_disconnect_button_waits_for_running_command(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ):
+        """A serialized disconnect must not tear the link down mid-command."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+
+        command_running = asyncio.Event()
+        release_command = asyncio.Event()
+        disconnected_during_command = False
+
+        async def _slow_command(_controller):
+            nonlocal disconnected_during_command
+            command_running.set()
+            await release_command.wait()
+            disconnected_during_command = coordinator._client is None
+
+        command = asyncio.create_task(
+            coordinator.async_execute_controller_command(_slow_command, cancel_running=False)
+        )
+        await command_running.wait()
+
+        disconnect = asyncio.create_task(
+            coordinator.async_disconnect(serialize_with_commands=True)
+        )
+        # Give the disconnect a chance to run if it were going to ignore the lock.
+        await asyncio.sleep(0)
+        assert not disconnect.done()
+
+        release_command.set()
+        await command
+        await disconnect
+
+        assert disconnected_during_command is False
+        assert coordinator._client is None
+
+    async def test_idle_disconnect_skipped_when_timer_rearmed(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ):
+        """A stale idle firing must not disconnect a bed a command just used."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+
+        # The fired handle is cleared when the timer callback runs; that is what
+        # lets _async_idle_disconnect tell "re-armed" from "already fired". Drop
+        # the pending handle first so the loop cannot also run it for real.
+        assert coordinator._disconnect_timer is not None
+        coordinator._disconnect_timer.cancel()
+        with patch.object(
+            coordinator.entry,
+            "async_create_background_task",
+            side_effect=lambda _hass, coro, **_kwargs: coro.close(),
+        ):
+            coordinator._schedule_idle_disconnect()
+        assert coordinator._disconnect_timer is None
+
+        async with coordinator._command_lock:
+            idle = asyncio.create_task(coordinator._async_idle_disconnect())
+            await asyncio.sleep(0)
+            coordinator._reset_disconnect_timer()
+
+        await idle
+
+        assert coordinator._disconnect_timer is not None
+        assert coordinator._client is not None
+
+        await coordinator.async_disconnect()
+
+
 class TestSleepNumberMcrCoordinatorLifecycle:
     """Test Sleep Number MCR coordinator lifecycle behavior."""
 
@@ -2791,6 +2971,38 @@ class TestRuntimeBedTypeCorrection:
         assert (coordinator.motor_pulse_count, coordinator.motor_pulse_delay_ms) == (5, 200)
         assert coordinator.entry.data[CONF_MOTOR_PULSE_COUNT] == 5
         assert coordinator.entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 200
+
+    async def test_existing_leggett_okin_preserves_user_saved_generic_cadence(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+    ):
+        """A cadence the user saved must survive even when it equals the old defaults.
+
+        The migration matches on (10, 100), which is also a cadence a user can
+        legitimately pick. Without the provenance marker it re-applied on every
+        connect and reverted them, so the option looked unsavable (issue #368).
+        """
+        coordinator = self._make_coordinator(
+            hass,
+            mock_config_entry_data,
+            {
+                CONF_MOTOR_PULSE_COUNT: DEFAULT_MOTOR_PULSE_COUNT,
+                CONF_MOTOR_PULSE_DELAY_MS: DEFAULT_MOTOR_PULSE_DELAY_MS,
+                CONF_MOTOR_PULSE_USER_SET: True,
+            },
+            bed_type=BED_TYPE_LEGGETT_OKIN,
+        )
+
+        changed = coordinator._apply_runtime_bed_type_correction(BED_TYPE_LEGGETT_OKIN)
+
+        assert changed is False
+        assert (coordinator.motor_pulse_count, coordinator.motor_pulse_delay_ms) == (
+            DEFAULT_MOTOR_PULSE_COUNT,
+            DEFAULT_MOTOR_PULSE_DELAY_MS,
+        )
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_COUNT] == DEFAULT_MOTOR_PULSE_COUNT
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_DELAY_MS] == DEFAULT_MOTOR_PULSE_DELAY_MS
 
     async def test_existing_leggett_okin_preserves_nondefault_pulse_override(
         self,

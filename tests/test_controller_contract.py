@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -58,11 +59,29 @@ SHARED_CAPABILITY_FLAGS: tuple[str, ...] = (
 )
 
 
+class _RecordingImportExecutor:
+    """Stand in for hass.async_add_import_executor_job, recording each call.
+
+    The registry imports controller modules lazily, so the import has to be
+    handed to the import executor rather than run on the event loop. Recording
+    the calls is what makes a regression to a direct import_module fail here
+    instead of only showing up as a runtime warning from HA (issue #368).
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Any, ...]] = []
+
+    async def __call__(self, func: Any, *args: Any) -> Any:
+        self.calls.append((func, *args))
+        return func(*args)
+
+
 class _FactoryCoordinator(SimpleNamespace):
     """Minimal coordinator stub used for controller factory tests."""
 
     def __init__(self) -> None:
         super().__init__(
+            hass=SimpleNamespace(async_add_import_executor_job=_RecordingImportExecutor()),
             client=None,
             cancel_command=asyncio.Event(),
             motor_pulse_count=10,
@@ -249,8 +268,13 @@ async def test_registry_entries_resolve_to_controller_classes(bed_type: str) -> 
     typo into a failing test instead of a ValueError on a user's bed. Covers
     entries like BED_TYPE_DIAGNOSTIC that are absent from SUPPORTED_BED_TYPES.
     """
-    controller = _create_from_registry(_FactoryCoordinator(), bed_type)
+    coordinator = _FactoryCoordinator()
+    controller = await _create_from_registry(coordinator, bed_type)
+
     assert isinstance(controller, BedController)
+    # The lazy module import must go through the import executor, not the loop.
+    executor = coordinator.hass.async_add_import_executor_job
+    assert [call[0] for call in executor.calls] == [import_module]
 
 
 def test_registry_and_explicit_branches_are_disjoint() -> None:

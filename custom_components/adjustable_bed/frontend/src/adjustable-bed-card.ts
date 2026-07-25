@@ -41,6 +41,11 @@ export class AdjustableBedCard extends LitElement {
 
   private _bed?: BedEntities;
   private _watched: string[] = [];
+  // Press-and-hold state for the motor buttons. The generation counter is what
+  // stops an in-flight repeat loop: releasing bumps it, so the loop's next
+  // iteration sees a stale value and exits.
+  private _heldMotor: MotorEntity | null = null;
+  private _holdGeneration = 0;
 
   public static async getConfigElement(): Promise<HTMLElement> {
     return document.createElement("adjustable-bed-card-editor");
@@ -61,6 +66,13 @@ export class AdjustableBedCard extends LitElement {
 
   public getCardSize(): number {
     return 8;
+  }
+
+  public override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    // Navigating away mid-hold never delivers pointerup, which would leave
+    // _pulseWhileHeld re-issuing presses forever.
+    this._cancelHold(this._heldMotor);
   }
 
   protected override shouldUpdate(changed: PropertyValues): boolean {
@@ -248,7 +260,12 @@ export class AdjustableBedCard extends LitElement {
           <button
             class="cg-btn"
             aria-label=${localize(this.hass, "action.up")}
-            @click=${() => this._motorAction(m, "up")}
+            @pointerdown=${(e: PointerEvent) => this._startHold(e, m, "up")}
+            @pointerup=${() => this._endHold(m)}
+            @pointercancel=${() => this._endHold(m)}
+            @keydown=${(e: KeyboardEvent) => this._startHold(e, m, "up")}
+            @keyup=${(e: KeyboardEvent) => this._endKeyHold(e, m)}
+            @blur=${() => this._endHold(m)}
             ?disabled=${!upId}
           >
             <ha-icon icon="mdi:chevron-up"></ha-icon>
@@ -264,7 +281,12 @@ export class AdjustableBedCard extends LitElement {
           <button
             class="cg-btn"
             aria-label=${localize(this.hass, "action.down")}
-            @click=${() => this._motorAction(m, "down")}
+            @pointerdown=${(e: PointerEvent) => this._startHold(e, m, "down")}
+            @pointerup=${() => this._endHold(m)}
+            @pointercancel=${() => this._endHold(m)}
+            @keydown=${(e: KeyboardEvent) => this._startHold(e, m, "down")}
+            @keyup=${(e: KeyboardEvent) => this._endKeyHold(e, m)}
+            @blur=${() => this._endHold(m)}
             ?disabled=${!downId}
           >
             <ha-icon icon="mdi:chevron-down"></ha-icon>
@@ -621,16 +643,83 @@ export class AdjustableBedCard extends LitElement {
 
   // ---- actions ------------------------------------------------------------
 
-  private _motorAction(m: MotorEntity, dir: "up" | "down"): void {
+  // Press-and-hold. A button-backed motor moves for one fixed pulse burst per
+  // press, so holding has to re-issue the press; a cover-backed motor runs until
+  // it is told to stop, so one command covers the whole hold.
+  private _startHold(
+    e: PointerEvent | KeyboardEvent,
+    m: MotorEntity,
+    dir: "up" | "down",
+  ): void {
+    if (e instanceof KeyboardEvent) {
+      // Ignore the auto-repeat the OS generates while a key stays down: the
+      // repeat loop below already keeps the motor moving.
+      if (e.repeat || (e.key !== "Enter" && e.key !== " ")) return;
+      e.preventDefault();
+    } else {
+      // Keep receiving pointerup even if the finger slides off the button.
+      (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+    }
+    if (this._heldMotor) return;
+
+    this._heldMotor = m;
+    const generation = ++this._holdGeneration;
     if (m.cover) {
       this._cover(m.cover, dir === "up" ? "open_cover" : "close_cover");
-    } else {
-      const id = dir === "up" ? m.up : m.down;
-      if (id) this._press(id);
+      return;
+    }
+    void this._pulseWhileHeld(m, dir, generation);
+  }
+
+  private async _pulseWhileHeld(
+    m: MotorEntity,
+    dir: "up" | "down",
+    generation: number,
+  ): Promise<void> {
+    const id = dir === "up" ? m.up : m.down;
+    if (!id) return;
+    // Awaiting each press before issuing the next is what keeps the motion
+    // smooth: the service call resolves once the bed has finished that burst,
+    // so commands never queue up behind each other and the integration never
+    // has to cancel one mid-flight.
+    while (generation === this._holdGeneration) {
+      try {
+        await this.hass?.callService("button", "press", { entity_id: id });
+      } catch {
+        // The bed rejected the command (usually a dropped BLE link). Stop
+        // hammering it; the user can press again.
+        return;
+      }
     }
   }
 
+  private _endKeyHold(e: KeyboardEvent, m: MotorEntity): void {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    this._endHold(m);
+  }
+
+  // Stop re-issuing presses for this motor, without sending anything to the
+  // bed. Returns whether there was a hold to cancel. Releasing one button must
+  // not cancel a hold another button owns: a blur on some other motor's control
+  // would otherwise stop the motor that is running.
+  private _cancelHold(m: MotorEntity | null): boolean {
+    if (!m || this._heldMotor !== m) return false;
+    this._heldMotor = null;
+    this._holdGeneration++;
+    return true;
+  }
+
+  private _endHold(m: MotorEntity): void {
+    if (!this._cancelHold(m)) return;
+    // Only cover-backed motors need an explicit stop. A button-backed motor
+    // ends its own burst, and the controllers already send the protocol's STOP
+    // frame when it finishes, so an extra stop-all here would only add churn.
+    if (m.cover) this._cover(m.cover, "stop_cover");
+  }
+
   private _motorStop(m: MotorEntity): void {
+    this._cancelHold(m);
     if (m.cover) this._cover(m.cover, "stop_cover");
     else if (this._bed?.stop) this._press(this._bed.stop);
   }

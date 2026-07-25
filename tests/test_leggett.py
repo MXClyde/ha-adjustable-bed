@@ -128,6 +128,17 @@ class TestLeggettOkinController:
         # Command 0x1 in big-endian
         assert command[2:] == bytes([0x00, 0x00, 0x00, 0x01])
 
+    async def test_massage_off_is_not_advertised(self):
+        """Massage power is a toggle, so no massage-off button should be offered.
+
+        The capability is detected by checking whether the subclass overrides
+        massage_off, so overriding it just to raise NotImplementedError created a
+        button that could only ever fail (issue #368).
+        """
+        controller = LeggettOkinController(MagicMock())
+
+        assert controller.supports_massage_off_control is False
+
     async def test_motor_uses_configured_lp_control_cadence(self):
         """Motor repeats use the APK-derived 200ms default through coordinator settings."""
         coordinator = MagicMock()
