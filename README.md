@@ -74,7 +74,7 @@ The names below refer to motor/actuator manufacturers. Your bed might use one of
 | ✅ [MotoSleep](docs/beds/motosleep.md) | HHC, Power Bob, binary MOTO models |
 | ✅ [Octo](docs/beds/octo.md) | Octo |
 | ✅ [Solace](docs/beds/solace.md) | Solace, Sealy, Woosa Sleep, QMS |
-| ✅ [Leggett & Platt](docs/beds/leggett-platt.md) | Leggett & Platt |
+| ✅ [Leggett & Platt](docs/beds/leggett-platt.md) | Leggett & Platt, Prodigy Comfort Elite / Prodigy CE |
 | ✅ [Reverie](docs/beds/reverie.md) | Reverie |
 | ✅ [Okimat/Okin](docs/beds/okimat.md) | Lucid (including some Smartbed/L600 bases), CVB, Smartbed |
 | ✅ [Okin 64-Bit](docs/beds/okin-64bit.md) | NORA_CON / NORACON Mattress Firm controllers |
@@ -103,7 +103,7 @@ The names below refer to motor/actuator manufacturers. Your bed might use one of
 | ✅ [Logicdata](docs/beds/logicdata.md) | SILVERmotion, SimplicityFrame |
 | ✅ [Okin CB35](docs/beds/okin-cb35.md) | Sealy Posturematic |
 | ⚠️ [DewertOkin ELEVATE](docs/beds/star-elevate.md) | ELEVATE two-actuator lift accessory |
-| ✅ [Okin CST](docs/beds/okin-cst.md) | Mattress Firm 900-O / MFirm 900-O, Rize MF900, Nectar Motion, LP Prodigy CE |
+| ✅ [Okin CST](docs/beds/okin-cst.md) | Mattress Firm 900-O / MFirm 900-O, Rize MF900, Nectar Motion |
 | ✅ [OKIN Smart Remote / RF ECO BT](docs/beds/okin-rf-eco-bt.md) | Elda BTH / MEGAMAT staircase actuator |
 | ⚠️ [Okin DOT](docs/beds/okin-dot.md) | DewertOkin RF1058/RF34/RF6707 handset beds |
 
@@ -175,8 +175,10 @@ See the [Configuration Guide](docs/CONFIGURATION.md) for all options.
 The integration ships a native Lovelace card, **Adjustable Bed Card**, that
 gives you a complete control panel for your bed — position controls, presets,
 memory, lighting, massage, climate, and connection — all in the Home Assistant
-theme. It loads automatically; there's nothing to add as a HACS/Lovelace
-resource.
+theme. It registers and loads automatically; you do not need to add a
+HACS/Lovelace resource manually. If Home Assistant was open in your browser
+during an integration update, reload that page once after restarting Home
+Assistant so the browser picks up the updated card module.
 
 To add it: edit a dashboard → **Add Card** → search for **Adjustable Bed**, then
 pick your bed device. Or in YAML:

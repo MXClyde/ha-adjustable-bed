@@ -19,11 +19,8 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
-    BED_TYPE_REVERIE,
-    BED_TYPE_REVERIE_NIGHTSTAND,
     BEDS_WITH_PERCENTAGE_POSITIONS,
     DOMAIN,
-    REVERIE_BACK_MAX_ANGLE,
 )
 from .coordinator import AdjustableBedCoordinator
 from .entity import AdjustableBedEntity
@@ -250,25 +247,21 @@ def _cover_entities_for(
     _async_remove_stale_cover_entities(hass, coordinator, controller)
 
     return [
-        AdjustableBedCover(coordinator, _build_cover_description(coordinator, spec))
+        AdjustableBedCover(coordinator, _build_cover_description(spec))
         for spec in controller.motor_control_specs
     ]
 
 
 def _build_cover_description(
-    coordinator: AdjustableBedCoordinator,
     spec: MotorControlSpec,
 ) -> AdjustableBedCoverEntityDescription:
-    """Build a cover description from the controller-provided motor spec."""
+    """Build a cover description from the controller-provided motor spec.
+
+    Travel limits come from the spec, so per-frame limits belong on the
+    controller's motor_max_angles rather than as a bed-type check here.
+    """
     templates_by_key = {description.key: description for description in COVER_DESCRIPTIONS}
     template = templates_by_key.get(spec.key)
-    max_angle = spec.max_angle
-
-    if coordinator.bed_type in (BED_TYPE_REVERIE, BED_TYPE_REVERIE_NIGHTSTAND) and spec.key in (
-        "back",
-        "head",
-    ):
-        max_angle = REVERIE_BACK_MAX_ANGLE
 
     return AdjustableBedCoverEntityDescription(
         key=spec.key,
@@ -279,7 +272,7 @@ def _build_cover_description(
         close_fn=spec.close_fn,
         stop_fn=spec.stop_fn,
         position_key=spec.position_key,
-        max_angle=max_angle,
+        max_angle=spec.max_angle,
     )
 
 

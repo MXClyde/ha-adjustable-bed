@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -38,11 +39,18 @@ from custom_components.adjustable_bed.const import (
     CONF_PROTOCOL_VARIANT,
     DOMAIN,
     OCTO_CHAR_UUID,
+    OCTO_STAR2_CHAR_UUID,
     OCTO_VARIANT_STANDARD,
     OCTO_VARIANT_STAR2,
 )
 from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
 from custom_components.adjustable_bed.light import LIGHT_DESCRIPTION, AdjustableBedLight
+
+
+@pytest.fixture
+def _shorten_mocked_feature_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep mocked feature-discovery timeouts from dominating unit tests."""
+    monkeypatch.setattr("custom_components.adjustable_bed.beds.octo.OCTO_FEATURE_TIMEOUT", 0.01)
 
 
 @pytest.fixture
@@ -65,7 +73,9 @@ def mock_octo_config_entry_data() -> dict:
 
 @pytest.fixture
 def mock_octo_config_entry(
-    hass: HomeAssistant, mock_octo_config_entry_data: dict
+    hass: HomeAssistant,
+    mock_octo_config_entry_data: dict,
+    _shorten_mocked_feature_timeout: None,
 ) -> MockConfigEntry:
     """Return a mock config entry for an Octo bed."""
     entry = MockConfigEntry(
@@ -90,7 +100,9 @@ def mock_octo_star2_config_entry_data(mock_octo_config_entry_data: dict) -> dict
 
 @pytest.fixture
 def mock_octo_star2_config_entry(
-    hass: HomeAssistant, mock_octo_star2_config_entry_data: dict
+    hass: HomeAssistant,
+    mock_octo_star2_config_entry_data: dict,
+    _shorten_mocked_feature_timeout: None,
 ) -> MockConfigEntry:
     """Return a mock config entry for an Octo Star2 bed."""
     entry = MockConfigEntry(
@@ -356,6 +368,45 @@ class TestOctoPinAuth:
 
         mock_bleak_client.write_gatt_char.assert_not_called()
 
+    async def test_send_pin_redacts_command_diagnostics(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """PIN packets should be written but redacted from traces and logs."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        await coordinator.async_connect()
+
+        controller = cast(OctoController, coordinator.controller)
+        controller._has_pin = True
+        controller._pin_locked = True
+        coordinator._command_trace.clear()
+        mock_bleak_client.write_gatt_char.reset_mock()
+        caplog.set_level(logging.DEBUG, logger="custom_components.adjustable_bed.beds.base")
+        caplog.clear()
+
+        await coordinator.async_execute_controller_command(
+            lambda active: cast(OctoController, active).send_pin()
+        )
+
+        expected_packet = controller._build_packet([0x20, 0x43], [1, 2, 3, 4])
+        mock_bleak_client.write_gatt_char.assert_called_once_with(
+            OCTO_CHAR_UUID,
+            expected_packet,
+            response=False,
+        )
+        assert len(coordinator.command_trace) == 1
+        assert coordinator.command_trace[0]["payload"] == {
+            "hex": "**REDACTED**",
+            "length": len(expected_packet),
+            "ascii_preview": None,
+        }
+        assert expected_packet.hex() not in caplog.text
+        assert "**REDACTED**" in caplog.text
+
 
 class TestOctoCommands:
     """Test Octo motor, light, and stop commands."""
@@ -457,6 +508,53 @@ class TestOctoCommands:
 
         assert calls[0][0][1] == move_packet
         assert calls[-1][0][1] == stop_packet
+
+    async def test_standard_commands_are_recorded_for_support_bundles(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_coordinator_connected,
+    ):
+        """Standard OCTO movement writes should appear in command traces."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        await coordinator.async_connect()
+        coordinator._command_trace.clear()
+
+        controller = cast(OctoController, coordinator.controller)
+        await coordinator.async_execute_controller_command(lambda active: active.move_head_up())
+
+        move_packet = controller._build_packet([0x02, 0x70], [OCTO_MOTOR_HEAD])
+        stop_packet = controller._build_packet([0x02, 0x73])
+        trace = coordinator.command_trace
+
+        assert [entry["payload"]["hex"] for entry in trace] == [
+            move_packet.hex(),
+            stop_packet.hex(),
+        ]
+        assert all(entry["characteristic_uuid"] == OCTO_CHAR_UUID for entry in trace)
+        assert all(entry["write_mode"] == "without_response" for entry in trace)
+        assert all(entry["operation_name"] == "command" for entry in trace)
+
+    async def test_star2_commands_are_recorded_for_support_bundles(
+        self,
+        hass: HomeAssistant,
+        mock_octo_star2_config_entry,
+        mock_coordinator_connected,
+    ):
+        """Star2 movement writes should appear in command traces."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_star2_config_entry)
+        await coordinator.async_connect()
+        coordinator._command_trace.clear()
+
+        controller = cast(OctoStar2Controller, coordinator.controller)
+        await coordinator.async_execute_controller_command(lambda active: active.move_head_up())
+
+        assert len(coordinator.command_trace) == 1
+        trace = coordinator.command_trace[0]
+        assert trace["payload"]["hex"] == controller.CMD_HEAD_UP.hex()
+        assert trace["characteristic_uuid"] == OCTO_STAR2_CHAR_UUID
+        assert trace["write_mode"] == "without_response"
+        assert trace["operation_name"] == "command"
 
     async def test_move_with_stop_sends_stop_on_error(
         self,

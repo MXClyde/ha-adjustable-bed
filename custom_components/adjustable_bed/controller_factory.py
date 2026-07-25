@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from importlib import import_module
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Final
 
 from .adapter import discover_services
 from .const import (
@@ -235,6 +238,96 @@ def _is_dewertokin_rf_gateway(client: BleakClient | None, ble_model: str | None)
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _ControllerSpec:
+    """Lazy pointer to a controller class, plus any fixed constructor kwargs.
+
+    Controller modules are imported on demand: eagerly importing all ~50 of them
+    at integration load would cost startup time for protocols the user does not
+    have. ``module`` is resolved relative to ``.beds``.
+    """
+
+    module: str
+    class_name: str
+    kwargs: Mapping[str, Any] = MappingProxyType({})
+
+
+# Bed types whose construction is fully described by "import this class and pass
+# the coordinator (plus fixed kwargs)". Bed types needing runtime detection,
+# variant resolution, or constructor arguments derived from the advertisement
+# stay as explicit branches in create_controller().
+#
+# tests/test_controller_contract.py resolves every entry, so a bad module or
+# class name fails the suite rather than a user's bed setup.
+_SIMPLE_CONTROLLERS: Final[dict[str, _ControllerSpec]] = {
+    BED_TYPE_OKIN_RF_ECO_BT: _ControllerSpec("okin_rf_eco_bt", "OkinRfEcoBtController"),
+    BED_TYPE_OKIN_7BYTE: _ControllerSpec("okin_7byte", "Okin7ByteController"),
+    BED_TYPE_OKIN_NORDIC: _ControllerSpec("okin_nordic", "OkinNordicController"),
+    BED_TYPE_OKIN_CB35: _ControllerSpec("okin_cb35", "OkinCB35Controller"),
+    BED_TYPE_OKIN_ORE: _ControllerSpec("okin_ore", "OkinOreController"),
+    BED_TYPE_OKIN_CST: _ControllerSpec("okin_cst", "OkinCstController"),
+    BED_TYPE_MALOUF_NEW_OKIN: _ControllerSpec("malouf", "MaloufNewOkinController"),
+    BED_TYPE_MALOUF_LEGACY_OKIN: _ControllerSpec("malouf", "MaloufLegacyOkinController"),
+    BED_TYPE_LEGGETT_OKIN: _ControllerSpec("leggett_okin", "LeggettOkinController"),
+    BED_TYPE_LEGGETT_WILINKE: _ControllerSpec("leggett_wilinke", "LeggettWilinkeController"),
+    BED_TYPE_LINAK: _ControllerSpec("linak", "LinakController"),
+    # OKIN FFE uses the Keeson protocol with an 0xE6 prefix.
+    BED_TYPE_OKIN_FFE: _ControllerSpec(
+        "keeson", "KeesonController", MappingProxyType({"variant": KEESON_VARIANT_OKIN})
+    ),
+    BED_TYPE_SOLACE: _ControllerSpec("solace", "SolaceController"),
+    BED_TYPE_SUTA: _ControllerSpec("suta", "SutaController"),
+    BED_TYPE_TIMOTION_AHF: _ControllerSpec("timotion_ahf", "TiMOTIONAhfController"),
+    BED_TYPE_REVERIE: _ControllerSpec("reverie", "ReverieController"),
+    BED_TYPE_REVERIE_NIGHTSTAND: _ControllerSpec(
+        "reverie_nightstand", "ReverieNightstandController"
+    ),
+    BED_TYPE_COMFORT_MOTION: _ControllerSpec("jiecang", "JiecangController"),
+    # Ergomotion is the Keeson protocol with position feedback; Serta Motion
+    # Perfect is the same protocol with its own variant.
+    BED_TYPE_ERGOMOTION: _ControllerSpec(
+        "keeson", "KeesonController", MappingProxyType({"variant": KEESON_VARIANT_ERGOMOTION})
+    ),
+    BED_TYPE_SERTA: _ControllerSpec(
+        "keeson", "KeesonController", MappingProxyType({"variant": KEESON_VARIANT_SERTA})
+    ),
+    BED_TYPE_JIECANG: _ControllerSpec("jiecang", "JiecangController"),
+    BED_TYPE_LIMOSS: _ControllerSpec("limoss", "LimossController"),
+    BED_TYPE_LOGICDATA: _ControllerSpec("logicdata", "LogicdataController"),
+    BED_TYPE_MATTRESSFIRM: _ControllerSpec("okin_nordic", "OkinNordicController"),
+    BED_TYPE_NECTAR: _ControllerSpec("okin_7byte", "Okin7ByteController"),
+    BED_TYPE_DIAGNOSTIC: _ControllerSpec("diagnostic", "DiagnosticBedController"),
+    BED_TYPE_BEDTECH: _ControllerSpec("bedtech", "BedTechController"),
+    BED_TYPE_SLEEP_NUMBER_MCR: _ControllerSpec("sleep_number_mcr", "SleepNumberMcrController"),
+    BED_TYPE_SLEEPYS_BOX15: _ControllerSpec("sleepys", "SleepysBox15Controller"),
+    BED_TYPE_SLEEPYS_BOX24: _ControllerSpec("sleepys", "SleepysBox24Controller"),
+    BED_TYPE_STAR_ELEVATE: _ControllerSpec("star_elevate", "StarElevateController"),
+    BED_TYPE_SVANE: _ControllerSpec("svane", "SvaneController"),
+    BED_TYPE_VIBRADORM: _ControllerSpec("vibradorm", "VibradormController"),
+    BED_TYPE_REMACRO: _ControllerSpec("remacro", "RemacroController"),
+    BED_TYPE_SCOTT_LIVING: _ControllerSpec("scott_living", "ScottLivingController"),
+}
+
+
+def _create_from_registry(
+    coordinator: AdjustableBedCoordinator, bed_type: str
+) -> BedController | None:
+    """Instantiate ``bed_type`` from the registry, or None if it needs a custom branch."""
+    spec = _SIMPLE_CONTROLLERS.get(bed_type)
+    if spec is None:
+        return None
+
+    module = import_module(f".beds.{spec.module}", __package__)
+    controller_cls: type[BedController] = getattr(module, spec.class_name)
+    _LOGGER.debug(
+        "Using %s for bed type %s%s",
+        spec.class_name,
+        bed_type,
+        f" ({spec.kwargs})" if spec.kwargs else "",
+    )
+    return controller_cls(coordinator, **spec.kwargs)
+
+
 async def create_controller(
     coordinator: AdjustableBedCoordinator,
     bed_type: str,
@@ -328,26 +421,6 @@ async def create_controller(
         _LOGGER.debug("Using Okin UUID variant: %s", variant)
         return OkinUuidController(coordinator, variant=variant)
 
-    if bed_type == BED_TYPE_OKIN_RF_ECO_BT:
-        from .beds.okin_rf_eco_bt import OkinRfEcoBtController
-
-        return OkinRfEcoBtController(coordinator)
-
-    if bed_type == BED_TYPE_OKIN_7BYTE:
-        from .beds.okin_7byte import Okin7ByteController
-
-        return Okin7ByteController(coordinator)
-
-    if bed_type == BED_TYPE_OKIN_NORDIC:
-        from .beds.okin_nordic import OkinNordicController
-
-        return OkinNordicController(coordinator)
-
-    if bed_type == BED_TYPE_OKIN_CB35:
-        from .beds.okin_cb35 import OkinCB35Controller
-
-        return OkinCB35Controller(coordinator)
-
     if bed_type == BED_TYPE_KAIDI:
         from .beds.kaidi import KaidiController
 
@@ -411,48 +484,12 @@ async def create_controller(
             protocol_variant=profile_variant,
         )
 
-    if bed_type == BED_TYPE_OKIN_ORE:
-        from .beds.okin_ore import OkinOreController
-
-        return OkinOreController(coordinator)
-
-    if bed_type == BED_TYPE_OKIN_CST:
-        from .beds.okin_cst import OkinCstController
-
-        _LOGGER.debug("Using OKIN CST controller (14-byte CSTProtocol)")
-        return OkinCstController(coordinator)
-
-    if bed_type == BED_TYPE_MALOUF_NEW_OKIN:
-        from .beds.malouf import MaloufNewOkinController
-
-        return MaloufNewOkinController(coordinator)
-
-    if bed_type == BED_TYPE_MALOUF_LEGACY_OKIN:
-        from .beds.malouf import MaloufLegacyOkinController
-
-        return MaloufLegacyOkinController(coordinator)
-
     if bed_type == BED_TYPE_LEGGETT_GEN2:
         from .beds.leggett_gen2 import LeggettGen2Controller
 
         return LeggettGen2Controller(coordinator, manufacturer_data=manufacturer_data)
 
-    if bed_type == BED_TYPE_LEGGETT_OKIN:
-        from .beds.leggett_okin import LeggettOkinController
-
-        return LeggettOkinController(coordinator)
-
-    if bed_type == BED_TYPE_LEGGETT_WILINKE:
-        from .beds.leggett_wilinke import LeggettWilinkeController
-
-        return LeggettWilinkeController(coordinator)
-
     # Brand-specific bed types
-    if bed_type == BED_TYPE_LINAK:
-        from .beds.linak import LinakController
-
-        return LinakController(coordinator)
-
     if bed_type == BED_TYPE_RICHMAT:
         from .beds.richmat import RichmatController, detect_richmat_variant
 
@@ -658,32 +695,10 @@ async def create_controller(
             _LOGGER.debug("Using Base Keeson variant")
             return KeesonController(coordinator, variant="base", device_name=device_name)
 
-    if bed_type == BED_TYPE_OKIN_FFE:
-        from .beds.keeson import KeesonController
-
-        # OKIN FFE uses Keeson protocol with 0xE6 prefix
-        _LOGGER.debug("Using OKIN FFE controller (Keeson protocol with 0xE6 prefix)")
-        return KeesonController(coordinator, variant="okin")
-
-    if bed_type == BED_TYPE_SOLACE:
-        from .beds.solace import SolaceController
-
-        return SolaceController(coordinator)
-
     if bed_type == BED_TYPE_MOTOSLEEP:
         from .beds.motosleep import MotoSleepController
 
         return MotoSleepController(coordinator, device_name=device_name)
-
-    if bed_type == BED_TYPE_SUTA:
-        from .beds.suta import SutaController
-
-        return SutaController(coordinator)
-
-    if bed_type == BED_TYPE_TIMOTION_AHF:
-        from .beds.timotion_ahf import TiMOTIONAhfController
-
-        return TiMOTIONAhfController(coordinator)
 
     if bed_type == BED_TYPE_LEGGETT_PLATT:
         # Use configured variant or auto-detect
@@ -737,49 +752,6 @@ async def create_controller(
             _LOGGER.debug("Using Gen2 Leggett & Platt variant (configured)")
             return LeggettGen2Controller(coordinator, manufacturer_data=manufacturer_data)
 
-    if bed_type == BED_TYPE_REVERIE:
-        from .beds.reverie import ReverieController
-
-        return ReverieController(coordinator)
-
-    if bed_type == BED_TYPE_REVERIE_NIGHTSTAND:
-        from .beds.reverie_nightstand import ReverieNightstandController
-
-        return ReverieNightstandController(coordinator)
-
-    if bed_type == BED_TYPE_COMFORT_MOTION:
-        # Comfort Motion uses the enhanced Jiecang controller
-        from .beds.jiecang import JiecangController
-
-        return JiecangController(coordinator)
-
-    if bed_type == BED_TYPE_ERGOMOTION:
-        # Ergomotion uses the same protocol as Keeson with position feedback
-        from .beds.keeson import KeesonController
-
-        return KeesonController(coordinator, variant="ergomotion")
-
-    if bed_type == BED_TYPE_SERTA:
-        # Serta Motion Perfect uses the Keeson protocol with serta variant
-        from .beds.keeson import KeesonController
-
-        return KeesonController(coordinator, variant="serta")
-
-    if bed_type == BED_TYPE_JIECANG:
-        from .beds.jiecang import JiecangController
-
-        return JiecangController(coordinator)
-
-    if bed_type == BED_TYPE_LIMOSS:
-        from .beds.limoss import LimossController
-
-        return LimossController(coordinator)
-
-    if bed_type == BED_TYPE_LOGICDATA:
-        from .beds.logicdata import LogicdataController
-
-        return LogicdataController(coordinator)
-
     if bed_type == BED_TYPE_DEWERTOKIN:
         if _is_dewertokin_rf_gateway(client, ble_model):
             from .beds.dewertokin_rf_gateway import DewertOkinRfGatewayController
@@ -810,26 +782,6 @@ async def create_controller(
                 coordinator, pin=octo_pin, capability_snapshot=capability_snapshot
             )
 
-    if bed_type == BED_TYPE_MATTRESSFIRM:
-        from .beds.okin_nordic import OkinNordicController
-
-        return OkinNordicController(coordinator)
-
-    if bed_type == BED_TYPE_NECTAR:
-        from .beds.okin_7byte import Okin7ByteController
-
-        return Okin7ByteController(coordinator)
-
-    if bed_type == BED_TYPE_DIAGNOSTIC:
-        from .beds.diagnostic import DiagnosticBedController
-
-        return DiagnosticBedController(coordinator)
-
-    if bed_type == BED_TYPE_BEDTECH:
-        from .beds.bedtech import BedTechController
-
-        return BedTechController(coordinator)
-
     if bed_type == BED_TYPE_JENSEN:
         from .beds.jensen import JensenController
 
@@ -843,11 +795,6 @@ async def create_controller(
             _LOGGER.debug("Unknown Sleep Number side variant %s, defaulting to auto", side)
             side = VARIANT_AUTO
         return SleepNumberController(coordinator, side=side)
-
-    if bed_type == BED_TYPE_SLEEP_NUMBER_MCR:
-        from .beds.sleep_number_mcr import SleepNumberMcrController
-
-        return SleepNumberMcrController(coordinator)
 
     if bed_type == BED_TYPE_SLEEPSTAR:
         from .beds.sleepstar import SleepStarController
@@ -865,18 +812,6 @@ async def create_controller(
         variant = protocol_variant if protocol_variant and protocol_variant != "auto" else "nordic"
         _LOGGER.debug("Using OKIN 64-bit variant: %s", variant)
         return Okin64BitController(coordinator, variant=variant)
-
-    if bed_type == BED_TYPE_SLEEPYS_BOX15:
-        from .beds.sleepys import SleepysBox15Controller
-
-        _LOGGER.debug("Using Sleepy's BOX15 controller")
-        return SleepysBox15Controller(coordinator)
-
-    if bed_type == BED_TYPE_SLEEPYS_BOX24:
-        from .beds.sleepys import SleepysBox24Controller
-
-        _LOGGER.debug("Using Sleepy's BOX24 controller")
-        return SleepysBox24Controller(coordinator)
 
     if bed_type == BED_TYPE_SLEEPYS_BOX25:
         from .beds.sleepys_box25 import (
@@ -917,22 +852,6 @@ async def create_controller(
         _LOGGER.info("Using BOX25 StarCode dialect (%s)", selection_reason)
         return SleepysBox25Controller(coordinator)
 
-    if bed_type == BED_TYPE_STAR_ELEVATE:
-        from .beds.star_elevate import StarElevateController
-
-        _LOGGER.debug("Using ELEVATE two-actuator StarCode controller")
-        return StarElevateController(coordinator)
-
-    if bed_type == BED_TYPE_SVANE:
-        from .beds.svane import SvaneController
-
-        return SvaneController(coordinator)
-
-    if bed_type == BED_TYPE_VIBRADORM:
-        from .beds.vibradorm import VibradormController
-
-        return VibradormController(coordinator)
-
     if bed_type == BED_TYPE_RONDURE:
         from .beds.rondure import RondureController
         from .const import RONDURE_VARIANTS
@@ -952,11 +871,6 @@ async def create_controller(
         _LOGGER.debug("Using Rondure controller with variant: %s", variant)
         return RondureController(coordinator, variant=variant)
 
-    if bed_type == BED_TYPE_REMACRO:
-        from .beds.remacro import RemacroController
-
-        return RemacroController(coordinator)
-
     if bed_type == BED_TYPE_COOLBASE:
         from .beds.coolbase import CoolBaseController
 
@@ -970,12 +884,6 @@ async def create_controller(
         )
         return CoolBaseController(coordinator, dewert_okin_profile=dewert_okin_profile)
 
-    if bed_type == BED_TYPE_SCOTT_LIVING:
-        from .beds.scott_living import ScottLivingController
-
-        _LOGGER.debug("Using Scott Living controller")
-        return ScottLivingController(coordinator)
-
     if bed_type == BED_TYPE_SBI:
         from .beds.sbi import SBIController
 
@@ -987,5 +895,9 @@ async def create_controller(
         )
         _LOGGER.debug("Using SBI controller with variant: %s", variant)
         return SBIController(coordinator, variant=variant)
+
+    controller = _create_from_registry(coordinator, bed_type)
+    if controller is not None:
+        return controller
 
     raise ValueError(f"Unknown bed type: {bed_type}")

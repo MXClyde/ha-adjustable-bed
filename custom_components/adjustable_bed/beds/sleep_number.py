@@ -30,7 +30,13 @@ from ..const import (
     SLEEP_NUMBER_VARIANT_RIGHT,
     VARIANT_AUTO,
 )
-from .base import BedController, MotorControlSpec
+from .base import (
+    POSITION_UNIT_PERCENT,
+    BedController,
+    MotorControlSpec,
+    PositionNumberSpec,
+    build_position_number_spec,
+)
 
 if TYPE_CHECKING:
     from ..coordinator import AdjustableBedCoordinator
@@ -465,6 +471,14 @@ class SleepNumberController(BedController):
     @property
     def supports_preset_tv(self) -> bool:
         return True
+
+    @property
+    def position_number_specs(self) -> tuple[PositionNumberSpec, ...]:
+        """Expose back/legs as percentage sliders; the foundation reports percent."""
+        return (
+            build_position_number_spec("back", max_value=100.0, unit=POSITION_UNIT_PERCENT),
+            build_position_number_spec("legs", max_value=100.0, unit=POSITION_UNIT_PERCENT),
+        )
 
     @property
     def motor_control_specs(self) -> tuple[MotorControlSpec, ...]:

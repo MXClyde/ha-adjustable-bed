@@ -129,13 +129,9 @@ from .const import (
     OKIN_CST_POSITION_AXES,
     OKIN_FOOT_MAX_ANGLE,
     OKIN_HEAD_MAX_ANGLE,
-    POSITION_CHECK_INTERVAL,
     POSITION_MODE_ACCURACY,
     POSITION_OVERSHOOT_TOLERANCE,
     POSITION_SEEK_TIMEOUT,
-    POSITION_STALL_COUNT,
-    POSITION_STALL_THRESHOLD,
-    POSITION_TOLERANCE,
     REVERIE_BACK_MAX_ANGLE,
     RICHMAT_REMOTE_AUTO,
     VARIANT_AUTO,
@@ -144,6 +140,7 @@ from .const import (
     get_richmat_motor_count,
     passive_position_reconciliation_default_enabled,
     requires_pairing,
+    requires_pairing_after_service_discovery,
     resolve_explicit_bed_type,
     resolve_richmat_remote_code,
 )
@@ -254,10 +251,11 @@ class AdjustableBedCoordinator:
             CONF_PROTOCOL_VARIANT, DEFAULT_PROTOCOL_VARIANT
         )
         self._name: str = entry.data.get(CONF_NAME, "Adjustable Bed")
-        # Keep the advertised BLE name separate from the editable entry name.
-        # Malouf's APK has one command exception keyed to Smartbed238, so using
-        # a user-facing rename here would silently select the wrong command.
+        # Malouf's APK has one command exception keyed to Smartbed238. Keep the
+        # configured name as a controller fallback, but track actual observations
+        # separately so protocol detection never relies on a user-facing rename.
         self._ble_device_name: str = self._name
+        self._observed_ble_device_name: str | None = None
         self._malouf_layout: str = entry.data.get(CONF_MALOUF_LAYOUT, MALOUF_LAYOUT_AUTO)
         self._malouf_memory_slots: int = int(
             entry.data.get(CONF_MALOUF_MEMORY_SLOTS, MALOUF_MEMORY_SLOTS_AUTO)
@@ -461,7 +459,13 @@ class AdjustableBedCoordinator:
                 corrected_bed_type,
             )
         previous_defaults = BED_MOTOR_PULSE_DEFAULTS.get(previous_bed_type)
-        corrected_defaults = BED_MOTOR_PULSE_DEFAULTS.get(corrected_bed_type)
+        corrected_uses_leggett_okin = corrected_bed_type == BED_TYPE_LEGGETT_OKIN or (
+            corrected_bed_type == BED_TYPE_LEGGETT_PLATT
+            and self._protocol_variant == LEGGETT_VARIANT_OKIN
+        )
+        corrected_defaults = BED_MOTOR_PULSE_DEFAULTS.get(
+            BED_TYPE_LEGGETT_OKIN if corrected_uses_leggett_okin else corrected_bed_type
+        )
         # Only swap in the corrected protocol's defaults if the user never set
         # their own pulse values. Comparing against ``previous_defaults`` alone is
         # not enough: an explicit override can coincidentally equal the previous
@@ -472,12 +476,34 @@ class AdjustableBedCoordinator:
             CONF_MOTOR_PULSE_COUNT in self.entry.data
             or CONF_MOTOR_PULSE_DELAY_MS in self.entry.data
         )
+        # Config flows historically persisted the generic defaults even when the
+        # user did not customize them. Existing Leggett Okin entries and LP BED
+        # entries misclassified as CST therefore carry (10, 100), with no provenance
+        # that distinguishes those generated values from an override. Restrict this
+        # migration to these Leggett Okin upgrade paths so unrelated explicit
+        # settings remain intact.
+        previous_uses_leggett_okin = previous_bed_type == BED_TYPE_LEGGETT_OKIN or (
+            previous_bed_type == BED_TYPE_LEGGETT_PLATT
+            and self._protocol_variant == LEGGETT_VARIANT_OKIN
+        )
+        migrate_leggett_okin_defaults = (
+            (previous_uses_leggett_okin or previous_bed_type == BED_TYPE_OKIN_CST)
+            and corrected_uses_leggett_okin
+            and (self._motor_pulse_count, self._motor_pulse_delay_ms)
+            == (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
+        )
         if (
-            previous_defaults is not None
-            and corrected_defaults is not None
-            and bed_type_changed
-            and not has_custom_pulse_override
-            and (self._motor_pulse_count, self._motor_pulse_delay_ms) == previous_defaults
+            corrected_defaults is not None
+            and (
+                migrate_leggett_okin_defaults
+                or (
+                    bed_type_changed
+                    and previous_defaults is not None
+                    and not has_custom_pulse_override
+                    and (self._motor_pulse_count, self._motor_pulse_delay_ms)
+                    == previous_defaults
+                )
+            )
         ):
             self._motor_pulse_count, self._motor_pulse_delay_ms = corrected_defaults
             _LOGGER.info(
@@ -497,6 +523,9 @@ class AdjustableBedCoordinator:
 
         entry_data = dict(self.entry.data)
         entry_data[CONF_BED_TYPE] = corrected_bed_type
+        if migrate_leggett_okin_defaults and corrected_defaults is not None:
+            entry_data[CONF_MOTOR_PULSE_COUNT] = corrected_defaults[0]
+            entry_data[CONF_MOTOR_PULSE_DELAY_MS] = corrected_defaults[1]
         if corrected_bed_type == BED_TYPE_BEDTECH:
             entry_data.pop(CONF_RICHMAT_REMOTE, None)
         angle_sensing_defaulted = CONF_DISABLE_ANGLE_SENSING not in self.entry.data or (
@@ -563,8 +592,13 @@ class AdjustableBedCoordinator:
 
     @property
     def ble_device_name(self) -> str:
-        """Return the most recently observed BLE advertising name."""
+        """Return the observed BLE name or configured fallback for controller logic."""
         return self._ble_device_name
+
+    @property
+    def observed_ble_device_name(self) -> str | None:
+        """Return the most recently observed BLE advertising name, if any."""
+        return self._observed_ble_device_name
 
     @property
     def malouf_layout(self) -> str:
@@ -635,6 +669,10 @@ class AdjustableBedCoordinator:
         Returns:
             Maximum angle in degrees for the specified motor.
         """
+        # Deliberately keyed on bed type rather than the controller's
+        # motor_max_angles: this limit must hold while disconnected, so that
+        # set_position validation still rejects a target the frame cannot reach
+        # when the controller is momentarily absent.
         if position_key in ("back", "head"):
             if self._bed_type == BED_TYPE_OKIN_CST:
                 return OKIN_HEAD_MAX_ANGLE
@@ -1429,6 +1467,101 @@ class AdjustableBedCoordinator:
 
         return not self._uses_persistent_connection()
 
+    def _prepare_pairing_attempt(
+        self,
+        device: BLEDevice,
+        pairing_details: dict[str, Any],
+    ) -> tuple[bool, bool, bool]:
+        """Resolve pairing policy and diagnostics for one connection attempt."""
+        bed_requires_pairing = requires_pairing(self._bed_type, self._protocol_variant)
+        bond_marker_before_attempt = self._ble_bond_established
+        transient_skip_was_set = self._skip_pair_next_attempt
+        os_bond_reported = (
+            bed_requires_pairing and self._device_reports_existing_bond(device)
+        )
+        if (
+            bed_requires_pairing
+            and not self._ble_bond_established
+            and os_bond_reported
+        ):
+            _LOGGER.info(
+                "Existing BLE bond detected for %s; skipping pair=True",
+                self._address,
+            )
+            self._mark_ble_bond_established()
+
+        use_pairing = (
+            bed_requires_pairing
+            and not self._ble_bond_established
+            and not self._skip_pair_next_attempt
+            and self._pairing_supported is not False
+        )
+        pair_after_service_discovery = bool(
+            use_pairing
+            and requires_pairing_after_service_discovery(
+                self._bed_type,
+                self._protocol_variant,
+            )
+        )
+        pairing_ordering = "not_requested"
+        if use_pairing:
+            pairing_ordering = (
+                "connect_discover_then_pair"
+                if pair_after_service_discovery
+                else "backend_default"
+            )
+        if not bed_requires_pairing:
+            pairing_decision = "not_required"
+        elif os_bond_reported and not bond_marker_before_attempt:
+            pairing_decision = "existing_os_bond_detected"
+        elif self._ble_bond_established:
+            pairing_decision = "bond_marker_present"
+        elif transient_skip_was_set:
+            pairing_decision = "retry_without_pairing"
+        elif self._pairing_supported is False:
+            pairing_decision = "adapter_pairing_unsupported"
+        else:
+            pairing_decision = "pairing_requested"
+        pairing_details.update(
+            {
+                "required": bed_requires_pairing,
+                "requested": use_pairing,
+                "decision": pairing_decision,
+                "adapter_pairing_supported": self._pairing_supported,
+                "bond_marker_before_attempt": bond_marker_before_attempt,
+                "bond_marker_after_detection": self._ble_bond_established,
+                "os_bond_reported": os_bond_reported,
+                "transient_skip_was_set": transient_skip_was_set,
+                "ordering": pairing_ordering,
+            }
+        )
+        # Consume the transient skip flag: it only suppresses pairing for the
+        # single attempt immediately following a failed pair.
+        self._skip_pair_next_attempt = False
+        return bed_requires_pairing, use_pairing, pair_after_service_discovery
+
+    async def _async_cleanup_failed_connection(self) -> None:
+        """Release a failed-attempt client without scheduling auto-reconnect."""
+        client = self._client
+        if client is None:
+            return
+
+        _LOGGER.debug("Cleaning up failed connection attempt...")
+        self._intentional_disconnect = True
+        try:
+            await client.disconnect()
+            _LOGGER.debug("Disconnect cleanup successful")
+        except Exception as disconnect_err:
+            _LOGGER.debug(
+                "Error during disconnect cleanup: %s (%s)",
+                disconnect_err,
+                type(disconnect_err).__name__,
+            )
+        finally:
+            self._client = None
+            self._controller = None
+            self._intentional_disconnect = False
+
     async def _async_connect_locked(self, reset_timer: bool = True) -> bool:
         """Connect to the bed (must hold lock)."""
         # Clear any prior manual/idle disconnect marker before a fresh connect attempt.
@@ -1606,6 +1739,7 @@ class AdjustableBedCoordinator:
                 )
                 if device.name:
                     self._ble_device_name = device.name
+                    self._observed_ble_device_name = device.name
 
                 if self._preferred_adapter and self._preferred_adapter != ADAPTER_AUTO:
                     if device_source == self._preferred_adapter:
@@ -1678,6 +1812,7 @@ class AdjustableBedCoordinator:
                         if selected_source is None or svc_source == selected_source:
                             if svc_info.device.name:
                                 self._ble_device_name = svc_info.device.name
+                                self._observed_ble_device_name = svc_info.device.name
                             _LOGGER.debug(
                                 "ble_device_callback returning device from %s (RSSI: %s, connectable=%s)",
                                 svc_source or "unknown",
@@ -1702,6 +1837,7 @@ class AdjustableBedCoordinator:
                         raise BleakError(f"Device {self._address} not found")
                     if fallback.name:
                         self._ble_device_name = fallback.name
+                        self._observed_ble_device_name = fallback.name
                     if connectable is False:
                         _LOGGER.debug(
                             "ble_device_callback falling back to non-connectable record for %s",
@@ -1718,66 +1854,24 @@ class AdjustableBedCoordinator:
                 # some ESP-IDF/ESPHome stacks respond with auth error 82 and can
                 # leave the proxy stuck in ESTABLISHED state when asked to re-pair
                 # an already-bonded device.
-                bed_requires_pairing = requires_pairing(self._bed_type, self._protocol_variant)
                 pairing_details = attempt_details["pairing"]
-                bond_marker_before_attempt = self._ble_bond_established
-                transient_skip_was_set = self._skip_pair_next_attempt
-                os_bond_reported = (
-                    bed_requires_pairing and self._device_reports_existing_bond(device)
+                (
+                    bed_requires_pairing,
+                    use_pairing,
+                    pair_after_service_discovery,
+                ) = self._prepare_pairing_attempt(
+                    device,
+                    pairing_details,
                 )
-                if (
-                    bed_requires_pairing
-                    and not self._ble_bond_established
-                    and os_bond_reported
-                ):
-                    _LOGGER.info(
-                        "Existing BLE bond detected for %s; skipping pair=True",
-                        self._address,
-                    )
-                    self._mark_ble_bond_established()
-
-                use_pairing = (
-                    bed_requires_pairing
-                    and not self._ble_bond_established
-                    and not self._skip_pair_next_attempt
-                    and self._pairing_supported is not False
-                )
-                if not bed_requires_pairing:
-                    pairing_decision = "not_required"
-                elif os_bond_reported and not bond_marker_before_attempt:
-                    pairing_decision = "existing_os_bond_detected"
-                elif self._ble_bond_established:
-                    pairing_decision = "bond_marker_present"
-                elif transient_skip_was_set:
-                    pairing_decision = "retry_without_pairing"
-                elif self._pairing_supported is False:
-                    pairing_decision = "adapter_pairing_unsupported"
-                else:
-                    pairing_decision = "pairing_requested"
-                pairing_details.update(
-                    {
-                        "required": bed_requires_pairing,
-                        "requested": use_pairing,
-                        "decision": pairing_decision,
-                        "adapter_pairing_supported": self._pairing_supported,
-                        "bond_marker_before_attempt": bond_marker_before_attempt,
-                        "bond_marker_after_detection": self._ble_bond_established,
-                        "os_bond_reported": os_bond_reported,
-                        "transient_skip_was_set": transient_skip_was_set,
-                    }
-                )
-                # Consume the transient skip flag: it only suppresses pairing for
-                # the single attempt immediately following a failed pair, so we
-                # never get stuck skipping pairing forever.
-                self._skip_pair_next_attempt = False
                 keep_connecting_through_startup = self._uses_persistent_connection()
                 if use_pairing:
                     _LOGGER.info(
-                        "Pairing enabled for %s (bed type: %s, variant: %s) - "
+                        "Pairing enabled for %s (bed type: %s, variant: %s, ordering: %s) - "
                         "GATT services cache disabled to force fresh discovery",
                         self._name,
                         self._bed_type,
                         self._protocol_variant,
+                        pairing_details["ordering"],
                     )
 
                 # Mark that we're connecting to suppress spurious disconnect warnings
@@ -1810,9 +1904,21 @@ class AdjustableBedCoordinator:
                             max_attempts=1,
                             timeout=self._connection_timeout,
                             ble_device_callback=ble_device_callback,
-                            pair=use_pairing,
+                            pair=use_pairing and not pair_after_service_discovery,
                             use_services_cache=not disable_cache,
                         )
+                        # LP Control requests the Android bond only after the
+                        # unbonded GATT link has reported SERVICES_DISCOVERED.
+                        # establish_connection() returns after Bleak has loaded
+                        # the service collection, so pairing here preserves that
+                        # proven application ordering on BlueZ as well.
+                        if pair_after_service_discovery:
+                            _LOGGER.info(
+                                "Connected to %s and discovered services; "
+                                "creating the BLE bond now",
+                                self._address,
+                            )
+                            await self._client.pair()
                         # If we get here with pairing enabled, mark it as supported
                         if use_pairing:
                             self._pairing_supported = True
@@ -1825,6 +1931,18 @@ class AdjustableBedCoordinator:
                         # NotImplementedError: ESPHome < 2024.3.0 doesn't support pairing
                         # TypeError: older bleak-retry-connector doesn't have pair kwarg
                         if use_pairing:
+                            # A post-discovery pair() failure leaves a live
+                            # unbonded client, unlike a failed pair=True connect.
+                            # Release it before the compatibility retry.
+                            if self._client is not None:
+                                client = self._client
+                                self._intentional_disconnect = True
+                                try:
+                                    with contextlib.suppress(Exception):
+                                        await client.disconnect()
+                                finally:
+                                    self._client = None
+                                    self._intentional_disconnect = False
                             _LOGGER.warning(
                                 "Pairing not supported by Bluetooth adapter: %s. "
                                 "If using ESPHome proxy, update to ESPHome >= 2024.3.0. "
@@ -2059,6 +2177,7 @@ class AdjustableBedCoordinator:
                         self._store_ble_device_info(ble_manufacturer, ble_model)
 
                 previous_bed_type = self._bed_type
+                observed_device_name = self._observed_ble_device_name or device.name
                 corrected_bed_type = refine_malouf_protocol_from_gatt(
                     self._bed_type,
                     self._client.services,
@@ -2068,20 +2187,21 @@ class AdjustableBedCoordinator:
                     self._client.services,
                     self._protocol_variant,
                     ble_model,
+                    observed_device_name,
                 )
                 corrected_bed_type = refine_dewertokin_star_protocol_from_name(
                     corrected_bed_type,
-                    device.name,
+                    observed_device_name,
                 )
                 corrected_bed_type = refine_nordic_uart_protocol_from_device_info(
                     corrected_bed_type,
-                    device.name,
+                    observed_device_name,
                     ble_manufacturer,
                     ble_model,
                 )
                 corrected_bed_type = refine_qrrm_protocol_from_device_info(
                     corrected_bed_type,
-                    device.name,
+                    observed_device_name,
                     ble_model,
                 )
                 corrected_bed_type = refine_okin_dot_protocol_from_gatt(
@@ -2365,19 +2485,7 @@ class AdjustableBedCoordinator:
                     type(err).__name__,
                     err.args,
                 )
-                if self._client:
-                    _LOGGER.debug("Cleaning up failed connection attempt...")
-                    try:
-                        await self._client.disconnect()
-                        _LOGGER.debug("Disconnect cleanup successful")
-                    except Exception as disconnect_err:
-                        _LOGGER.debug(
-                            "Error during disconnect cleanup: %s (%s)",
-                            disconnect_err,
-                            type(disconnect_err).__name__,
-                        )
-                    self._client = None
-                    self._controller = None
+                await self._async_cleanup_failed_connection()
                 self._connection_attempt_details.append(attempt_details)
                 # Delay is handled at the start of the next iteration with progressive backoff
             except Exception as err:  # noqa: BLE001 - preserve retry diagnostics for unexpected connect failures
@@ -2407,19 +2515,7 @@ class AdjustableBedCoordinator:
                 )
                 # Log full traceback at debug level
                 _LOGGER.debug("Full traceback:\n%s", traceback.format_exc())
-                if self._client:
-                    _LOGGER.debug("Cleaning up failed connection attempt...")
-                    try:
-                        await self._client.disconnect()
-                        _LOGGER.debug("Disconnect cleanup successful")
-                    except Exception as disconnect_err:
-                        _LOGGER.debug(
-                            "Error during disconnect cleanup: %s (%s)",
-                            disconnect_err,
-                            type(disconnect_err).__name__,
-                        )
-                    self._client = None
-                    self._controller = None
+                await self._async_cleanup_failed_connection()
                 self._connection_attempt_details.append(attempt_details)
                 # Delay is handled at the start of the next iteration with progressive backoff
 
@@ -3322,9 +3418,7 @@ class AdjustableBedCoordinator:
             _LOGGER.warning("Cannot start notifications: no controller available")
             return
 
-        requires_notify_channel = getattr(self._controller, "requires_notification_channel", False)
-        if not isinstance(requires_notify_channel, bool):
-            requires_notify_channel = False
+        requires_notify_channel = self._controller.requires_notification_channel
 
         # Some controllers depend on notifications for command responses or
         # authentication even when angle sensing is disabled.
@@ -3825,9 +3919,15 @@ class AdjustableBedCoordinator:
                     _LOGGER.error("Cannot seek position: no controller available")
                     raise NoControllerError("No controller available")
 
+                # Pin the controller for the whole seek. A disconnect callback can
+                # clear self._controller while we await below, and every step of the
+                # seek -- including the STOP in the finally block -- must keep acting
+                # on the controller we validated rather than dereferencing None.
+                controller = self._controller
+
                 await self._async_refresh_controller_auth()
 
-                supports_direct_position_control = self._controller.supports_direct_position_control
+                supports_direct_position_control = controller.supports_direct_position_control
 
                 # Get current position, attempting a read if not available.
                 # Direct-position controllers can operate without a current reading.
@@ -3844,47 +3944,14 @@ class AdjustableBedCoordinator:
                             f"Cannot seek {position_key}: no position data available"
                         )
 
-                position_tolerance = getattr(
-                    self._controller, "position_seek_tolerance", POSITION_TOLERANCE
+                position_tolerance = controller.position_seek_tolerance
+                position_check_interval = controller.position_seek_check_interval
+                position_stall_count = controller.position_seek_stall_count
+                position_stall_threshold = controller.position_seek_stall_threshold
+                chain_seek_steps = controller.chains_position_seek_steps_while_moving
+                position_seek_chain_min_remaining_distance = (
+                    controller.position_seek_chain_min_remaining_distance
                 )
-                if not isinstance(position_tolerance, (int, float)):
-                    position_tolerance = POSITION_TOLERANCE
-                position_check_interval = getattr(
-                    self._controller,
-                    "position_seek_check_interval",
-                    POSITION_CHECK_INTERVAL,
-                )
-                if not isinstance(position_check_interval, (int, float)):
-                    position_check_interval = POSITION_CHECK_INTERVAL
-                position_stall_count = getattr(
-                    self._controller, "position_seek_stall_count", POSITION_STALL_COUNT
-                )
-                if not isinstance(position_stall_count, int):
-                    position_stall_count = POSITION_STALL_COUNT
-                position_stall_threshold = getattr(
-                    self._controller,
-                    "position_seek_stall_threshold",
-                    POSITION_STALL_THRESHOLD,
-                )
-                if not isinstance(position_stall_threshold, (int, float)):
-                    position_stall_threshold = POSITION_STALL_THRESHOLD
-                chain_seek_steps = getattr(
-                    self._controller,
-                    "chains_position_seek_steps_while_moving",
-                    False,
-                )
-                if not isinstance(chain_seek_steps, bool):
-                    chain_seek_steps = False
-                position_seek_chain_min_remaining_distance = getattr(
-                    self._controller,
-                    "position_seek_chain_min_remaining_distance",
-                    position_tolerance,
-                )
-                if not isinstance(
-                    position_seek_chain_min_remaining_distance,
-                    (int, float),
-                ):
-                    position_seek_chain_min_remaining_distance = position_tolerance
 
                 # Check if already at target (within tolerance)
                 if (
@@ -3916,7 +3983,7 @@ class AdjustableBedCoordinator:
                 # Check if controller supports direct position control (e.g., Reverie)
                 # This bypasses the incremental seek loop for beds that can set positions directly
                 if supports_direct_position_control:
-                    native_position = self._controller.angle_to_native_position(
+                    native_position = controller.angle_to_native_position(
                         position_key, target_angle
                     )
                     _LOGGER.debug(
@@ -3924,7 +3991,7 @@ class AdjustableBedCoordinator:
                         position_key,
                         native_position,
                     )
-                    await self._controller.set_motor_position(position_key, native_position)
+                    await controller.set_motor_position(position_key, native_position)
                     self._handle_position_update(position_key, target_angle)
                     return  # finally block handles disconnect timer
 
@@ -3937,7 +4004,6 @@ class AdjustableBedCoordinator:
 
                 # Determine initial direction
                 moving_up = target_angle > current_angle
-                controller = self._controller
                 reverse_on_overshoot = controller.reverses_position_seek_on_overshoot
                 use_custom_seek_steps = controller.uses_custom_position_seek_steps
 
@@ -4047,8 +4113,8 @@ class AdjustableBedCoordinator:
                             )
                             # Only send explicit stop for controllers that don't auto-stop
                             # (Linak auto-stops and explicit STOP can cause reverse blips)
-                            if not getattr(self._controller, "auto_stops_on_idle", False):
-                                await move_stop_fn(self._controller)
+                            if not controller.auto_stops_on_idle:
+                                await move_stop_fn(controller)
                                 await asyncio.sleep(0.3)  # Ensure stop completes before reversal
                             # Check if a new stop was requested while we were stopping
                             if self._cancel_counter > entry_cancel_count:
@@ -4068,8 +4134,8 @@ class AdjustableBedCoordinator:
                             )
                             # Only send explicit stop for controllers that don't auto-stop
                             # (Linak auto-stops and explicit STOP can cause reverse blips)
-                            if not getattr(self._controller, "auto_stops_on_idle", False):
-                                await move_stop_fn(self._controller)
+                            if not controller.auto_stops_on_idle:
+                                await move_stop_fn(controller)
                                 await asyncio.sleep(0.3)  # Ensure stop completes before reversal
                             # Check if a new stop was requested while we were stopping
                             if self._cancel_counter > entry_cancel_count:
@@ -4125,10 +4191,10 @@ class AdjustableBedCoordinator:
                 finally:
                     # Stop the motor unless it auto-stops on idle
                     # Some controllers (e.g., Linak) auto-stop and sending explicit
-                    # STOP can cause brief reverse movement
-                    if not getattr(self._controller, "auto_stops_on_idle", False):
+                    # STOP can cause brief reverse movement.
+                    if not controller.auto_stops_on_idle:
                         try:
-                            await move_stop_fn(self._controller)
+                            await move_stop_fn(controller)
                         except Exception:
                             _LOGGER.exception(
                                 "CRITICAL: Failed to stop motor %s - manual intervention may be required",

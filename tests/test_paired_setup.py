@@ -1685,7 +1685,7 @@ class TestSideServiceRouting:
 
         from custom_components.adjustable_bed import (
             _async_ensure_paired_device_registry,
-            _async_register_services,
+            async_register_services,
         )
         from custom_components.adjustable_bed.paired_coordinator import (
             PairedBedCoordinator,
@@ -1725,7 +1725,7 @@ class TestSideServiceRouting:
         coordinator.async_execute_controller_command = AsyncMock()  # type: ignore[method-assign]
         hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
         _async_ensure_paired_device_registry(hass, entry, coordinator)
-        await _async_register_services(hass)
+        await async_register_services(hass)
 
         parent = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, PAIR_ID)})
         assert parent is not None

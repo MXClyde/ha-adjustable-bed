@@ -147,16 +147,28 @@ def _power_bob_profile(profile_id: str) -> MotoSleepProfile:
         motors["auxiliary"] = ("P", "Q")
 
     explicit_stop = profile_id in {"four", "wr1140", "one", "two", "three", "nine", "six_zg"}
-    return _profile(
+    profile = _profile(
         f"power_bob_{profile_id}",
         MotoSleepTransport.POWER_BOB_ASCII,
         motors=motors,
         commands=_POWER_BOB_COMMANDS[profile_id],
         explicit_stop=explicit_stop,
         # Settings always routes to PanelRGB. Character 10 selects its Mood or
-        # Night configuration independently of the root motor panel.
+        # Night configuration independently of the root motor panel. This proves
+        # app reachability; user-confirmed hardware exceptions are narrowed below.
         rgb_light=True,
     )
+    if profile_id == "eight":
+        # MotoSleep's PanelEight sends $O for Home, and issue #468 confirms it
+        # on a short-name HHC bed that otherwise follows Power Bob routing.
+        # The same hardware uses PanelEight's $A light toggle; issue #470
+        # confirms that the separate generic PanelRGB controls do not apply.
+        profile = replace(
+            profile,
+            presets=_frozen({**profile.presets, "flat": "O"}),
+            rgb_light=False,
+        )
+    return profile
 
 
 def _resolve_power_bob(name: str) -> MotoSleepProfile:

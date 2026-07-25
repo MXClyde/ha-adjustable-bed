@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+from copy import copy
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from bleak.exc import BleakError
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.config_entries import (
     SOURCE_BLUETOOTH,
@@ -28,6 +30,7 @@ from custom_components.adjustable_bed.config_flow import (
 from custom_components.adjustable_bed.const import (
     BED_TYPE_COOLBASE,
     BED_TYPE_DEWERTOKIN,
+    BED_TYPE_DIAGNOSTIC,
     BED_TYPE_ERGOMOTION,
     BED_TYPE_JIECANG,
     BED_TYPE_KAIDI,
@@ -45,6 +48,8 @@ from custom_components.adjustable_bed.const import (
     BED_TYPE_OKIN_UUID,
     BED_TYPE_REVERIE,
     BED_TYPE_RICHMAT,
+    BED_TYPE_RONDURE,
+    BED_TYPE_SBI,
     BED_TYPE_SERTA,
     BED_TYPE_SLEEP_NUMBER,
     BED_TYPE_SOLACE,
@@ -52,6 +57,7 @@ from custom_components.adjustable_bed.const import (
     BED_TYPE_TIMOTION_AHF,
     BED_TYPE_VIBRADORM,
     BEDS_WITH_POSITION_FEEDBACK,
+    CONF_BACK_MAX_ANGLE,
     CONF_BED_TYPE,
     CONF_BLE_BOND_ESTABLISHED,
     CONF_DISABLE_ANGLE_SENSING,
@@ -68,20 +74,27 @@ from custom_components.adjustable_bed.const import (
     CONF_MALOUF_MEMORY_SLOTS,
     CONF_MOTOR_COUNT,
     CONF_MOTOR_PULSE_COUNT,
+    CONF_MOTOR_PULSE_DELAY_MS,
+    CONF_OCTO_PIN,
     CONF_PASSIVE_POSITION_RECONCILIATION,
     CONF_PREFERRED_ADAPTER,
     CONF_PROTOCOL_VARIANT,
     DOMAIN,
     KAIDI_VARIANT_SEAT_1,
+    KEESON_VARIANT_ERGOMOTION,
+    LEGGETT_VARIANT_OKIN,
     MALOUF_LAYOUT_HILO,
     OCTO_VARIANT_STANDARD,
     OCTO_VARIANT_STAR2,
     RICHMAT_WILINKE_SERVICE_UUIDS,
+    RONDURE_VARIANT_SIDE_A,
+    SBI_VARIANT_SIDE_B,
     SUTA_SERVICE_UUID,
     TIMOTION_AHF_SERVICE_UUID,
+    VARIANT_AUTO,
     requires_pairing,
 )
-from custom_components.adjustable_bed.detection import detect_bed_type
+from custom_components.adjustable_bed.detection import BED_TYPE_DISPLAY_NAMES, detect_bed_type
 from custom_components.adjustable_bed.discovery_settings import (
     async_is_discovery_disabled,
     async_set_discovery_disabled,
@@ -263,6 +276,112 @@ class TestPairingPersistence:
 
         assert result["type"] is FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_BLE_BOND_ESTABLISHED] is True
+
+    async def test_leggett_gen2_pairs_after_service_discovery(self, hass: HomeAssistant) -> None:
+        """LP Comfort Connect must connect and discover GATT before bonding."""
+        flow = self._new_pairing_flow(hass)
+        flow._manual_data[CONF_BED_TYPE] = BED_TYPE_LEGGETT_GEN2
+
+        service_info = MagicMock()
+        service_info.address = flow._manual_data[CONF_ADDRESS]
+        service_info.source = "local"
+        service_info.connectable = True
+        service_info.device = MagicMock()
+
+        events: list[str] = []
+        client = MagicMock()
+
+        async def pair() -> None:
+            events.append("pair")
+
+        async def disconnect() -> None:
+            events.append("disconnect")
+
+        client.pair = AsyncMock(side_effect=pair)
+        client.disconnect = AsyncMock(side_effect=disconnect)
+
+        async def establish(*_args: object, **_kwargs: object) -> MagicMock:
+            events.append("connect")
+            return client
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.config_flow.get_discovered_service_info",
+                return_value=[service_info],
+            ),
+            patch(
+                "bleak_retry_connector.establish_connection",
+                new=AsyncMock(side_effect=establish),
+            ) as mock_establish,
+        ):
+            assert await flow._attempt_pairing(flow._manual_data[CONF_ADDRESS]) is True
+
+        assert events == ["connect", "pair", "disconnect"]
+        assert mock_establish.await_args.kwargs["pair"] is False
+        assert mock_establish.await_args.kwargs["use_services_cache"] is False
+
+    async def test_leggett_gen2_pair_failure_disconnects(
+        self, hass: HomeAssistant
+    ) -> None:
+        """A failed post-discovery bond must not leave the GATT link open."""
+        flow = self._new_pairing_flow(hass)
+        flow._manual_data[CONF_BED_TYPE] = BED_TYPE_LEGGETT_GEN2
+
+        service_info = MagicMock()
+        service_info.address = flow._manual_data[CONF_ADDRESS]
+        service_info.source = "local"
+        service_info.connectable = True
+        service_info.device = MagicMock()
+
+        client = MagicMock()
+        client.pair = AsyncMock(side_effect=BleakError("pairing rejected"))
+        client.disconnect = AsyncMock()
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.config_flow.get_discovered_service_info",
+                return_value=[service_info],
+            ),
+            patch(
+                "bleak_retry_connector.establish_connection",
+                new=AsyncMock(return_value=client),
+            ),
+            pytest.raises(BleakError, match="pairing rejected"),
+        ):
+            await flow._attempt_pairing(flow._manual_data[CONF_ADDRESS])
+
+        client.disconnect.assert_awaited_once_with()
+
+    async def test_other_beds_keep_pair_during_connection(self, hass: HomeAssistant) -> None:
+        """Existing pairing-required protocols keep the standard Bleak path."""
+        flow = self._new_pairing_flow(hass)
+
+        service_info = MagicMock()
+        service_info.address = flow._manual_data[CONF_ADDRESS]
+        service_info.source = "local"
+        service_info.connectable = True
+        service_info.device = MagicMock()
+
+        client = MagicMock()
+        client.pair = AsyncMock()
+        client.disconnect = AsyncMock()
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.config_flow.get_discovered_service_info",
+                return_value=[service_info],
+            ),
+            patch(
+                "bleak_retry_connector.establish_connection",
+                new=AsyncMock(return_value=client),
+            ) as mock_establish,
+        ):
+            assert await flow._attempt_pairing(flow._manual_data[CONF_ADDRESS]) is True
+
+        assert mock_establish.await_args.kwargs["pair"] is True
+        assert mock_establish.await_args.kwargs["use_services_cache"] is True
+        client.pair.assert_not_awaited()
+        client.disconnect.assert_awaited_once()
 
 
 class TestDetectBedType:
@@ -663,6 +782,40 @@ class TestPinValidation:
 class TestBluetoothDiscoveryFlow:
     """Test Bluetooth discovery flow."""
 
+    async def test_bluetooth_discovery_identical_names_include_address(
+        self,
+        hass: HomeAssistant,
+        mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+        enable_custom_integrations,
+    ):
+        """Discovery cards and confirmation distinguish beds with identical names."""
+        raw_addresses = ("aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02")
+        discovered_titles: list[dict[str, str]] = []
+
+        for raw_address in raw_addresses:
+            service_info = copy(mock_bluetooth_service_info)
+            service_info.name = "LP BED CONTROL"
+            service_info.address = raw_address
+
+            result = await hass.config_entries.flow.async_init(
+                DOMAIN,
+                context={"source": SOURCE_BLUETOOTH},
+                data=service_info,
+            )
+
+            address = raw_address.upper()
+            progress = hass.config_entries.flow.async_get(result["flow_id"])
+            title_placeholders = progress["context"]["title_placeholders"]
+            discovered_titles.append(title_placeholders)
+            assert title_placeholders == {
+                "name": "LP BED CONTROL",
+                "address": address,
+            }
+            assert result["description_placeholders"]["name"] == "LP BED CONTROL"
+            assert result["description_placeholders"]["address"] == address
+
+        assert discovered_titles[0] != discovered_titles[1]
+
     async def test_bluetooth_discovery_creates_entry(
         self,
         hass: HomeAssistant,
@@ -743,6 +896,147 @@ class TestBluetoothDiscoveryFlow:
         assert result["data"][CONF_MOTOR_COUNT] == 4
         assert result["data"][CONF_HAS_MASSAGE] is True
         assert result["data"][CONF_DISABLE_ANGLE_SENSING] is False
+
+    async def test_bluetooth_confirm_bed_type_dropdown_uses_display_names(
+        self,
+        hass: HomeAssistant,
+        mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+        enable_custom_integrations,
+    ):
+        """Regression for #385: the confirm dropdown showed raw type slugs from
+        SUPPORTED_BED_TYPES, with no "Diagnostic (unknown bed)" entry. It must use
+        the same display-name options as the other selection paths."""
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_BLUETOOTH},
+            data=mock_bluetooth_service_info,
+        )
+        assert result["step_id"] == "bluetooth_confirm"
+
+        bed_type_marker = next(
+            marker for marker in result["data_schema"].schema if marker.schema == CONF_BED_TYPE
+        )
+        selector = result["data_schema"].schema[bed_type_marker]
+        options = selector.config["options"]
+        options_by_value = {option["value"]: option["label"] for option in options}
+
+        assert bed_type_marker.default() == BED_TYPE_LINAK
+        assert options_by_value[BED_TYPE_LINAK] == BED_TYPE_DISPLAY_NAMES[BED_TYPE_LINAK]
+        assert options_by_value[BED_TYPE_DIAGNOSTIC] == "Diagnostic (unknown bed)"
+
+    async def test_bluetooth_confirm_legacy_alias_default_stays_selectable(
+        self,
+        hass: HomeAssistant,
+        mock_bluetooth_service_info_ambiguous_okin: MagicMock,
+        enable_custom_integrations,
+    ):
+        """A legacy-alias bed type (absent from the display-name list) chosen via
+        disambiguation must be prepended so the dropdown default stays valid."""
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_BLUETOOTH},
+            data=mock_bluetooth_service_info_ambiguous_okin,
+        )
+        assert result["step_id"] == "bluetooth_disambiguate"
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={"bed_type_choice": BED_TYPE_OKIMAT},
+        )
+        assert result["step_id"] == "bluetooth_confirm"
+
+        bed_type_marker = next(
+            marker for marker in result["data_schema"].schema if marker.schema == CONF_BED_TYPE
+        )
+        selector = result["data_schema"].schema[bed_type_marker]
+        option_values = [option["value"] for option in selector.config["options"]]
+
+        assert bed_type_marker.default() == BED_TYPE_OKIMAT
+        assert option_values[0] == BED_TYPE_OKIMAT
+        assert option_values.count(BED_TYPE_OKIMAT) == 1
+
+    async def test_bluetooth_confirm_diagnostic_bed_type_creates_entry(
+        self,
+        hass: HomeAssistant,
+        mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+        enable_custom_integrations,
+    ):
+        """Selecting "Diagnostic (unknown bed)" on the confirm step must create
+        an entry so users can capture a support bundle (#385)."""
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_BLUETOOTH},
+            data=mock_bluetooth_service_info,
+        )
+        assert result["step_id"] == "bluetooth_confirm"
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BED_TYPE: BED_TYPE_DIAGNOSTIC,
+                CONF_NAME: "Mystery Bed",
+                CONF_MOTOR_COUNT: 2,
+                CONF_HAS_MASSAGE: False,
+                CONF_DISABLE_ANGLE_SENSING: True,
+                CONF_PREFERRED_ADAPTER: "auto",
+            },
+        )
+
+        # A connectable scanner is mocked, so the verify_connection step appears.
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "verify_connection"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={},
+        )
+
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+        assert result["data"][CONF_BED_TYPE] == BED_TYPE_DIAGNOSTIC
+
+    async def test_bluetooth_confirm_diagnostic_entry_created_when_probe_fails(
+        self,
+        hass: HomeAssistant,
+        mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+        enable_custom_integrations,
+    ):
+        """A failed connection probe must not block a diagnostic entry: the
+        whole point is capturing bundles for beds we cannot reach (#385)."""
+        from custom_components.adjustable_bed.config_flow import CapabilityReport
+
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_BLUETOOTH},
+            data=mock_bluetooth_service_info,
+        )
+        assert result["step_id"] == "bluetooth_confirm"
+
+        with patch.object(
+            AdjustableBedConfigFlow,
+            "_probe_capabilities",
+            AsyncMock(return_value=CapabilityReport(device_found=False)),
+        ):
+            result = await hass.config_entries.flow.async_configure(
+                result["flow_id"],
+                user_input={
+                    CONF_BED_TYPE: BED_TYPE_DIAGNOSTIC,
+                    CONF_NAME: "Unreachable Bed",
+                    CONF_MOTOR_COUNT: 2,
+                    CONF_HAS_MASSAGE: False,
+                    CONF_DISABLE_ANGLE_SENSING: True,
+                    CONF_PREFERRED_ADAPTER: "auto",
+                },
+            )
+
+            # The probe failed, but the verify step is informational only.
+            assert result["type"] == FlowResultType.FORM
+            assert result["step_id"] == "verify_connection"
+            result = await hass.config_entries.flow.async_configure(
+                result["flow_id"],
+                user_input={},
+            )
+
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+        assert result["data"][CONF_BED_TYPE] == BED_TYPE_DIAGNOSTIC
 
     async def test_bluetooth_discovery_confirm_coerces_string_motor_count(
         self,
@@ -976,6 +1270,8 @@ class TestBluetoothDiscoveryFlow:
         enable_custom_integrations,
     ):
         """Test that ambiguous BLE detection shows disambiguation step."""
+        raw_address = mock_bluetooth_service_info_ambiguous_okin.address.lower()
+        mock_bluetooth_service_info_ambiguous_okin.address = raw_address
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
             context={"source": SOURCE_BLUETOOTH},
@@ -985,6 +1281,7 @@ class TestBluetoothDiscoveryFlow:
         # Should show disambiguation form instead of confirm
         assert result["type"] == FlowResultType.FORM
         assert result["step_id"] == "bluetooth_disambiguate"
+        assert result["description_placeholders"]["address"] == raw_address.upper()
 
     async def test_bluetooth_discovery_name_only_okin_receiver_shows_disambiguation(
         self,
@@ -1950,6 +2247,300 @@ class TestUserFlow:
 class TestOptionsFlow:
     """Test options flow."""
 
+    async def test_options_flow_can_change_bed_type_and_rebuild_dependent_fields(
+        self,
+        hass: HomeAssistant,
+        enable_custom_integrations,
+    ) -> None:
+        """Changing type rebuilds the form, then saves type-specific settings."""
+        del enable_custom_integrations
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Okin CST Bed",
+            data={
+                CONF_ADDRESS: "AA:BB:CC:DD:EE:96",
+                CONF_NAME: "Okin CST Bed",
+                CONF_BED_TYPE: BED_TYPE_OKIN_CST,
+                CONF_MOTOR_COUNT: 4,
+                CONF_BLE_BOND_ESTABLISHED: True,
+                CONF_BACK_MAX_ANGLE: 68.0,
+                CONF_DISABLE_ANGLE_SENSING: False,
+            },
+            unique_id="AA:BB:CC:DD:EE:96",
+        )
+        entry.add_to_hass(hass)
+        await async_setup_component(hass, DOMAIN, {})
+        await hass.async_block_till_done()
+
+        initial = await hass.config_entries.options.async_init(entry.entry_id)
+        bed_type_marker = next(
+            marker for marker in initial["data_schema"].schema if marker.schema == CONF_BED_TYPE
+        )
+        bed_type_selector = initial["data_schema"].schema[bed_type_marker]
+        option_values = {option["value"] for option in bed_type_selector.config["options"]}
+        assert bed_type_marker.default() == BED_TYPE_OKIN_CST
+        assert BED_TYPE_OCTO in option_values
+
+        rebuilt = await hass.config_entries.options.async_configure(
+            initial["flow_id"],
+            user_input={
+                CONF_BED_TYPE: BED_TYPE_OCTO,
+                CONF_MOTOR_COUNT: 4,
+            },
+        )
+
+        assert rebuilt["type"] == FlowResultType.FORM
+        rebuilt_markers = {marker.schema: marker for marker in rebuilt["data_schema"].schema}
+        assert rebuilt_markers[CONF_BED_TYPE].default() == BED_TYPE_OCTO
+        assert CONF_PROTOCOL_VARIANT in rebuilt_markers
+        assert CONF_OCTO_PIN in rebuilt_markers
+        assert CONF_BACK_MAX_ANGLE not in rebuilt_markers
+        assert rebuilt_markers[CONF_DISABLE_ANGLE_SENSING].default() is True
+
+        saved = await hass.config_entries.options.async_configure(
+            rebuilt["flow_id"],
+            user_input={
+                CONF_BED_TYPE: BED_TYPE_OCTO,
+                CONF_MOTOR_COUNT: 2,
+                CONF_PROTOCOL_VARIANT: OCTO_VARIANT_STANDARD,
+                CONF_OCTO_PIN: "1234",
+            },
+        )
+
+        assert saved["type"] == FlowResultType.CREATE_ENTRY
+        assert entry.data[CONF_BED_TYPE] == BED_TYPE_OCTO
+        assert entry.data[CONF_PROTOCOL_VARIANT] == OCTO_VARIANT_STANDARD
+        assert entry.data[CONF_OCTO_PIN] == "1234"
+        assert CONF_BLE_BOND_ESTABLISHED not in entry.data
+        assert CONF_BACK_MAX_ANGLE not in entry.data
+        assert entry.data[CONF_DISABLE_ANGLE_SENSING] is True
+
+    async def test_options_flow_normalizes_fields_after_bed_type_change(
+        self,
+        hass: HomeAssistant,
+        enable_custom_integrations,
+    ) -> None:
+        """A new type cannot inherit an invalid motor count or stale variant."""
+        del enable_custom_integrations
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="OCTO Lift",
+            data={
+                CONF_ADDRESS: "AA:BB:CC:DD:EE:95",
+                CONF_NAME: "OCTO Lift",
+                CONF_BED_TYPE: BED_TYPE_OCTO,
+                CONF_MOTOR_COUNT: 1,
+                CONF_PROTOCOL_VARIANT: OCTO_VARIANT_STANDARD,
+                CONF_OCTO_PIN: "3060",
+                CONF_DISABLE_ANGLE_SENSING: True,
+            },
+            unique_id="AA:BB:CC:DD:EE:95",
+        )
+        entry.add_to_hass(hass)
+        await async_setup_component(hass, DOMAIN, {})
+        await hass.async_block_till_done()
+
+        initial = await hass.config_entries.options.async_init(entry.entry_id)
+        rebuilt = await hass.config_entries.options.async_configure(
+            initial["flow_id"],
+            user_input={
+                CONF_BED_TYPE: BED_TYPE_LINAK,
+                CONF_MOTOR_COUNT: 1,
+                CONF_PROTOCOL_VARIANT: OCTO_VARIANT_STANDARD,
+            },
+        )
+
+        rebuilt_markers = {marker.schema: marker for marker in rebuilt["data_schema"].schema}
+        assert rebuilt_markers[CONF_MOTOR_COUNT].default() == 2
+        assert rebuilt_markers[CONF_DISABLE_ANGLE_SENSING].default() is False
+        assert CONF_PROTOCOL_VARIANT not in rebuilt_markers
+        assert CONF_OCTO_PIN not in rebuilt_markers
+
+        saved = await hass.config_entries.options.async_configure(
+            rebuilt["flow_id"],
+            user_input={
+                CONF_BED_TYPE: BED_TYPE_LINAK,
+            },
+        )
+
+        assert saved["type"] == FlowResultType.CREATE_ENTRY
+        assert entry.data[CONF_BED_TYPE] == BED_TYPE_LINAK
+        assert entry.data[CONF_MOTOR_COUNT] == 2
+        assert entry.data[CONF_DISABLE_ANGLE_SENSING] is False
+        assert CONF_PROTOCOL_VARIANT not in entry.data
+        assert CONF_OCTO_PIN not in entry.data
+
+    async def test_options_flow_keeps_current_legacy_bed_type_selectable(
+        self,
+        hass: HomeAssistant,
+        enable_custom_integrations,
+    ) -> None:
+        """An existing legacy alias remains valid while editing other options."""
+        del enable_custom_integrations
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Legacy Okimat",
+            data={
+                CONF_ADDRESS: "AA:BB:CC:DD:EE:91",
+                CONF_NAME: "Legacy Okimat",
+                CONF_BED_TYPE: BED_TYPE_OKIMAT,
+                CONF_MOTOR_COUNT: 2,
+            },
+            unique_id="AA:BB:CC:DD:EE:91",
+        )
+        entry.add_to_hass(hass)
+        await async_setup_component(hass, DOMAIN, {})
+        await hass.async_block_till_done()
+
+        initial = await hass.config_entries.options.async_init(entry.entry_id)
+        marker = next(
+            marker for marker in initial["data_schema"].schema if marker.schema == CONF_BED_TYPE
+        )
+        selector = initial["data_schema"].schema[marker]
+        option_values = {option["value"] for option in selector.config["options"]}
+
+        assert marker.default() == BED_TYPE_OKIMAT
+        assert BED_TYPE_OKIMAT in option_values
+
+        saved = await hass.config_entries.options.async_configure(
+            initial["flow_id"],
+            user_input={CONF_HAS_MASSAGE: True},
+        )
+
+        assert saved["type"] == FlowResultType.CREATE_ENTRY
+        assert entry.data[CONF_HAS_MASSAGE] is True
+        assert entry.data[CONF_BED_TYPE] == BED_TYPE_OKIMAT
+
+    async def test_options_flow_resets_variant_and_timing_for_new_protocol(
+        self,
+        hass: HomeAssistant,
+        enable_custom_integrations,
+    ) -> None:
+        """A new protocol starts with its own dialect and command timing defaults."""
+        del enable_custom_integrations
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Leggett Okin",
+            data={
+                CONF_ADDRESS: "AA:BB:CC:DD:EE:94",
+                CONF_NAME: "Leggett Okin",
+                CONF_BED_TYPE: BED_TYPE_LEGGETT_PLATT,
+                CONF_MOTOR_COUNT: 2,
+                CONF_PROTOCOL_VARIANT: LEGGETT_VARIANT_OKIN,
+                CONF_MOTOR_PULSE_COUNT: 25,
+                CONF_MOTOR_PULSE_DELAY_MS: 50,
+            },
+            unique_id="AA:BB:CC:DD:EE:94",
+        )
+        entry.add_to_hass(hass)
+        await async_setup_component(hass, DOMAIN, {})
+        await hass.async_block_till_done()
+
+        initial = await hass.config_entries.options.async_init(entry.entry_id)
+        rebuilt = await hass.config_entries.options.async_configure(
+            initial["flow_id"],
+            user_input={
+                CONF_BED_TYPE: BED_TYPE_KEESON,
+                CONF_MOTOR_COUNT: 2,
+                CONF_PROTOCOL_VARIANT: LEGGETT_VARIANT_OKIN,
+                CONF_MOTOR_PULSE_COUNT: "25",
+                CONF_MOTOR_PULSE_DELAY_MS: "50",
+            },
+        )
+
+        rebuilt_markers = {marker.schema: marker for marker in rebuilt["data_schema"].schema}
+        assert rebuilt_markers[CONF_PROTOCOL_VARIANT].default() == VARIANT_AUTO
+        assert rebuilt_markers[CONF_MOTOR_PULSE_COUNT].default() == "10"
+        assert rebuilt_markers[CONF_MOTOR_PULSE_DELAY_MS].default() == "100"
+
+        variant_rebuilt = await hass.config_entries.options.async_configure(
+            rebuilt["flow_id"],
+            user_input={
+                CONF_BED_TYPE: BED_TYPE_KEESON,
+                CONF_MOTOR_COUNT: 2,
+                CONF_PROTOCOL_VARIANT: KEESON_VARIANT_ERGOMOTION,
+                CONF_DISABLE_ANGLE_SENSING: True,
+            },
+        )
+
+        variant_markers = {
+            marker.schema: marker for marker in variant_rebuilt["data_schema"].schema
+        }
+        assert variant_rebuilt["type"] == FlowResultType.FORM
+        assert variant_markers[CONF_PROTOCOL_VARIANT].default() == KEESON_VARIANT_ERGOMOTION
+        assert variant_markers[CONF_DISABLE_ANGLE_SENSING].default() is False
+
+        saved = await hass.config_entries.options.async_configure(
+            variant_rebuilt["flow_id"],
+            user_input={
+                CONF_BED_TYPE: BED_TYPE_KEESON,
+                CONF_MOTOR_COUNT: 2,
+                CONF_PROTOCOL_VARIANT: KEESON_VARIANT_ERGOMOTION,
+                CONF_DISABLE_ANGLE_SENSING: True,
+            },
+        )
+
+        assert saved["type"] == FlowResultType.CREATE_ENTRY
+        assert entry.data[CONF_PROTOCOL_VARIANT] == KEESON_VARIANT_ERGOMOTION
+        assert entry.data[CONF_DISABLE_ANGLE_SENSING] is True
+        assert entry.data[CONF_MOTOR_PULSE_COUNT] == 10
+        assert entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 100
+
+    @pytest.mark.parametrize(
+        ("bed_type", "variant"),
+        [
+            (BED_TYPE_RONDURE, RONDURE_VARIANT_SIDE_A),
+            (BED_TYPE_SBI, SBI_VARIANT_SIDE_B),
+        ],
+    )
+    async def test_options_flow_preserves_split_bed_side_variant(
+        self,
+        hass: HomeAssistant,
+        enable_custom_integrations,
+        bed_type: str,
+        variant: str,
+    ) -> None:
+        """Saving unrelated options must keep a split bed's selected side."""
+        del enable_custom_integrations
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Split Bed",
+            data={
+                CONF_ADDRESS: "AA:BB:CC:DD:EE:93",
+                CONF_NAME: "Split Bed",
+                CONF_BED_TYPE: bed_type,
+                CONF_MOTOR_COUNT: 2,
+                CONF_PROTOCOL_VARIANT: variant,
+            },
+            unique_id="AA:BB:CC:DD:EE:93",
+        )
+        entry.add_to_hass(hass)
+        await async_setup_component(hass, DOMAIN, {})
+        await hass.async_block_till_done()
+
+        # These split beds can expose the single-address side surface, so the
+        # options flow opens on the pairing menu; the settings step is the form.
+        menu = await hass.config_entries.options.async_init(entry.entry_id)
+        assert menu["type"] == FlowResultType.MENU
+        initial = await hass.config_entries.options.async_configure(
+            menu["flow_id"], {"next_step_id": "settings"}
+        )
+        markers = {marker.schema: marker for marker in initial["data_schema"].schema}
+        assert markers[CONF_PROTOCOL_VARIANT].default() == variant
+
+        saved = await hass.config_entries.options.async_configure(
+            initial["flow_id"],
+            user_input={
+                CONF_BED_TYPE: bed_type,
+                CONF_MOTOR_COUNT: 2,
+                CONF_PROTOCOL_VARIANT: variant,
+                CONF_HAS_MASSAGE: True,
+            },
+        )
+
+        assert saved["type"] == FlowResultType.CREATE_ENTRY
+        assert entry.data[CONF_PROTOCOL_VARIANT] == variant
+
     async def test_octo_options_can_switch_variant_and_one_motor_together(
         self,
         hass: HomeAssistant,
@@ -2035,6 +2626,12 @@ class TestOptionsFlow:
         enable_custom_integrations,
     ):
         """The discovery toggle persists globally and never lands in entry data."""
+        # Legacy releases could leave this global preference in entry data. It
+        # must neither override the global value nor survive the next save.
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={**mock_config_entry.data, CONF_DISABLE_DISCOVERY: True},
+        )
         await async_setup_component(hass, DOMAIN, {})
         await hass.async_block_till_done()
 
@@ -2045,6 +2642,12 @@ class TestOptionsFlow:
             return_value=[],
         ):
             result = await hass.config_entries.options.async_init(mock_config_entry.entry_id)
+            discovery_marker = next(
+                marker
+                for marker in result["data_schema"].schema
+                if marker.schema == CONF_DISABLE_DISCOVERY
+            )
+            assert discovery_marker.default() is False
             result = await hass.config_entries.options.async_configure(
                 result["flow_id"],
                 user_input={

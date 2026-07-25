@@ -6,10 +6,13 @@ import asyncio
 import binascii
 import contextlib
 import json
+import os
 import struct
+import warnings
 from collections.abc import AsyncGenerator, Callable, Generator
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import psutil
 import pytest
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant
@@ -55,6 +58,70 @@ from custom_components.adjustable_bed.const import (  # noqa: E402
 # Test constants
 TEST_ADDRESS = "AA:BB:CC:DD:EE:FF"
 TEST_NAME = "Test Bed"
+
+
+def make_controller_mock(**overrides: object) -> MagicMock:
+    """Return a controller mock that honors BedController's declared defaults.
+
+    A bare ``MagicMock()`` answers every capability probe with a truthy Mock, so
+    a test that doesn't set a capability silently exercises the capability-enabled
+    path, and Mock objects leak into numeric comparisons (seek tolerances, stall
+    thresholds). Seeding the abstract base's real defaults keeps the mock faithful
+    to the contract that production code type-checks against.
+
+    Defaults are read from ``BedController`` itself rather than duplicated here, so
+    adding a capability to the base automatically covers every mock. Properties
+    that need real coordinator or client state are left as plain Mocks.
+
+    Pass keyword overrides for the capabilities a given test actually cares about.
+    """
+    from custom_components.adjustable_bed.beds.base import BedController
+
+    controller = MagicMock()
+    for name, member in vars(BedController).items():
+        if not isinstance(member, property) or member.fget is None:
+            continue
+        try:
+            default = member.fget(controller)
+        except Exception:  # noqa: BLE001 - property needs real state; leave it a Mock
+            continue
+        if isinstance(default, bool | int | float | str | tuple | list | dict | None):
+            setattr(controller, name, default)
+    for name, value in overrides.items():
+        setattr(controller, name, value)
+    return controller
+
+
+@pytest.fixture
+def controller_mock() -> Callable[..., MagicMock]:
+    """Return the :func:`make_controller_mock` factory."""
+    return make_controller_mock
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_xdist_auto_num_workers(config: pytest.Config) -> int | None:
+    """Keep automatic local test parallelism laptop-friendly."""
+    if config.option.numprocesses != "auto":
+        return None
+
+    configured_workers = os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS")
+    if configured_workers is not None:
+        try:
+            worker_count = int(configured_workers)
+            if worker_count >= 0:
+                return worker_count
+        except ValueError:
+            pass
+        warnings.warn(
+            "PYTEST_XDIST_AUTO_NUM_WORKERS must be a non-negative integer; "
+            "using the project default.",
+            stacklevel=2,
+        )
+
+    usable_workers = os.process_cpu_count() or 1
+    physical_workers = psutil.cpu_count(logical=False) or usable_workers
+    detected_workers = min(physical_workers, usable_workers)
+    return min(detected_workers, 4)
 
 
 @pytest.fixture(autouse=True)

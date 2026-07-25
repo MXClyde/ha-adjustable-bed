@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
@@ -35,6 +35,7 @@ from custom_components.adjustable_bed.const import (
     VARIANT_AUTO,
     connection_gated_by_bond,
     requires_pairing,
+    requires_pairing_after_service_discovery,
 )
 from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
 
@@ -126,6 +127,25 @@ class TestLeggettOkinController:
         assert command[:2] == bytes([0x04, 0x02])
         # Command 0x1 in big-endian
         assert command[2:] == bytes([0x00, 0x00, 0x00, 0x01])
+
+    async def test_motor_uses_configured_lp_control_cadence(self):
+        """Motor repeats use the APK-derived 200ms default through coordinator settings."""
+        coordinator = MagicMock()
+        coordinator.motor_pulse_count = 5
+        coordinator.motor_pulse_delay_ms = 200
+        controller = LeggettOkinController(coordinator)
+        controller.write_command = AsyncMock()
+
+        await controller.move_head_up()
+
+        move_call, stop_call = controller.write_command.await_args_list
+        assert move_call.args == (bytes.fromhex("040200000001"),)
+        assert move_call.kwargs == {
+            "repeat_count": 5,
+            "repeat_delay_ms": 200,
+        }
+        assert stop_call.args == (bytes.fromhex("040200000000"),)
+        assert stop_call.kwargs["cancel_event"].is_set() is False
 
 
 class TestLeggettGen2CommandFormat:
@@ -261,6 +281,7 @@ class TestLeggettGen2Connection:
         ("bed_type", "variant", "expected"),
         [
             (BED_TYPE_LEGGETT_GEN2, None, True),
+            (BED_TYPE_LEGGETT_GEN2, VARIANT_AUTO, True),
             (BED_TYPE_LEGGETT_PLATT, LEGGETT_VARIANT_GEN2, True),
             # Okin-style pairing beds accept the connection and only gate GATT
             # access, so a connect timeout there is not a pairing symptom.
@@ -274,6 +295,22 @@ class TestLeggettGen2Connection:
     ):
         """Only Gen2 showed the bond-gated timeout signature in issue #385."""
         assert connection_gated_by_bond(bed_type, variant) is expected
+
+    @pytest.mark.parametrize(
+        ("bed_type", "variant", "expected"),
+        [
+            (BED_TYPE_LEGGETT_GEN2, None, True),
+            (BED_TYPE_LEGGETT_PLATT, LEGGETT_VARIANT_GEN2, True),
+            (BED_TYPE_LEGGETT_PLATT, LEGGETT_VARIANT_OKIN, False),
+            (BED_TYPE_LEGGETT_PLATT, VARIANT_AUTO, False),
+            (BED_TYPE_OKIMAT, None, False),
+        ],
+    )
+    async def test_pairing_order(
+        self, bed_type: str, variant: str | None, expected: bool
+    ) -> None:
+        """Only LP Gen2 connects and discovers GATT before requesting a bond."""
+        assert requires_pairing_after_service_discovery(bed_type, variant) is expected
 
     async def test_gen2_unexpected_disconnect_schedules_auto_reconnect(
         self,
@@ -508,7 +545,8 @@ class TestLeggettMovement:
         coordinator = AdjustableBedCoordinator(hass, mock_leggett_gen2_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.move_head_up()
+        with patch("custom_components.adjustable_bed.beds.leggett_gen2.asyncio.sleep"):
+            await coordinator.controller.move_head_up()
 
         # _move_with_stop sends the head-up command then the per-actuator stop
         assert mock_bleak_client.write_gatt_char.called
@@ -568,7 +606,8 @@ class TestLeggettPresets:
         await coordinator.async_connect()
         mock_bleak_client.write_gatt_char.reset_mock()  # ignore the GET STATE on connect
 
-        await coordinator.controller.preset_flat()
+        with patch("custom_components.adjustable_bed.beds.leggett_gen2.asyncio.sleep"):
+            await coordinator.controller.preset_flat()
 
         first_call = mock_bleak_client.write_gatt_char.call_args_list[0]
         assert first_call[0][1] == LeggettGen2Commands.PRESET_FLAT
@@ -585,7 +624,8 @@ class TestLeggettPresets:
         await coordinator.async_connect()
         mock_bleak_client.write_gatt_char.reset_mock()  # ignore the GET STATE on connect
 
-        await coordinator.controller.preset_anti_snore()
+        with patch("custom_components.adjustable_bed.beds.leggett_gen2.asyncio.sleep"):
+            await coordinator.controller.preset_anti_snore()
 
         first_call = mock_bleak_client.write_gatt_char.call_args_list[0]
         assert first_call[0][1] == LeggettGen2Commands.PRESET_ANTI_SNORE
@@ -613,7 +653,8 @@ class TestLeggettPresets:
         await coordinator.async_connect()
         mock_bleak_client.write_gatt_char.reset_mock()  # ignore the GET STATE on connect
 
-        await coordinator.controller.preset_memory(memory_num)
+        with patch("custom_components.adjustable_bed.beds.leggett_gen2.asyncio.sleep"):
+            await coordinator.controller.preset_memory(memory_num)
 
         first_call = mock_bleak_client.write_gatt_char.call_args_list[0]
         assert first_call[0][1] == expected_command

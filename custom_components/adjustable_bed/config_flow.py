@@ -49,9 +49,9 @@ from .const import (
     ADAPTER_AUTO,
     ALL_PROTOCOL_VARIANTS,
     BED_MOTOR_PULSE_DEFAULTS,
+    BED_TYPE_DIAGNOSTIC,
     BED_TYPE_JENSEN,
     BED_TYPE_KAIDI,
-    BED_TYPE_KEESON,
     BED_TYPE_LEGGETT_GEN2,
     BED_TYPE_LEGGETT_OKIN,
     BED_TYPE_LEGGETT_PLATT,
@@ -89,6 +89,7 @@ from .const import (
     CONF_MOTOR_PULSE_COUNT,
     CONF_MOTOR_PULSE_DELAY_MS,
     CONF_OCTO_PIN,
+    CONF_PAIR_CHILDREN,
     CONF_PAIR_ID,
     CONF_PAIR_MODE,
     CONF_PASSIVE_POSITION_RECONCILIATION,
@@ -113,7 +114,6 @@ from .const import (
     DEFAULT_POSITION_MODE,
     DEFAULT_PROTOCOL_VARIANT,
     DOMAIN,
-    KEESON_VARIANT_ERGOMOTION,
     LEGGETT_VARIANT_GEN2,
     MALOUF_LAYOUT_AUTO,
     MALOUF_LAYOUTS,
@@ -127,13 +127,14 @@ from .const import (
     POSITION_MODE_SPEED,
     RICHMAT_REMOTE_AUTO,
     RICHMAT_REMOTES,
-    SUPPORTED_BED_TYPES,
     VARIANT_AUTO,
     DetectionResult,
+    bed_type_has_position_feedback,
     get_richmat_features,
     get_richmat_motor_count,
     passive_position_reconciliation_default_enabled,
     requires_pairing,
+    requires_pairing_after_service_discovery,
     resolve_explicit_bed_type,
     supports_passive_position_reconciliation,
 )
@@ -444,6 +445,13 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         self._captured_octo_snapshots: dict[str, dict[str, Any]] = {}
         _LOGGER.debug("AdjustableBedConfigFlow initialized")
 
+    def _set_device_title_placeholders(self, name: str | None, address: str) -> None:
+        """Identify the selected device in the flow title."""
+        self.context["title_placeholders"] = {
+            "name": name or "Unknown",
+            "address": address.upper(),
+        }
+
     def _prepare_disambiguation(self, detection_result: DetectionResult) -> bool:
         """Prepare the focused bed-type chooser for an ambiguous detection."""
         self._disambiguation_types = None
@@ -492,9 +500,9 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
             return await self._get_config_translation(
                 "step.bluetooth_pairing.data_description.pairing_instructions_leggett_gen2",
                 "1. Unplug your bed's power cord and remove any batteries from the power supply.\n"
-                "2. Plug the bed back in. You'll hear a small chime and see a pulsing blue light "
-                "under the bed - the bed stays in pairing mode for about 2 minutes.\n"
-                "3. While the light is pulsing, click 'Pair Now'.",
+                "2. Plug the bed back in. Wait for a small chime and a pulsing blue light "
+                "under the bed.\n"
+                "3. While the light is pulsing, promptly click 'Pair Now'.",
             )
         if bed_type in {
             BED_TYPE_OKIMAT,
@@ -914,7 +922,7 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
             )
 
         self._discovery_info = discovery_info
-        self.context["title_placeholders"] = {"name": discovery_info.name or discovery_info.address}
+        self._set_device_title_placeholders(discovery_info.name, discovery_info.address)
 
         # Check if disambiguation is needed (low confidence with alternatives)
         if self._prepare_disambiguation(detection_result):
@@ -980,7 +988,8 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
                 }
             ),
             description_placeholders={
-                "name": self._discovery_info.name or self._discovery_info.address,
+                "name": self._discovery_info.name or "Unknown",
+                "address": self._discovery_info.address.upper(),
             },
         )
 
@@ -1168,8 +1177,12 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         # Get available Bluetooth adapters
         adapters = get_available_adapters(self.hass)
 
-        # Default angle sensing to enabled for beds that support position feedback
-        default_disable_angle = bed_type not in BEDS_WITH_POSITION_FEEDBACK
+        # Default angle sensing to enabled for beds that support position feedback.
+        # The variant selector below always defaults to VARIANT_AUTO here (detection
+        # does not resolve a variant), so the Keeson/ergomotion case cannot apply yet
+        # and this matches plain BEDS_WITH_POSITION_FEEDBACK membership. Going through
+        # the shared predicate keeps this in step with the paths that do know a variant.
+        default_disable_angle = not bed_type_has_position_feedback(bed_type, VARIANT_AUTO)
 
         # Get bed-type-specific motor pulse defaults
         pulse_defaults = (
@@ -1222,7 +1235,28 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
                 or BED_TYPE_AUTO_DETECT
             )
         else:
-            bed_type_selector = vol.In(SUPPORTED_BED_TYPES)
+            # Same display-name dropdown as the full list, so users see
+            # "Diagnostic (unknown bed)" etc. instead of raw type slugs
+            # (issue #385). Detection may return a legacy alias (e.g.
+            # dewertokin) that the display list omits; prepend it so the
+            # detected default stays selectable.
+            options = get_bed_type_options()
+            if isinstance(bed_type_default, str) and bed_type_default not in {
+                option["value"] for option in options
+            }:
+                options.insert(
+                    0,
+                    SelectOptionDict(
+                        value=bed_type_default,
+                        label=BED_TYPE_DISPLAY_NAMES.get(bed_type_default, bed_type_default),
+                    ),
+                )
+            bed_type_selector = SelectSelector(
+                SelectSelectorConfig(
+                    options=options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            )
 
         schema_dict: dict[vol.Marker, Any] = {
             vol.Optional(CONF_BED_TYPE, default=bed_type_default): bed_type_selector,
@@ -1298,7 +1332,8 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
 
         # Build description placeholders with optional ambiguity warning
         description_placeholders = {
-            "name": self._discovery_info.name or self._discovery_info.address,
+            "name": self._discovery_info.name or "Unknown",
+            "address": self._discovery_info.address.upper(),
         }
 
         # Add detection confidence info for ambiguous cases
@@ -1400,6 +1435,9 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
                 return self.async_abort(reason="already_configured")
 
             self._discovery_info = self._discovered_devices[address]
+            self._set_device_title_placeholders(
+                self._discovery_info.name, self._discovery_info.address
+            )
             return await self.async_step_bluetooth_confirm()
 
         # Discover devices
@@ -1765,6 +1803,9 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
                 return self.async_abort(reason="already_configured")
 
             self._discovery_info = self._all_ble_devices[address]
+            self._set_device_title_placeholders(
+                self._discovery_info.name, self._discovery_info.address
+            )
             return await self.async_step_manual_config()
 
         # Get ALL BLE devices (not just beds)
@@ -2020,9 +2061,8 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         defaults_bed_type = preselected_bed_type or confident_bed_type
         if defaults_bed_type:
             # Keeson with Ergomotion variant supports position feedback
-            has_position_feedback = defaults_bed_type in BEDS_WITH_POSITION_FEEDBACK or (
-                defaults_bed_type == BED_TYPE_KEESON
-                and preselected_protocol_variant == KEESON_VARIANT_ERGOMOTION
+            has_position_feedback = bed_type_has_position_feedback(
+                defaults_bed_type, preselected_protocol_variant
             )
             default_disable_angle = not has_position_feedback
             # Use bed-specific motor pulse defaults if available
@@ -2138,6 +2178,7 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
                     self._abort_if_unique_id_configured()
                     if self._is_absorbed_pair_member(address):
                         return self.async_abort(reason="already_configured")
+                    self._set_device_title_placeholders(user_input.get(CONF_NAME), address)
 
                     _LOGGER.info(
                         "Manual bed configuration: address=%s, type=%s, variant=%s, name=%s, motors=%s, massage=%s, disable_angle_sensing=%s, adapter=%s, pulse_count=%s, pulse_delay=%s",
@@ -2238,9 +2279,8 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         # Determine smart defaults based on preselected bed type and variant
         if preselected_bed_type:
             # Keeson with Ergomotion variant supports position feedback
-            has_position_feedback = preselected_bed_type in BEDS_WITH_POSITION_FEEDBACK or (
-                preselected_bed_type == BED_TYPE_KEESON
-                and preselected_protocol_variant == KEESON_VARIANT_ERGOMOTION
+            has_position_feedback = bed_type_has_position_feedback(
+                preselected_bed_type, preselected_protocol_variant
             )
             default_disable_angle = not has_position_feedback
             # Use bed-specific motor pulse defaults if available
@@ -2541,7 +2581,7 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     async def _attempt_pairing(self, address: str | None) -> bool:
-        """Attempt to pair with the device using establish_connection with pair=True.
+        """Attempt to pair using the protocol's required connection ordering.
 
         Returns:
             True if pairing succeeded, False otherwise
@@ -2604,18 +2644,34 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
             getattr(matching_service_info, "connectable", None),
         )
 
-        # Connect with pairing enabled - this handles both built-in HA Bluetooth
-        # (pairing during connection) and ESPHome proxy (pairing after connection)
+        bed_type = self._manual_data.get(CONF_BED_TYPE) if self._manual_data else None
+        protocol_variant = (
+            self._manual_data.get(CONF_PROTOCOL_VARIANT) if self._manual_data else None
+        )
+        pair_after_service_discovery = bool(
+            bed_type and requires_pairing_after_service_discovery(bed_type, protocol_variant)
+        )
+
+        # LP Control first connects and discovers GATT, then asks Android to
+        # create the bond. BlueZ's pair=True path calls Device1.Pair instead of
+        # making the app's ordinary unbonded GATT connection first.
         client = await establish_connection(
             BleakClient,
             device,
             address,
             max_attempts=1,
             timeout=CONNECTION_PROFILES[DEFAULT_CONNECTION_PROFILE].connection_timeout,
-            pair=True,
+            pair=not pair_after_service_discovery,
+            use_services_cache=not pair_after_service_discovery,
         )
         try:
-            # Connection with pair=True succeeded - pairing is complete
+            if pair_after_service_discovery:
+                _LOGGER.info(
+                    "Connected to %s and discovered services; creating the BLE bond now",
+                    address,
+                )
+                await client.pair()
+
             _LOGGER.info("Pairing successful for %s", address)
             return True
         finally:
@@ -2669,12 +2725,7 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         from bleak import BleakClient
         from bleak_retry_connector import establish_connection
 
-        # Keeson exposes position feedback only on its Ergomotion variant, so
-        # mirror the same special-case the confirm step uses for angle sensing.
-        has_position_feedback = bool(bed_type) and (
-            bed_type in BEDS_WITH_POSITION_FEEDBACK
-            or (bed_type == BED_TYPE_KEESON and protocol_variant == KEESON_VARIANT_ERGOMOTION)
-        )
+        has_position_feedback = bed_type_has_position_feedback(bed_type, protocol_variant)
         report = CapabilityReport(position_feedback=has_position_feedback)
 
         try:
@@ -2961,6 +3012,114 @@ def _shown_option_values(schema_dict: dict[Any, Any]) -> dict[str, Any]:
 class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
     """Handle Adjustable Bed options."""
 
+    def __init__(self, config_entry: ConfigEntry) -> None:
+        """Initialize the options flow."""
+        super().__init__(config_entry)
+        self._pending_data: dict[str, Any] = {}
+
+    @staticmethod
+    def _variant_for_bed_type(bed_type: str, data: dict[str, Any]) -> str:
+        """Return a valid variant while rebuilding the form for a new bed type."""
+        variants = get_variants_for_bed_type(bed_type)
+        if not variants:
+            return DEFAULT_PROTOCOL_VARIANT
+
+        requested_variant = data.get(CONF_PROTOCOL_VARIANT, DEFAULT_PROTOCOL_VARIANT)
+        if isinstance(requested_variant, str) and requested_variant in variants:
+            return requested_variant
+        if VARIANT_AUTO in variants:
+            return VARIANT_AUTO
+        return next(iter(variants))
+
+    @classmethod
+    def _variant_for_bed_type_change(
+        cls,
+        previous_bed_type: str,
+        requested_bed_type: str,
+        data: dict[str, Any],
+    ) -> str:
+        """Reset variants unless both bed types explicitly share one variant table."""
+        previous_variants = get_variants_for_bed_type(previous_bed_type)
+        requested_variants = get_variants_for_bed_type(requested_bed_type)
+        if previous_variants is requested_variants and requested_variants is not None:
+            return cls._variant_for_bed_type(requested_bed_type, data)
+        if requested_variants and VARIANT_AUTO not in requested_variants:
+            return next(iter(requested_variants))
+        return VARIANT_AUTO
+
+    @staticmethod
+    def _remove_irrelevant_bed_settings(data: dict[str, Any], bed_type: str) -> None:
+        """Drop settings that belong only to the previously selected protocol."""
+        if not get_variants_for_bed_type(bed_type):
+            data.pop(CONF_PROTOCOL_VARIANT, None)
+        if bed_type != BED_TYPE_OCTO:
+            data.pop(CONF_OCTO_PIN, None)
+        if bed_type != BED_TYPE_JENSEN:
+            data.pop(CONF_JENSEN_PIN, None)
+        if bed_type != BED_TYPE_RICHMAT:
+            data.pop(CONF_RICHMAT_REMOTE, None)
+        if bed_type not in MALOUF_BED_TYPES:
+            data.pop(CONF_MALOUF_LAYOUT, None)
+            data.pop(CONF_MALOUF_MEMORY_SLOTS, None)
+        if not supports_passive_position_reconciliation(bed_type):
+            data.pop(CONF_PASSIVE_POSITION_RECONCILIATION, None)
+        if (
+            bed_type in BEDS_WITH_PERCENTAGE_POSITIONS
+            or bed_type not in BEDS_WITH_POSITION_FEEDBACK
+        ):
+            data.pop(CONF_BACK_MAX_ANGLE, None)
+            data.pop(CONF_LEGS_MAX_ANGLE, None)
+
+    def _apply_bed_type_change_cleanup(
+        self,
+        new_data: dict[str, Any],
+        bed_type: str,
+        requested_variant: str,
+    ) -> None:
+        """Drop settings the newly saved protocol must not inherit (in place).
+
+        A paired bed keeps its own copy of these settings per side, so the child
+        descriptors are cleaned against their own bed type too - otherwise a
+        protocol-specific leftover would survive on a side and win over the
+        parent value.
+        """
+        # This preference is integration-wide. Remove any legacy per-entry
+        # copy while saving unrelated options so it cannot become a second
+        # source of truth.
+        new_data.pop(CONF_DISABLE_DISCOVERY, None)
+        previous_bed_type = self.config_entry.data.get(CONF_BED_TYPE)
+        if not isinstance(previous_bed_type, str):
+            previous_bed_type = BED_TYPE_DIAGNOSTIC
+        previous_variant = self.config_entry.data.get(
+            CONF_PROTOCOL_VARIANT,
+            DEFAULT_PROTOCOL_VARIANT,
+        )
+        # The marker describes the old protocol's authentication requirements
+        # and must not suppress pairing for the new one.
+        drop_bond_marker = requires_pairing(previous_bed_type, previous_variant) != requires_pairing(
+            bed_type,
+            requested_variant,
+        )
+        if drop_bond_marker:
+            new_data.pop(CONF_BLE_BOND_ESTABLISHED, None)
+        self._remove_irrelevant_bed_settings(new_data, bed_type)
+
+        children = iter_children(new_data)
+        if not children:
+            return
+        cleaned: list[dict[str, Any]] = []
+        for child in children:
+            child_data = dict(child)
+            if drop_bond_marker:
+                child_data.pop(CONF_BLE_BOND_ESTABLISHED, None)
+            child_bed_type = child_data.get(CONF_BED_TYPE)
+            self._remove_irrelevant_bed_settings(
+                child_data,
+                child_bed_type if isinstance(child_bed_type, str) else bed_type,
+            )
+            cleaned.append(child_data)
+        new_data[CONF_PAIR_CHILDREN] = cleaned
+
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Manage the options."""
         if is_paired(self.config_entry.data) and user_input is None:
@@ -3123,7 +3282,34 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
             first_child = next(iter(iter_children(current_data)), None)
             if first_child is not None:
                 current_data = {**current_data, **first_child}
+        # Pending values preserve edits while the form is rebuilt to show the
+        # fields that belong to a newly selected bed type. They are applied last
+        # so a pending edit wins over the stored (or per-side) value it replaces.
+        current_data = {**current_data, **self._pending_data}
         bed_type = current_data.get(CONF_BED_TYPE)
+        if bed_type is None:
+            bed_type = BED_TYPE_DIAGNOSTIC
+
+        bed_type_options = get_bed_type_options()
+        if bed_type not in {option["value"] for option in bed_type_options}:
+            bed_type_options.insert(
+                0,
+                SelectOptionDict(
+                    value=bed_type,
+                    label=BED_TYPE_DISPLAY_NAMES.get(bed_type, bed_type),
+                ),
+            )
+        variants = get_variants_for_bed_type(bed_type)
+        form_variant = self._variant_for_bed_type(bed_type, current_data)
+        motor_count_options = _motor_count_options_for_all_variants(bed_type)
+        form_motor_count = current_data.get(CONF_MOTOR_COUNT, DEFAULT_MOTOR_COUNT)
+        if form_motor_count not in motor_count_options:
+            form_motor_count = _default_motor_count(
+                bed_type,
+                current_data.get(CONF_NAME),
+            )
+            if form_motor_count not in motor_count_options:
+                form_motor_count = motor_count_options[0]
 
         # Get available Bluetooth adapters
         adapters = get_available_adapters(self.hass)
@@ -3134,16 +3320,25 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
             current_adapter = ADAPTER_AUTO
 
         # Global discovery toggle (shared across all beds, not stored per-entry)
-        discovery_disabled = await async_is_discovery_disabled(self.hass)
+        discovery_disabled = self._pending_data.get(
+            CONF_DISABLE_DISCOVERY,
+            await async_is_discovery_disabled(self.hass),
+        )
 
         # Build schema
         schema_dict = {
+            vol.Optional(CONF_BED_TYPE, default=bed_type): SelectSelector(
+                SelectSelectorConfig(
+                    options=bed_type_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
             vol.Optional(
                 CONF_MOTOR_COUNT,
-                default=current_data.get(CONF_MOTOR_COUNT, DEFAULT_MOTOR_COUNT),
+                default=form_motor_count,
             ): vol.All(
                 vol.Coerce(int),
-                vol.In(_motor_count_options_for_all_variants(bed_type)),
+                vol.In(motor_count_options),
             ),
             vol.Optional(
                 CONF_HAS_MASSAGE,
@@ -3210,12 +3405,11 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
             ] = bool
 
         # Add variant selection if the bed type has variants
-        variants = get_variants_for_bed_type(bed_type)
         if variants:
             schema_dict[
                 vol.Optional(
                     CONF_PROTOCOL_VARIANT,
-                    default=current_data.get(CONF_PROTOCOL_VARIANT, DEFAULT_PROTOCOL_VARIANT),
+                    default=form_variant,
                 )
             ] = vol.In(variants)
 
@@ -3298,6 +3492,54 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
             ] = TextSelector(TextSelectorConfig())
 
         if user_input is not None:
+            requested_bed_type = user_input.get(CONF_BED_TYPE, bed_type)
+            if requested_bed_type != bed_type:
+                # Re-render once using the selected protocol so its variant,
+                # authentication, layout, remote, and position fields are
+                # visible before anything is persisted.
+                self._pending_data = {
+                    **self._pending_data,
+                    **user_input,
+                    CONF_BED_TYPE: requested_bed_type,
+                }
+                requested_variant = self._variant_for_bed_type_change(
+                    bed_type,
+                    requested_bed_type,
+                    self._pending_data,
+                )
+                if get_variants_for_bed_type(requested_bed_type):
+                    self._pending_data[CONF_PROTOCOL_VARIANT] = requested_variant
+                else:
+                    self._pending_data.pop(CONF_PROTOCOL_VARIANT, None)
+                requested_motor_options = _motor_count_options(
+                    requested_bed_type,
+                    requested_variant,
+                )
+                requested_motor_count = self._pending_data.get(
+                    CONF_MOTOR_COUNT,
+                    DEFAULT_MOTOR_COUNT,
+                )
+                if requested_motor_count not in requested_motor_options:
+                    requested_motor_count = _default_motor_count(
+                        requested_bed_type,
+                        current_data.get(CONF_NAME),
+                    )
+                    if requested_motor_count not in requested_motor_options:
+                        requested_motor_count = requested_motor_options[0]
+                self._pending_data[CONF_MOTOR_COUNT] = requested_motor_count
+                pulse_count, pulse_delay = BED_MOTOR_PULSE_DEFAULTS.get(
+                    requested_bed_type,
+                    (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS),
+                )
+                self._pending_data[CONF_MOTOR_PULSE_COUNT] = pulse_count
+                self._pending_data[CONF_MOTOR_PULSE_DELAY_MS] = pulse_delay
+                self._pending_data[CONF_DISABLE_ANGLE_SENSING] = not bed_type_has_position_feedback(
+                    requested_bed_type,
+                    requested_variant,
+                )
+                return await self.async_step_init()
+
+            bed_type = requested_bed_type
             # The discovery toggle is global, not per-entry: pull it out of
             # user_input now so it is never written into entry data, but only
             # persist it on the success path below - otherwise a later
@@ -3305,13 +3547,31 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
             discovery_disabled_input: bool | None = None
             if CONF_DISABLE_DISCOVERY in user_input:
                 discovery_disabled_input = bool(user_input.pop(CONF_DISABLE_DISCOVERY))
-            requested_variant = user_input.get(
-                CONF_PROTOCOL_VARIANT,
-                current_data.get(CONF_PROTOCOL_VARIANT, DEFAULT_PROTOCOL_VARIANT),
+            requested_variant = self._variant_for_bed_type(
+                bed_type,
+                {**current_data, **user_input},
             )
+            if variants:
+                user_input[CONF_PROTOCOL_VARIANT] = requested_variant
+            else:
+                user_input.pop(CONF_PROTOCOL_VARIANT, None)
+            if (
+                self.config_entry.data.get(CONF_BED_TYPE) != bed_type
+                and bed_type_has_position_feedback(bed_type, form_variant)
+                != bed_type_has_position_feedback(bed_type, requested_variant)
+            ):
+                # Rebuild once more when the chosen variant changes position
+                # capability, so the user sees the new sensing default and can
+                # still explicitly override it on the following submission.
+                self._pending_data = {**self._pending_data, **user_input}
+                self._pending_data[CONF_DISABLE_ANGLE_SENSING] = not bed_type_has_position_feedback(
+                    bed_type,
+                    requested_variant,
+                )
+                return await self.async_step_init()
             requested_motor_count = user_input.get(
                 CONF_MOTOR_COUNT,
-                current_data.get(CONF_MOTOR_COUNT, DEFAULT_MOTOR_COUNT),
+                form_motor_count,
             )
             if not _is_valid_motor_count(
                 bed_type,
@@ -3434,6 +3694,7 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                     self.config_entry.data.get(CONF_PAIR_MODE)
                     == PAIR_MODE_SINGLE_ADDRESS
                 ):
+                    self._apply_bed_type_change_cleanup(new_data, bed_type, requested_variant)
                     self.hass.config_entries.async_update_entry(
                         self.config_entry, data=new_data
                     )
@@ -3458,7 +3719,8 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                     if child_changed:
                         new_data = with_updated_child(new_data, side, child_changed)
             else:
-                new_data = {**self.config_entry.data, **user_input}
+                new_data = {**self.config_entry.data, **self._pending_data, **user_input}
+            self._apply_bed_type_change_cleanup(new_data, bed_type, requested_variant)
             self.hass.config_entries.async_update_entry(
                 self.config_entry,
                 data=new_data,

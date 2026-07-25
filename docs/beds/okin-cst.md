@@ -8,8 +8,6 @@
 - Mattress Firm 900-O / MFirm 900-O
 - Rize MF900
 - Nectar Motion / some `OKIN-*` Nectar bases
-- Leggett & Platt Prodigy Comfort Elite / `LP BED CONTROL` when diagnostics
-  show the CST connected GATT signature
 
 ## Detection
 
@@ -17,7 +15,7 @@
 |--------|-------|
 | Service UUID | `62741523-52f9-8864-b1ab-3b3a8d65950b` (standard OKIN) |
 | Name patterns | Varies (shared UUID requires disambiguation; some report as `OKIN-XXXXXX`) |
-| Connected GATT hint | CSS `90311623-...` plus Nordic DFU `00001530-...` |
+| Connected GATT hint | CSS `90311623-...` plus Nordic DFU `00001530-...`, unless a stronger device identity selects another shared-UUID protocol |
 | BLE Pairing | Required |
 
 Manual selection may be needed since the service UUID is shared with other Okin protocols.
@@ -25,6 +23,10 @@ Choose this profile for Nectar Motion style `OKIN-*` bases when diagnostics show
 both the CSS service and Nordic DFU service.
 This also applies to Mattress Firm 900-O / MFirm 900-O bases advertising as
 `OKIN-XXXXXX` with the same connected GATT signature.
+
+Do not select CST for `LP BED...` receivers. LP Control 2.9.0 identifies those
+as its Okin profile and sends 6-byte commands, even when the receiver also
+exposes CSS and Nordic DFU services. See [Leggett & Platt](leggett-platt.md).
 
 ## Pairing
 

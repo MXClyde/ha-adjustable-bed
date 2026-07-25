@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from bleak.exc import BleakError
 
-from ..const import REVERIE_CHAR_UUID
+from ..const import REVERIE_BACK_MAX_ANGLE, REVERIE_CHAR_UUID
 from .base import BedController
 
 if TYPE_CHECKING:
@@ -114,6 +114,11 @@ class ReverieController(BedController):
     def control_characteristic_uuid(self) -> str:
         """Return the UUID of the control characteristic."""
         return REVERIE_CHAR_UUID
+
+    @property
+    def motor_max_angles(self) -> dict[str, float]:
+        """Reverie frames stop the head/back axis short of the standard 68 degrees."""
+        return {"back": REVERIE_BACK_MAX_ANGLE, "head": REVERIE_BACK_MAX_ANGLE}
 
     # Capability properties
     @property

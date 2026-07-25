@@ -720,9 +720,11 @@ MANUFACTURER_ID_DEWERTOKIN: Final = 1643  # 0x066B
 # Used by SmartBed devices that advertise manufacturer data instead of service UUIDs
 MANUFACTURER_ID_OKIN: Final = 89  # 0x0059
 
-# DewertOkin service UUID (unique to FurniMove/DewertOkin devices)
-# This UUID can uniquely identify DewertOkin beds regardless of device name
+# Primary DewertOkin service UUID. The Jura TT214H BlueFrog coffee-machine
+# dongle also advertises this UUID, so detection excludes that exact known
+# non-bed name before treating the UUID as a DewertOkin signal (issue #450).
 DEWERTOKIN_SERVICE_UUID: Final = "00001523-0000-1000-8000-00805f9b34fb"
+DEWERTOKIN_EXCLUDED_DEVICE_NAMES: Final = frozenset({"tt214h bluefrog"})
 
 # DewertOkin RF Gateway settings service. Devices with BLE Device Information
 # model "Bluetooth RF-Gateway" expose this name characteristic as the app's
@@ -806,7 +808,11 @@ MALOUF_LEGACY_OKIN_NOTIFY_CHAR_UUID: Final = "0000ffe4-0000-1000-8000-00805f9b34
 # - Leggett & Platt Okin variant (6-byte protocol, same as Okimat)
 # - OKIN 64-bit (10-byte protocol with 64-bit bitmasks)
 # Detection priority: name patterns first, then UUID fallback to Okimat
-LEGGETT_OKIN_NAME_PATTERNS: Final = ("leggett", "l&p")
+LEGGETT_OKIN_NAME_PATTERNS: Final = (
+    "leggett",
+    "l&p",
+    "lp bed",  # LP Control's Okin deviceNamePrefix (e.g. "LP BED CONTROL")
+)
 LEGGETT_RICHMAT_NAME_PATTERNS: Final = ("mlrm",)  # MlRM prefix beds
 # Okimat devices: "Okimat", "OKIN RF", "OKIN BLE", "OKIN luis", or
 # "Smartbed" (Malouf/Lucid/CVB beds using OKIN protocol).
@@ -1998,12 +2004,11 @@ BEDS_REQUIRING_PAIRING: Final[set[str]] = {
     BED_TYPE_OKIMAT,
     BED_TYPE_VIBRADORM,
     BED_TYPE_LOGICDATA,
-    # Leggett & Platt Gen2 (LP Comfort Connect, 209-M001): the LP Control app
-    # calls createBond() after service discovery ("Bond Needed...Bonding" in
-    # BLEConnectionViewModel). Issue #385 shows the corresponding hardware
-    # symptom outside its ~2-minute pairing window: unbonded reconnects time out
-    # while the box keeps advertising. The app can re-open that window with its
-    # "PAIR ENABLE" serial command.
+    # Leggett & Platt Gen2 (LP Comfort Connect, 209-M001): LP Control calls
+    # createBond() for an unbonded Gen2 device after service discovery. Issue
+    # #385 shows repeated unbonded BlueZ connection timeouts while the box keeps
+    # advertising. The controller-side reason remains hardware behavior, not
+    # something the APK can prove.
     BED_TYPE_LEGGETT_GEN2,
 }
 
@@ -2033,6 +2038,20 @@ def requires_pairing(bed_type: str, protocol_variant: str | None = None) -> bool
         if protocol_variant in BED_TYPE_VARIANTS_REQUIRING_PAIRING[bed_type]:
             return True
     return False
+
+
+def requires_pairing_after_service_discovery(
+    bed_type: str, protocol_variant: str | None = None
+) -> bool:
+    """Return True when GATT discovery must precede the BLE bond request.
+
+    LP Control connects and discovers services before calling the Android
+    bonding API. BlueZ's usual ``pair=True`` path instead invokes
+    ``Device1.Pair`` without first making the ordinary unbonded GATT connection.
+    """
+    if bed_type == BED_TYPE_LEGGETT_GEN2:
+        return True
+    return bed_type == BED_TYPE_LEGGETT_PLATT and protocol_variant == LEGGETT_VARIANT_GEN2
 
 
 def connection_gated_by_bond(bed_type: str, protocol_variant: str | None = None) -> bool:
@@ -2087,6 +2106,24 @@ BEDS_WITH_POSITION_FEEDBACK: Final = frozenset(
     }
 )
 
+
+def bed_type_has_position_feedback(
+    bed_type: str | None, protocol_variant: str | None
+) -> bool:
+    """Return True if this bed type/variant combination reports motor positions.
+
+    Membership in BEDS_WITH_POSITION_FEEDBACK is not sufficient on its own:
+    Keeson hardware only reports positions on the ergomotion variant, so the
+    variant has to be consulted too. Callers that decide whether to create
+    position entities, accept set_position calls, or probe for position
+    feedback must all agree, so they share this single predicate.
+    """
+    if not bed_type:
+        return False
+    if bed_type in BEDS_WITH_POSITION_FEEDBACK:
+        return True
+    return bed_type == BED_TYPE_KEESON and protocol_variant == KEESON_VARIANT_ERGOMOTION
+
 # Bed types that may have angle sensing enabled but report NO degree-angle data.
 # Sleep Number MCR/BAM beds only report sleep-number values and bed presence over BLE
 # (no motor angle feedback at all), so degree angle sensors would sit at "unknown"
@@ -2096,12 +2133,17 @@ BEDS_WITH_POSITION_FEEDBACK: Final = frozenset(
 BEDS_WITHOUT_ANGLE_FEEDBACK: Final = frozenset({BED_TYPE_SLEEP_NUMBER_MCR})
 
 # Bed types that report positions as 0-100 percentages (not angle degrees)
-# These bed types return percentage values directly, so no angle-to-percent conversion is needed
+# These bed types return percentage values directly, so no angle-to-percent conversion is needed.
+# Keeson, Serta and OKIN FFE all run KeesonController, so all three belong here.
+# Only the Ergomotion variant actually reports positions; for the others this keeps
+# angle sensing from creating degree sensors that would sit at "unknown" forever,
+# since KeesonController.start_notify() never subscribes outside that variant.
 BEDS_WITH_PERCENTAGE_POSITIONS: Final = frozenset(
     {
         BED_TYPE_KEESON,
         BED_TYPE_ERGOMOTION,
         BED_TYPE_SERTA,
+        BED_TYPE_OKIN_FFE,
         BED_TYPE_JENSEN,
         BED_TYPE_SLEEP_NUMBER,
         BED_TYPE_SLEEPYS_BOX25,
@@ -2199,6 +2241,9 @@ BED_MOTOR_PULSE_DEFAULTS: Final = {
     # Leggett WiLinke: 110ms delay → 10 repeats = 1.1s total
     # Source: RICHMAT_MASTER_ANALYSIS.md - MLRM devices use 110ms timing
     BED_TYPE_LEGGETT_WILINKE: (10, 110),
+    # Leggett Okin: LP Control repeats held actuator commands every 200ms.
+    # Source: com.leggett.android.universal 2.9.0 (OkinControlBoxInterface)
+    BED_TYPE_LEGGETT_OKIN: (5, 200),
     # OCTO: 350ms delay → 3 repeats = 1.05s total
     # Source: de.octoactuators.octosmartcontrolapp ANALYSIS.md
     BED_TYPE_OCTO: (3, 350),

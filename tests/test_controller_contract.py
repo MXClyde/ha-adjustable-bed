@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from custom_components.adjustable_bed import const, controller_factory
 from custom_components.adjustable_bed.beds.base import BedController
+from custom_components.adjustable_bed.beds.keeson import KeesonController
 from custom_components.adjustable_bed.const import (
     BED_TYPE_COOLBASE,
     BED_TYPE_KEESON,
@@ -31,7 +35,11 @@ from custom_components.adjustable_bed.const import (
     SUPPORTED_BED_TYPES,
     VARIANT_AUTO,
 )
-from custom_components.adjustable_bed.controller_factory import create_controller
+from custom_components.adjustable_bed.controller_factory import (
+    _SIMPLE_CONTROLLERS,
+    _create_from_registry,
+    create_controller,
+)
 
 SHARED_CAPABILITY_FLAGS: tuple[str, ...] = (
     "supports_memory_presets",
@@ -210,6 +218,72 @@ async def test_factory_resolves_every_supported_bed_type(bed_type: str) -> None:
     """Every supported bed type should resolve through create_controller."""
     controller = await _create_controller_for_bed_type(bed_type)
     assert isinstance(controller, BedController)
+
+
+@pytest.mark.parametrize("bed_type", SUPPORTED_BED_TYPES)
+async def test_keeson_protocol_bed_types_are_listed_as_percentage_beds(
+    bed_type: str,
+) -> None:
+    """Every bed type running KeesonController must be a known percentage bed.
+
+    sensor.py consults BEDS_WITH_PERCENTAGE_POSITIONS by bed type rather than asking
+    the controller, so a Keeson-protocol bed type missing from the set gets degree
+    angle sensors. Only the ergomotion variant reports positions at all, so for the
+    others those sensors would sit at "unknown" forever. BED_TYPE_OKIN_FFE was absent
+    this way despite running KeesonController like Keeson and Serta.
+    """
+    controller = await _create_controller_for_bed_type(bed_type)
+    if not isinstance(controller, KeesonController):
+        return
+    assert bed_type in const.BEDS_WITH_PERCENTAGE_POSITIONS, (
+        f"{bed_type} runs KeesonController but is not in BEDS_WITH_PERCENTAGE_POSITIONS, "
+        "so angle sensing would create degree angle sensors for it"
+    )
+
+
+@pytest.mark.parametrize("bed_type", sorted(_SIMPLE_CONTROLLERS))
+async def test_registry_entries_resolve_to_controller_classes(bed_type: str) -> None:
+    """Every _SIMPLE_CONTROLLERS entry must name a real module and class.
+
+    The registry addresses controller classes by string, so this is what turns a
+    typo into a failing test instead of a ValueError on a user's bed. Covers
+    entries like BED_TYPE_DIAGNOSTIC that are absent from SUPPORTED_BED_TYPES.
+    """
+    controller = _create_from_registry(_FactoryCoordinator(), bed_type)
+    assert isinstance(controller, BedController)
+
+
+def test_registry_and_explicit_branches_are_disjoint() -> None:
+    """A bed type handled by an explicit branch must not also sit in the registry.
+
+    create_controller() consults the registry only after every explicit branch, so
+    a duplicate would be silently unreachable rather than an error.
+    """
+    factory_source = Path(controller_factory.__file__).read_text()
+    create_fn = next(
+        node
+        for node in ast.walk(ast.parse(factory_source))
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "create_controller"
+    )
+    # Walk every If in the function, not just top-level ones: elif chains live in
+    # `orelse` and a dispatch branch could be nested inside another conditional.
+    explicit: set[str] = {
+        node.id
+        for branch in ast.walk(create_fn)
+        if isinstance(branch, ast.If)
+        for node in ast.walk(branch.test)
+        if isinstance(node, ast.Name) and node.id.startswith("BED_TYPE_")
+    }
+    registry = {
+        name
+        for name, value in vars(const).items()
+        if name.startswith("BED_TYPE_")
+        and isinstance(value, str)
+        and value in _SIMPLE_CONTROLLERS
+    }
+    assert not (explicit & registry), (
+        f"Bed types are both branched on and registered: {sorted(explicit & registry)}"
+    )
 
 
 async def test_factory_auto_detects_keeson_sino_variant_for_okin_ble_signature() -> None:

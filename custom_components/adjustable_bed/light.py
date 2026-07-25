@@ -106,13 +106,13 @@ def _light_entities_for(
         # until the side reconnects and the platform re-runs.
         return []
 
-    if getattr(controller, "supports_light_color_control", False):
+    if controller.supports_light_color_control:
         _async_remove_stale_switch_entity(hass, coordinator)
         return [AdjustableBedLight(coordinator, LIGHT_DESCRIPTION)]
 
     if (
         coordinator.bed_type == BED_TYPE_SLEEP_NUMBER_MCR
-        and getattr(controller, "supports_discrete_light_control", False)
+        and controller.supports_discrete_light_control
     ):
         _async_remove_stale_switch_entity(hass, coordinator)
         return [AdjustableBedOnOffLight(coordinator, LIGHT_DESCRIPTION)]
@@ -171,9 +171,7 @@ class AdjustableBedLight(AdjustableBedEntity, RestoreEntity, LightEntity):
         # one minted from config) so an OFFLINE offline-safe side still gets the
         # right colour mode / default colour instead of falling back to plain RGB.
         controller = coordinator.capability_controller
-        color_mode_str = (
-            getattr(controller, "supported_color_mode", None) if controller is not None else None
-        )
+        color_mode_str = controller.supported_color_mode if controller is not None else None
         if color_mode_str == "rgbw":
             self._attr_color_mode = ColorMode.RGBW
             self._attr_supported_color_modes = {ColorMode.RGBW}
@@ -181,13 +179,9 @@ class AdjustableBedLight(AdjustableBedEntity, RestoreEntity, LightEntity):
             self._attr_color_mode = ColorMode.RGB
             self._attr_supported_color_modes = {ColorMode.RGB}
 
-        default_rgb = (
-            getattr(controller, "default_light_rgb_color", None) if controller is not None else None
-        )
-        self._supports_discrete_light_control = bool(
-            getattr(controller, "supports_discrete_light_control", False)
-            if controller is not None
-            else False
+        default_rgb = controller.default_light_rgb_color if controller is not None else None
+        self._supports_discrete_light_control = (
+            controller is not None and controller.supports_discrete_light_control
         )
         self._default_rgb_color = _normalize_rgb_color(default_rgb)
         self._attr_is_on = False

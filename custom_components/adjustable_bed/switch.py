@@ -102,10 +102,10 @@ def _switch_entities_for(
             description.key == "under_bed_lights"
             and controller is not None
             and (
-                getattr(controller, "supports_light_color_control", False)
+                controller.supports_light_color_control
                 or (
                     coordinator.bed_type == BED_TYPE_SLEEP_NUMBER_MCR
-                    and getattr(controller, "supports_discrete_light_control", False)
+                    and controller.supports_discrete_light_control
                 )
             )
         ):
@@ -166,9 +166,7 @@ class AdjustableBedSwitch(AdjustableBedEntity, SwitchEntity):
         # False; the live controller takes over for actual commands.
         controller = coordinator.capability_controller
         self._supports_discrete_light_control = (
-            getattr(controller, "supports_discrete_light_control", False)
-            if controller is not None
-            else False
+            controller is not None and controller.supports_discrete_light_control
         )
         # Timer handle for auto-off state updates (e.g., Octo lights turn off after 5 min)
         self._auto_off_timer: asyncio.TimerHandle | None = None
@@ -217,7 +215,7 @@ class AdjustableBedSwitch(AdjustableBedEntity, SwitchEntity):
         if controller is None:
             return
 
-        auto_off_seconds = getattr(controller, "light_auto_off_seconds", None)
+        auto_off_seconds = controller.light_auto_off_seconds
         if auto_off_seconds is None:
             return
 

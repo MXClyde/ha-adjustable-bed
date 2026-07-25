@@ -725,10 +725,8 @@ class BLEDiagnosticRunner:
                 _LOGGER.debug("Registering raw notification callback with coordinator")
                 self.coordinator.set_raw_notify_callback(self._raw_notify_callback)
                 controller = self.coordinator.controller
-                requires_notify_channel = bool(
-                    controller is not None
-                    and getattr(controller, "requires_notification_channel", False)
-                    is True
+                requires_notify_channel = (
+                    controller is not None and controller.requires_notification_channel
                 )
                 if (
                     self.coordinator.disable_angle_sensing
@@ -909,7 +907,17 @@ class BLEDiagnosticRunner:
         gatt_services: list[ServiceInfo] | None = None,
     ) -> dict[str, Any]:
         """Build a detection reasoning section."""
-        gatt_detection = detect_bed_type_from_gatt_services(gatt_services)
+        connected_device = self._extract_backend_device()
+        connected_device_name = getattr(connected_device, "name", None)
+        if not isinstance(connected_device_name, str):
+            connected_device_name = None
+        observed_device_name = (
+            self.coordinator.observed_ble_device_name if self.coordinator is not None else None
+        ) or connected_device_name
+        gatt_detection = detect_bed_type_from_gatt_services(
+            gatt_services,
+            observed_device_name or getattr(service_info, "name", None),
+        )
         if gatt_detection.bed_type is not None:
             return {
                 "bed_type": gatt_detection.bed_type,

@@ -86,10 +86,10 @@ def _binary_sensor_entities_for(
     entities: list[BinarySensorEntity] = []
     for description in BINARY_SENSOR_DESCRIPTIONS:
         if description.key == "bed_presence":
-            if controller is None or not getattr(controller, "supports_bed_presence", False):
+            if controller is None or not controller.supports_bed_presence:
                 continue
 
-            bed_presence_sides = tuple(getattr(controller, "bed_presence_sides", ()))
+            bed_presence_sides = controller.bed_presence_sides
             if bed_presence_sides:
                 _async_remove_stale_presence_entity(hass, coordinator)
             else:

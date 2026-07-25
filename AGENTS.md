@@ -110,7 +110,7 @@ The supported-protocol list lives in the README's "Supported Beds" table — tha
 
 ## Adding a New Bed Type
 
-1. **Document the BLE protocol** - Use APK reverse engineering (see `disassembly/AGENTS.md`) to extract UUIDs and command bytes. The `run_diagnostics` service captures GATT structure and device responses. User-provided nRF Connect logs can supplement APK analysis with real traffic captures.
+1. **Document the BLE protocol** - Use APK reverse engineering (see `disassembly/AGENTS.md`) to extract UUIDs and command bytes. The `generate_support_bundle` service captures GATT structure and device responses. User-provided nRF Connect logs can supplement APK analysis with real traffic captures.
 
 2. **Add constants to `const.py`**:
    ```python
@@ -123,6 +123,11 @@ The supported-protocol list lives in the README's "Supported Beds" table — tha
    - Extend `BedController`
    - Implement all abstract methods
    - Define command bytes as a class (see existing controllers)
+   - Declare capabilities by **overriding the properties `BedController` already
+     defines** (`supports_massage`, `memory_slot_count`, `auto_stops_on_idle`, …).
+     Entity platforms read these directly, so a typo is a type error rather than a
+     silently-wrong default. Do not invent a new capability by setting an
+     undeclared attribute — add it to the base class first.
 
 4. **Add detection to `detection.py`** in `detect_bed_type()`:
 
@@ -131,13 +136,20 @@ The supported-protocol list lives in the README's "Supported Beds" table — tha
        return BED_TYPE_NEWBED
    ```
 
-5. **Update `controller_factory.py`** `create_controller()`:
+5. **Register the controller in `controller_factory.py`.** Most beds are one line
+   in the `_SIMPLE_CONTROLLERS` registry, which lazily imports the module so
+   integration startup does not pay for ~50 unused controllers:
 
    ```python
-   if bed_type == BED_TYPE_NEWBED:
-       from .beds.newbed import NewbedController
-       return NewbedController(coordinator)
+   BED_TYPE_NEWBED: _ControllerSpec("newbed", "NewbedController"),
    ```
+
+   Pass fixed constructor kwargs as a third argument when needed. Only add an
+   explicit branch in `create_controller()` when construction needs runtime
+   detection, variant resolution, or arguments derived from the advertisement.
+   A bed type must not be both registered and branched on: the registry is
+   consulted last, so the entry would be silently unreachable.
+   `tests/test_controller_contract.py` enforces this and resolves every entry.
 
 6. **Add to `const.py`** `SUPPORTED_BED_TYPES` list
 
@@ -145,7 +157,27 @@ The supported-protocol list lives in the README's "Supported Beds" table — tha
 
 8. **Update `beds/__init__.py`** to export the new controller
 
-9. **Create documentation** in `docs/beds/newbed.md`
+9. **If the bed reports motor positions**, override `position_number_specs` to
+   return the sliders, building each with `build_position_number_spec()`:
+
+   ```python
+   @property
+   def position_number_specs(self) -> tuple[PositionNumberSpec, ...]:
+       return (
+           build_position_number_spec("back", max_value=68.0, unit=POSITION_UNIT_DEGREES),
+           build_position_number_spec("legs", max_value=45.0, unit=POSITION_UNIT_DEGREES),
+       )
+   ```
+
+   Pass `position_key=` when the firmware reports an axis under a different name.
+   Also add the bed type to `BEDS_WITH_POSITION_FEEDBACK` in `const.py`, and to
+   `BEDS_WITH_PERCENTAGE_POSITIONS` if it reports 0-100 percentages rather than
+   degrees. A bed that reports no position data at all belongs in neither, or in
+   `BEDS_WITHOUT_ANGLE_FEEDBACK` if angle sensing would otherwise create degree
+   sensors stuck at "unknown". Note that `position_number_specs` requires a live
+   controller, so these entities only appear once the bed has connected.
+
+10. **Create documentation** in `docs/beds/newbed.md`
 
 ## Configuration Options
 
@@ -181,14 +213,13 @@ The supported-protocol list lives in the README's "Supported Beds" table — tha
 | `adjustable_bed.stop_all` | Immediately stop all motors |
 | `adjustable_bed.set_position` | Move motor to a specific position |
 | `adjustable_bed.timed_move` | Move motor for a specified duration |
-| `adjustable_bed.run_diagnostics` | Capture BLE protocol data for debugging |
-| `adjustable_bed.generate_support_bundle` | Generate JSON support bundle with diagnostics (params: device_id, include_logs) |
+| `adjustable_bed.generate_support_bundle` | Capture the full JSON support bundle (BLE diagnostics, GATT details, pairing evidence, command trace, logs). Params: `device_id` or `target_address` (exactly one), `capture_duration`, `include_logs` |
 
 ## Critical Implementation Details
 
 **IMPORTANT: Protocol values are hardware-specific.** Timing values (repeat counts, delays), command bytes, and packet formats vary between bed types. Do NOT copy values from one bed's protocol documentation to another. Each bed type's parameters must come from actual device testing or reverse engineering - never guess or extrapolate from other implementations.
 
-1. **Always send STOP after movement** - Movement methods use `try/finally` to guarantee STOP is sent even if cancelled. The STOP command uses a fresh `asyncio.Event()` so it's not affected by the cancel signal.
+1. **Always perform protocol-specific STOP/release cleanup after movement** - Movement methods use `try/finally` so cleanup runs even if cancelled. When the protocol defines a STOP or release frame, send it with a fresh `asyncio.Event()` so the cancel signal cannot suppress it. If complete artifact evidence proves that a protocol stops solely by ending its held-command refresh and defines no release frame (for example, KSBT03C), ending that cancellable refresh is the required cleanup; never invent or extrapolate a hardware command merely to send an extra packet.
 
 2. **Command serialization** - All entities must use `coordinator.async_execute_controller_command()` instead of calling controller methods directly. This ensures proper locking and prevents concurrent BLE writes.
 
@@ -252,6 +283,16 @@ under `custom_components/adjustable_bed/frontend/`.
 
 ## Development
 
+### Running tests
+
+Run the Python test suite with `uv run pytest`. Automatic worker selection
+detects the available CPUs but is capped at four workers; explicit numeric
+overrides remain available.
+Use `uv run pytest -n 0 <test-path>` for focused or debug runs. Agents must not
+run multiple full suites concurrently, since the worker cap applies to each
+pytest process. On a suitably powerful desktop, one full-suite run may override
+the automatic selection explicitly, for example: `uv run pytest -n 8`.
+
 ### Testing in Home Assistant
 
 1. Copy `custom_components/adjustable_bed` to your HA's `config/custom_components/`
@@ -260,11 +301,11 @@ under `custom_components/adjustable_bed/frontend/`.
 
 ### Using BLE Diagnostics
 
-The `run_diagnostics` service captures protocol data for debugging and adding new bed support:
-1. Call the service with either a configured device or a raw MAC address
-2. Operate the physical remote during the capture period
-3. Find the JSON report in your HA config directory
-4. The report contains GATT services, characteristics, and captured notifications
+The `generate_support_bundle` service captures protocol data for debugging and adding new bed support:
+1. Call the service with either a configured device (`device_id`) or a raw MAC address (`target_address`) - exactly one of the two
+2. Operate the physical remote during the capture period (default 120 seconds)
+3. A persistent notification provides a download link; the JSON report is also saved in the HA config directory as `adjustable_bed_support_bundle_*.json`
+4. The report contains GATT services, characteristics, captured notifications, advertisements per source, pairing evidence, and the recent command trace
 
 ### Common Issues
 

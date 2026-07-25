@@ -64,6 +64,39 @@ def test_issue_445_name_routes_pq_to_lumbar() -> None:
     assert "auxiliary" not in profile.motors
 
 
+async def test_issue_468_short_panel_eight_keeps_home_preset() -> None:
+    """The reported short HHC PanelEight bed retains its working Home action."""
+    controller, client = _controller("HHC0120182CDEH")
+
+    assert controller.profile.profile_id == "power_bob_eight"
+    assert controller.supports_preset_flat is True
+
+    await controller.preset_flat()
+
+    client.write_gatt_char.assert_awaited_once_with(
+        MOTOSLEEP_CHAR_UUID, b"$O", response=False
+    )
+
+
+async def test_issue_470_short_panel_eight_keeps_toggle_only_light() -> None:
+    """The reported PanelEight bed uses its root light toggle, not generic RGB."""
+    controller, client = _controller("HHC0120182CDEH")
+
+    assert controller.profile.profile_id == "power_bob_eight"
+    assert controller.profile.light_toggle == "A"
+    assert controller.profile.rgb_light is False
+    assert controller.supports_lights is True
+    assert controller.supports_light_toggle_control is True
+    assert controller.supports_light_color_control is False
+    assert controller.supports_discrete_light_control is False
+
+    await controller.lights_toggle()
+
+    client.write_gatt_char.assert_awaited_once_with(
+        MOTOSLEEP_CHAR_UUID, b"$A", response=False
+    )
+
+
 def test_power_bob_accepts_exact_length_name_containing_hhc() -> None:
     """Power Bob filters for a case-sensitive HHC substring, not a prefix."""
     profile = resolve_motosleep_profile("XXHHC000150000")
@@ -110,10 +143,8 @@ def test_neutral_axis_builds_a_generic_cover_description() -> None:
     """An APK-proven axis with tentative semantics must still create an entity."""
     controller, _client = _controller("HHC0000040CDEF")
     auxiliary = next(spec for spec in controller.motor_control_specs if spec.key == "auxiliary_1")
-    coordinator = MagicMock()
-    coordinator.bed_type = "motosleep"
 
-    description = _build_cover_description(coordinator, auxiliary)
+    description = _build_cover_description(auxiliary)
 
     assert description.key == "auxiliary_1"
     assert description.translation_key == "auxiliary_1"

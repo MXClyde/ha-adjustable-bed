@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
@@ -16,7 +17,9 @@ from custom_components.adjustable_bed.const import (
     BED_MOTOR_PULSE_DEFAULTS,
     BED_TYPE_BEDTECH,
     BED_TYPE_KEESON,
+    BED_TYPE_LEGGETT_GEN2,
     BED_TYPE_LEGGETT_OKIN,
+    BED_TYPE_LEGGETT_PLATT,
     BED_TYPE_LINAK,
     BED_TYPE_MALOUF_LEGACY_OKIN,
     BED_TYPE_MALOUF_NEW_OKIN,
@@ -39,8 +42,12 @@ from custom_components.adjustable_bed.const import (
     CONF_MOTOR_PULSE_DELAY_MS,
     CONF_PASSIVE_POSITION_RECONCILIATION,
     CONF_PREFERRED_ADAPTER,
+    CONF_PROTOCOL_VARIANT,
     CONF_RICHMAT_REMOTE,
+    DEFAULT_MOTOR_PULSE_COUNT,
+    DEFAULT_MOTOR_PULSE_DELAY_MS,
     DOMAIN,
+    LEGGETT_VARIANT_OKIN,
     NORDIC_DFU_SERVICE_UUID,
     OKIMAT_SERVICE_UUID,
     OKIMAT_WRITE_CHAR_UUID,
@@ -52,7 +59,7 @@ from custom_components.adjustable_bed.const import (
 )
 from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
 
-from .conftest import TEST_ADDRESS, TEST_NAME
+from .conftest import TEST_ADDRESS, TEST_NAME, make_controller_mock
 
 
 class TestCoordinatorInit:
@@ -263,7 +270,7 @@ class TestCoordinatorConnection:
             patch(
                 "custom_components.adjustable_bed.coordinator.create_controller",
                 new_callable=AsyncMock,
-                return_value=MagicMock(),
+                return_value=make_controller_mock(),
             ),
         ):
             coordinator = AdjustableBedCoordinator(hass, entry)
@@ -280,6 +287,217 @@ class TestCoordinatorConnection:
         )
         assert pairing["connection_attempts"][0]["pairing"]["os_bond_reported"] is True
         assert pairing["connection_attempts"][0]["pairing"]["requested"] is False
+
+    async def test_leggett_gen2_connects_discovers_then_pairs(
+        self,
+        hass: HomeAssistant,
+        mock_bluetooth_adapters,
+        mock_bleak_client: MagicMock,
+    ) -> None:
+        """Gen2 coordinator pairing must follow the LP Control app ordering."""
+        del mock_bluetooth_adapters
+
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Unpaired LP Gen2 Bed",
+            data={
+                CONF_ADDRESS: TEST_ADDRESS,
+                CONF_NAME: TEST_NAME,
+                CONF_BED_TYPE: BED_TYPE_LEGGETT_GEN2,
+                CONF_MOTOR_COUNT: 4,
+                CONF_HAS_MASSAGE: True,
+                CONF_DISABLE_ANGLE_SENSING: True,
+                CONF_PREFERRED_ADAPTER: "auto",
+            },
+            unique_id=TEST_ADDRESS,
+            entry_id="leggett_gen2_pair_order_test",
+        )
+        entry.add_to_hass(hass)
+
+        adapter_result = MagicMock()
+        adapter_result.device = MagicMock()
+        adapter_result.device.address = TEST_ADDRESS
+        adapter_result.device.name = TEST_NAME
+        adapter_result.device.details = {"source": "local"}
+        adapter_result.source = "local"
+        adapter_result.rssi = -60
+        adapter_result.connectable = True
+        adapter_result.available_sources = ["local"]
+
+        events: list[str] = []
+
+        async def establish(*_args: object, **_kwargs: object) -> MagicMock:
+            events.append("connect_and_discover")
+            return mock_bleak_client
+
+        async def pair() -> None:
+            events.append("pair")
+
+        mock_bleak_client.pair = AsyncMock(side_effect=pair)
+
+        controller = MagicMock()
+        controller.requires_persistent_connection = True
+        controller.requires_notification_channel = False
+        controller.supports_under_bed_lights = False
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.coordinator.select_adapter",
+                new_callable=AsyncMock,
+                return_value=adapter_result,
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.establish_connection",
+                new=AsyncMock(side_effect=establish),
+            ) as mock_establish_connection,
+            patch(
+                "custom_components.adjustable_bed.coordinator.discover_services",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.read_ble_device_info",
+                new_callable=AsyncMock,
+                return_value=(None, None),
+            ),
+            patch.object(
+                AdjustableBedCoordinator,
+                "_async_verify_bonded",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.create_controller",
+                new_callable=AsyncMock,
+                return_value=controller,
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            coordinator = AdjustableBedCoordinator(hass, entry)
+            coordinator._max_retries = 1
+            result = await coordinator.async_connect()
+
+        assert result is True
+        assert events == ["connect_and_discover", "pair"]
+        assert mock_establish_connection.await_args.kwargs["pair"] is False
+        assert mock_establish_connection.await_args.kwargs["use_services_cache"] is False
+        mock_bleak_client.pair.assert_awaited_once_with()
+        assert entry.data[CONF_BLE_BOND_ESTABLISHED] is True
+
+        pairing = coordinator.pairing_diagnostics["connection_attempts"][0]["pairing"]
+        assert pairing["requested"] is True
+        assert pairing["ordering"] == "connect_discover_then_pair"
+        assert pairing["connection_result"] == "pairing_connection_succeeded"
+
+    @pytest.mark.parametrize(
+        ("pair_error", "max_retries", "fallback_pair"),
+        [
+            (NotImplementedError("pairing unavailable"), 1, None),
+            (BleakError("pairing rejected"), 2, False),
+        ],
+    )
+    async def test_leggett_gen2_pair_fallback_disconnect_is_intentional(
+        self,
+        hass: HomeAssistant,
+        mock_bluetooth_adapters,
+        mock_bleak_client: MagicMock,
+        pair_error: Exception,
+        max_retries: int,
+        fallback_pair: bool | None,
+    ) -> None:
+        """Pairing failures intentionally release Gen2 before no-pair fallback."""
+        del mock_bluetooth_adapters
+
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Unpaired LP Gen2 Bed",
+            data={
+                CONF_ADDRESS: TEST_ADDRESS,
+                CONF_NAME: TEST_NAME,
+                CONF_BED_TYPE: BED_TYPE_LEGGETT_GEN2,
+                CONF_MOTOR_COUNT: 4,
+                CONF_HAS_MASSAGE: True,
+                CONF_DISABLE_ANGLE_SENSING: True,
+                CONF_PREFERRED_ADAPTER: "auto",
+            },
+            unique_id=TEST_ADDRESS,
+            entry_id="leggett_gen2_pair_fallback_test",
+        )
+        entry.add_to_hass(hass)
+
+        adapter_result = MagicMock()
+        adapter_result.device = MagicMock()
+        adapter_result.device.address = TEST_ADDRESS
+        adapter_result.device.name = TEST_NAME
+        adapter_result.device.details = {"source": "local"}
+        adapter_result.source = "local"
+        adapter_result.rssi = -60
+        adapter_result.connectable = True
+        adapter_result.available_sources = ["local"]
+
+        coordinator = AdjustableBedCoordinator(hass, entry)
+        intentional_during_disconnect: list[bool] = []
+
+        async def disconnect() -> None:
+            intentional_during_disconnect.append(coordinator._intentional_disconnect)
+            coordinator._on_disconnect(mock_bleak_client)
+
+        mock_bleak_client.pair = AsyncMock(side_effect=pair_error)
+        mock_bleak_client.disconnect = AsyncMock(side_effect=disconnect)
+
+        controller = MagicMock()
+        controller.requires_persistent_connection = True
+        controller.requires_notification_channel = False
+        controller.supports_under_bed_lights = False
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.coordinator.select_adapter",
+                new_callable=AsyncMock,
+                return_value=adapter_result,
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.establish_connection",
+                new_callable=AsyncMock,
+                return_value=mock_bleak_client,
+            ) as mock_establish_connection,
+            patch(
+                "custom_components.adjustable_bed.coordinator.discover_services",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.read_ble_device_info",
+                new_callable=AsyncMock,
+                return_value=(None, None),
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.create_controller",
+                new_callable=AsyncMock,
+                return_value=controller,
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            coordinator._max_retries = max_retries
+            result = await coordinator.async_connect()
+
+        assert result is True
+        assert mock_establish_connection.await_count == 2
+        assert mock_establish_connection.await_args_list[0].kwargs["pair"] is False
+        fallback_kwargs = mock_establish_connection.await_args_list[1].kwargs
+        if fallback_pair is None:
+            assert "pair" not in fallback_kwargs
+        else:
+            assert fallback_kwargs["pair"] is fallback_pair
+        assert intentional_during_disconnect == [True]
+        assert coordinator._intentional_disconnect is False
+        mock_bleak_client.disconnect.assert_awaited_once_with()
 
     async def test_initial_position_read_prepares_controller_before_hydration(
         self,
@@ -513,7 +731,7 @@ class TestCoordinatorPositionSeek:
         coordinator._client.is_connected = True
         coordinator._position_data["legs"] = 0.0
 
-        controller = MagicMock()
+        controller = make_controller_mock()
         controller.supports_direct_position_control = False
         controller.reverses_position_seek_on_overshoot = False
         controller.uses_custom_position_seek_steps = True
@@ -563,7 +781,7 @@ class TestCoordinatorPositionSeek:
         coordinator._client.is_connected = True
         coordinator._position_data["legs"] = 0.0
 
-        controller = MagicMock()
+        controller = make_controller_mock()
         controller.supports_direct_position_control = False
         controller.reverses_position_seek_on_overshoot = True
         controller.uses_custom_position_seek_steps = False
@@ -612,7 +830,7 @@ class TestCoordinatorPositionSeek:
         coordinator._client.is_connected = True
         coordinator._position_data["legs"] = 0.0
 
-        controller = MagicMock()
+        controller = make_controller_mock()
         controller.supports_direct_position_control = False
         controller.reverses_position_seek_on_overshoot = False
         controller.uses_custom_position_seek_steps = True
@@ -665,7 +883,7 @@ class TestCoordinatorPositionSeek:
         coordinator._client.is_connected = True
         coordinator._position_data["legs"] = 0.0
 
-        controller = MagicMock()
+        controller = make_controller_mock()
         controller.supports_direct_position_control = False
         controller.reverses_position_seek_on_overshoot = False
         controller.uses_custom_position_seek_steps = True
@@ -720,7 +938,7 @@ class TestCoordinatorPositionSeek:
         coordinator._client.is_connected = True
         coordinator._position_data["legs"] = 0.0
 
-        controller = MagicMock()
+        controller = make_controller_mock()
         controller.supports_direct_position_control = False
         controller.reverses_position_seek_on_overshoot = False
         controller.uses_custom_position_seek_steps = True
@@ -818,7 +1036,7 @@ class TestCoordinatorPositionSeek:
             patch(
                 "custom_components.adjustable_bed.coordinator.create_controller",
                 new_callable=AsyncMock,
-                return_value=MagicMock(),
+                return_value=make_controller_mock(),
             ),
         ):
             coordinator = AdjustableBedCoordinator(hass, entry)
@@ -874,7 +1092,7 @@ class TestCoordinatorPositionSeek:
             patch(
                 "custom_components.adjustable_bed.coordinator.create_controller",
                 new_callable=AsyncMock,
-                return_value=MagicMock(),
+                return_value=make_controller_mock(),
             ) as mock_create_controller,
         ):
             coordinator = AdjustableBedCoordinator(hass, entry)
@@ -926,7 +1144,7 @@ class TestCoordinatorPositionSeek:
             patch(
                 "custom_components.adjustable_bed.coordinator.create_controller",
                 new_callable=AsyncMock,
-                return_value=MagicMock(),
+                return_value=make_controller_mock(),
             ),
             patch(
                 "custom_components.adjustable_bed.coordinator.bluetooth.async_discovered_service_info",
@@ -984,7 +1202,7 @@ class TestCoordinatorPositionSeek:
             patch(
                 "custom_components.adjustable_bed.coordinator.create_controller",
                 new_callable=AsyncMock,
-                return_value=MagicMock(),
+                return_value=make_controller_mock(),
             ),
             patch(
                 "custom_components.adjustable_bed.coordinator.bluetooth.async_discovered_service_info",
@@ -1475,6 +1693,32 @@ class TestCoordinatorDisconnectTimer:
         # Leave the shared fixture clean for teardown.
         mock_bleak_client.disconnect.side_effect = None
         mock_bleak_client.is_connected = False
+
+    async def test_failed_connection_cleanup_is_intentional(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_bleak_client: MagicMock,
+    ) -> None:
+        """Failure cleanup must not let the callback schedule auto-reconnect."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._client = mock_bleak_client
+        coordinator._controller = MagicMock()
+        intentional_during_disconnect: list[bool] = []
+
+        async def disconnect() -> None:
+            intentional_during_disconnect.append(coordinator._intentional_disconnect)
+            coordinator._on_disconnect(mock_bleak_client)
+
+        mock_bleak_client.disconnect = AsyncMock(side_effect=disconnect)
+
+        await coordinator._async_cleanup_failed_connection()
+
+        assert intentional_during_disconnect == [True]
+        assert coordinator._client is None
+        assert coordinator._controller is None
+        assert coordinator._reconnect_timer is None
+        assert coordinator._intentional_disconnect is False
 
     async def test_sleep_number_mcr_skips_disconnect_timer_on_connect(
         self,
@@ -2550,6 +2794,77 @@ class TestRuntimeBedTypeCorrection:
             coordinator.motor_pulse_delay_ms,
         ) == new_okin_defaults
 
+    async def test_existing_leggett_okin_migrates_persisted_generic_pulse_defaults(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+    ):
+        """Existing Leggett Okin entries should adopt LP Control's proven cadence."""
+        coordinator = self._make_coordinator(
+            hass,
+            mock_config_entry_data,
+            {
+                CONF_MOTOR_PULSE_COUNT: DEFAULT_MOTOR_PULSE_COUNT,
+                CONF_MOTOR_PULSE_DELAY_MS: DEFAULT_MOTOR_PULSE_DELAY_MS,
+            },
+            bed_type=BED_TYPE_LEGGETT_OKIN,
+        )
+
+        changed = coordinator._apply_runtime_bed_type_correction(BED_TYPE_LEGGETT_OKIN)
+
+        assert changed is True
+        assert (coordinator.motor_pulse_count, coordinator.motor_pulse_delay_ms) == (5, 200)
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_COUNT] == 5
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 200
+
+    async def test_existing_leggett_okin_preserves_nondefault_pulse_override(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+    ):
+        """A non-default user cadence must survive the Leggett Okin upgrade."""
+        coordinator = self._make_coordinator(
+            hass,
+            mock_config_entry_data,
+            {
+                CONF_MOTOR_PULSE_COUNT: 8,
+                CONF_MOTOR_PULSE_DELAY_MS: 150,
+            },
+            bed_type=BED_TYPE_LEGGETT_OKIN,
+        )
+
+        changed = coordinator._apply_runtime_bed_type_correction(BED_TYPE_LEGGETT_OKIN)
+
+        assert changed is False
+        assert (coordinator.motor_pulse_count, coordinator.motor_pulse_delay_ms) == (8, 150)
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_COUNT] == 8
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 150
+
+    async def test_legacy_leggett_okin_variant_migrates_persisted_generic_defaults(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+    ):
+        """The legacy Leggett umbrella type should use the Okin variant cadence."""
+        coordinator = self._make_coordinator(
+            hass,
+            mock_config_entry_data,
+            {
+                CONF_PROTOCOL_VARIANT: LEGGETT_VARIANT_OKIN,
+                CONF_MOTOR_PULSE_COUNT: DEFAULT_MOTOR_PULSE_COUNT,
+                CONF_MOTOR_PULSE_DELAY_MS: DEFAULT_MOTOR_PULSE_DELAY_MS,
+            },
+            bed_type=BED_TYPE_LEGGETT_PLATT,
+        )
+
+        changed = coordinator._apply_runtime_bed_type_correction(BED_TYPE_LEGGETT_PLATT)
+
+        assert changed is True
+        assert coordinator.bed_type == BED_TYPE_LEGGETT_PLATT
+        assert (coordinator.motor_pulse_count, coordinator.motor_pulse_delay_ms) == (5, 200)
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_COUNT] == 5
+        assert coordinator.entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 200
+
     async def test_correction_updates_shared_okin_bed_type(
         self,
         hass: HomeAssistant,
@@ -2962,6 +3277,117 @@ class TestRuntimeBedTypeCorrection:
             coordinator._connection_attempt_details[0]["result"]
             == "retry_with_pairing_after_protocol_correction"
         )
+
+    async def test_lp_control_dual_stack_recovers_persisted_cst_entry(
+        self,
+        hass: HomeAssistant,
+        mock_bleak_client: MagicMock,
+        mock_coordinator_connected: None,
+        mock_async_ble_device_from_address: MagicMock,
+        mock_establish_connection: AsyncMock,
+    ):
+        """Issue #368: the refreshed LP BED name must select the 6-byte controller."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="LP BED CONTROL",
+            data={
+                CONF_ADDRESS: TEST_ADDRESS,
+                CONF_NAME: "Bedroom Bed",
+                CONF_BED_TYPE: BED_TYPE_OKIN_CST,
+                CONF_MOTOR_COUNT: 4,
+                CONF_HAS_MASSAGE: True,
+                CONF_DISABLE_ANGLE_SENSING: False,
+                CONF_PREFERRED_ADAPTER: "auto",
+                CONF_BLE_BOND_ESTABLISHED: True,
+                CONF_MOTOR_PULSE_COUNT: DEFAULT_MOTOR_PULSE_COUNT,
+                CONF_MOTOR_PULSE_DELAY_MS: DEFAULT_MOTOR_PULSE_DELAY_MS,
+            },
+            unique_id=TEST_ADDRESS,
+            entry_id="test_entry_lp_bed_cst_recovery",
+        )
+        entry.add_to_hass(hass)
+        mock_async_ble_device_from_address.return_value.name = None
+
+        fresh_device = MagicMock()
+        fresh_device.address = TEST_ADDRESS
+        fresh_device.name = "LP BED CONTROL"
+        fresh_device.details = {"source": "local"}
+        fresh_service_info = SimpleNamespace(
+            address=TEST_ADDRESS,
+            source="local",
+            rssi=-55,
+            connectable=True,
+            device=fresh_device,
+        )
+
+        async def establish_with_fresh_device(*args: Any, **kwargs: Any) -> MagicMock:
+            """Simulate bleak-retry-connector refreshing stale scanner data."""
+            assert kwargs["ble_device_callback"]() is fresh_device
+            return mock_bleak_client
+
+        mock_establish_connection.side_effect = establish_with_fresh_device
+
+        gatt_services = [
+            SimpleNamespace(
+                uuid=OKIMAT_SERVICE_UUID,
+                characteristics=[
+                    SimpleNamespace(
+                        uuid=OKIMAT_WRITE_CHAR_UUID,
+                        properties=["read", "write"],
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                uuid=OKIN_SMART_REMOTE_CSS_SERVICE_UUID,
+                characteristics=[
+                    SimpleNamespace(
+                        uuid=OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID,
+                        properties=["read", "write"],
+                    )
+                ],
+            ),
+            SimpleNamespace(uuid=NORDIC_DFU_SERVICE_UUID, characteristics=[]),
+        ]
+        mock_bleak_client.services = MagicMock()
+        mock_bleak_client.services.__iter__ = lambda self: iter(gatt_services)
+        mock_bleak_client.services.__len__ = lambda self: len(gatt_services)
+        mock_bleak_client.services.get_service = MagicMock(return_value=None)
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.coordinator.discover_services",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.get_discovered_service_info",
+                return_value=[fresh_service_info],
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.read_ble_device_info",
+                new_callable=AsyncMock,
+                return_value=("DewertOkin GmbH", "CU170"),
+            ),
+            patch.object(
+                AdjustableBedCoordinator,
+                "_async_verify_bonded",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            coordinator = AdjustableBedCoordinator(hass, entry)
+            result = await coordinator.async_connect()
+
+        assert result is True
+        assert coordinator.bed_type == BED_TYPE_LEGGETT_OKIN
+        assert coordinator.controller.__class__.__name__ == "LeggettOkinController"
+        assert coordinator.disable_angle_sensing is True
+        assert entry.data[CONF_BED_TYPE] == BED_TYPE_LEGGETT_OKIN
+        assert entry.data[CONF_DISABLE_ANGLE_SENSING] is True
+        assert coordinator.motor_pulse_count == 5
+        assert coordinator.motor_pulse_delay_ms == 200
+        assert entry.data[CONF_MOTOR_PULSE_COUNT] == 5
+        assert entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 200
 
 
 

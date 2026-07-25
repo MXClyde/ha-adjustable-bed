@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
@@ -131,8 +131,8 @@ class TestOkinDotRemoteTable:
         remote = OKIN_UUID_REMOTES[variant]
         assert remote.dot is True
         assert remote.flat == 0x8000000
-        # DOT light keys are hold-style per the backend (5s @ 100ms).
-        assert remote.toggle_lights == OkinUuidComplexCommand(0x20000, 50, 100)
+        # UBL timing metadata does not make a button press repeat automatically.
+        assert remote.toggle_lights == 0x20000
 
     @pytest.mark.parametrize(
         ("variant", "motors"),
@@ -286,7 +286,8 @@ class TestOkinDotController:
 
         controller = coordinator.controller
         assert controller.supports_preset_anti_snore is True
-        await controller.preset_anti_snore()
+        with patch("custom_components.adjustable_bed.beds.okin_uuid.asyncio.sleep"):
+            await controller.preset_anti_snore()
 
         writes = _data_writes(mock_bleak_client)
         assert writes[0][0][1] == bytes([0x05, 0x02, 0x00, 0x00, 0x40, 0x00, 0x00])
@@ -387,7 +388,8 @@ class TestOkinDotController:
         coordinator = AdjustableBedCoordinator(hass, _make_entry(hass))
         await coordinator.async_connect()
 
-        await coordinator.controller.preset_flat()
+        with patch("custom_components.adjustable_bed.beds.okin_uuid.asyncio.sleep"):
+            await coordinator.controller.preset_flat()
 
         writes = _data_writes(mock_bleak_client)
         assert writes[0][0][1] == bytes([0x05, 0x02, 0x08, 0x00, 0x00, 0x00, 0x00])
@@ -408,7 +410,8 @@ class TestOkinDotController:
 
         controller = coordinator.controller
         assert controller.supports_preset_anti_snore is True
-        await controller.preset_anti_snore()
+        with patch("custom_components.adjustable_bed.beds.okin_uuid.asyncio.sleep"):
+            await controller.preset_anti_snore()
 
         writes = _data_writes(mock_bleak_client)
         assert writes[0][0][1] == bytes([0x05, 0x02, 0x00, 0x00, 0x40, 0x00, 0x00])
