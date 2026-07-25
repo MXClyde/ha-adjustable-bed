@@ -14,6 +14,45 @@ OCTO Smart Control also recognizes one-motor products that use the same
 protocol family. The integration supports the official `RTV` **Lift 1M** as a
 separate TV Lift device.
 
+### Bed brands that ship OCTO actuators
+
+OCTO Smart Control re-brands itself per OEM: the receiver reports a customer ID
+in `SYSTEM_DEVICEINFO`, and the app looks that up in a bundled `brandinginfo.json`
+to pick a logo and colour scheme. That table is effectively OCTO's OEM customer
+list, so a bed sold under any of these brands is very likely an OCTO base and
+should work with this integration:
+
+| Customer ID | Brand |
+|-------------|-------|
+| `00000001` | EcoBed |
+| `00000003` | sleepling |
+| `00000004` | sleepwell |
+| `0000000A` | bett1.de |
+| `0000000B` | Hüsler Nest |
+| `0000000C` | SWISSpur Schlafkomfort |
+| `0000000D` | BW (member of the JAB Anstoetz Group) |
+| `0000000E` | Dunlopillo |
+| `0000000F` | selecta by RöWa |
+| `00000010` | spirit by Hilding Anders |
+| `00000011` | Dorsal |
+| `00000012` | Werkmeister |
+| `00000013` | Inarredo |
+| `00000014` | Velda |
+| `00000100`, `00000101` | Swiss Sense |
+| `0000C054` | cosyworld |
+
+`00000000` is OCTO Actuators itself, `00000002` is a placeholder ("pink dummy"),
+`FFFFFFFD`/`FFFFFFFE` are demo entries, and `FFFFFFFF` marks a receiver whose
+customer ID is not app-enabled (the app then shows "This hardware does not
+provide app support. Please contact your dealer"). That last one is a licensing
+check and is unrelated to the PIN lock.
+
+Brand names are taken from `brandinginfo.json` in OCTO Smart Control 1.03.01
+and cross-checked against the bundled logo artwork, which is why two differ
+from the raw JSON labels: `00000003` is styled *sleepling*, and `0000000F` is
+RöWa's *selecta* line. This list is what the app knows and is not exhaustive:
+an OEM absent here can still use OCTO hardware.
+
 ## Apps
 
 | Analyzed | App | Package ID |
