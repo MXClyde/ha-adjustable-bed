@@ -698,17 +698,41 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
 
         download_url = register_download(hass, filepath)
         notification_count = len(report.get("notifications", []))
-        evidence_warnings = report.get("evidence", {}).get("warnings", [])
+        evidence = report.get("evidence", {})
+        evidence_warnings = evidence.get("warnings", [])
         warning_summary = ""
         if evidence_warnings:
             warning_summary = "\n\n**Capture warnings:**\n" + "\n".join(
                 f"- {warning}" for warning in evidence_warnings
             )
+
+        # A bundle without logs usually cannot explain why a command failed, and
+        # the user only learns that after a maintainer asks for a second one. Say
+        # it up front, at the moment they still have the bed in front of them.
+        logs_missing = include_logs and evidence.get("log_capture_status") == "unavailable"
+        logging_notice = ""
+        if logs_missing:
+            _LOGGER.warning(
+                "Support bundle for %s was generated without logs: Home Assistant "
+                "file logging is disabled",
+                address,
+            )
+            logging_notice = (
+                "\n\n⚠️ **This bundle contains no logs.** Home Assistant file logging "
+                "is disabled, so the reason a command failed is usually not "
+                "recoverable from it. To capture a complete bundle, add\n\n"
+                "```yaml\nlogger:\n  default: warning\n  logs:\n"
+                "    custom_components.adjustable_bed: debug\n```\n\n"
+                "to `configuration.yaml`, restart Home Assistant, reproduce the "
+                "problem, then run this service again."
+            )
+
         async_create(
             hass,
             f"[**Download support bundle**]({download_url})\n\n"
             f"Captured {notification_count} notifications over "
             f"{capture_duration} seconds."
+            f"{logging_notice}"
             f"{warning_summary}\n\n"
             "Attach this JSON file when reporting unsupported or broken beds.\n\n"
             f"File path: `{filepath}`",

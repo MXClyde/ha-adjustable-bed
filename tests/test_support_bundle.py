@@ -1369,3 +1369,87 @@ class TestSupportBundle:
 
         await coordinator.async_execute_controller_command(_user_command)
         assert coordinator.command_trace[-1]["operation_name"] == "command"
+
+
+class TestSupportBundleLoggingWarning:
+    """A bundle without logs rarely explains a failure - say so immediately."""
+
+    def test_evidence_warning_tells_the_user_how_to_enable_logging(self):
+        """The warning has to be actionable, not just descriptive."""
+        evidence = _build_evidence_summary(
+            capture_duration=0,
+            include_logs=True,
+            recent_logs=[
+                {
+                    "timestamp": "2026-07-25T00:00:00+00:00",
+                    "level": "INFO",
+                    "name": "adjustable_bed",
+                    "message": "Could not read /config/home-assistant.log: missing",
+                }
+            ],
+            diagnostic_report={"command_trace": [], "notification_summary": {}},
+            reproduction_command_trace=[{"command_origin": "write_command"}],
+            pairing={},
+            bluetooth_info={"scanners": []},
+            configured=True,
+            controller={"initialized": True},
+        )
+
+        assert evidence["log_capture_status"] == "unavailable"
+        warning = next(w for w in evidence["warnings"] if "file logging" in w)
+        assert "configuration.yaml" in warning
+
+    async def test_notification_flags_a_bundle_generated_without_logs(
+        self,
+        hass: HomeAssistant,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """The persistent notification is what the user actually reads."""
+        from homeassistant.core import ServiceCall
+
+        from custom_components.adjustable_bed.services import (
+            handle_generate_support_bundle,
+        )
+
+        report = {
+            "notifications": [],
+            "evidence": {"log_capture_status": "unavailable", "warnings": []},
+        }
+        created: list[tuple[str, str]] = []
+
+        def _capture_notification(_hass, message, title=None, notification_id=None):
+            created.append((str(title), message))
+
+        call = ServiceCall(
+            hass,
+            DOMAIN,
+            "generate_support_bundle",
+            {"target_address": "AA:BB:CC:DD:EE:FF", "capture_duration": 5},
+        )
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.support_bundle.generate_support_bundle",
+                AsyncMock(return_value=report),
+            ),
+            patch(
+                "custom_components.adjustable_bed.support_bundle.save_support_bundle",
+                MagicMock(return_value="/config/bundle.json"),
+            ),
+            patch(
+                "custom_components.adjustable_bed.download.register_download",
+                MagicMock(return_value="/api/download/bundle.json"),
+            ),
+            patch(
+                "homeassistant.components.persistent_notification.async_create",
+                _capture_notification,
+            ),
+        ):
+            await handle_generate_support_bundle(call)
+
+        assert len(created) == 1
+        title, message = created[0]
+        assert title == "Adjustable Bed Support Bundle Ready"
+        assert "This bundle contains no logs" in message
+        assert "logger:" in message
+        assert "file logging is disabled" in caplog.text

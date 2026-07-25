@@ -697,8 +697,9 @@ def _build_evidence_summary(
         warnings.append("Recent logs were not requested for this bundle.")
     elif log_status == "unavailable":
         warnings.append(
-            "Home Assistant file logging was unavailable, so the reproduction log "
-            "is missing."
+            "Home Assistant file logging is disabled, so the bundle contains no log. "
+            "Add `logger:` to configuration.yaml, restart, reproduce the problem, "
+            "then generate the bundle again."
         )
     elif log_status == "empty":
         warnings.append("No relevant Adjustable Bed or Bluetooth log entries were found.")
