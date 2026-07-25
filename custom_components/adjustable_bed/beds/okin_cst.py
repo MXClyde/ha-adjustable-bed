@@ -29,13 +29,19 @@ from bleak.exc import BleakError
 
 from ..const import (
     OKIMAT_WRITE_CHAR_UUID,
+    OKIN_CST_POSITION_AXES,
     OKIN_FOOT_MAX_ANGLE,
     OKIN_FOOT_MAX_RAW,
     OKIN_HEAD_MAX_ANGLE,
     OKIN_HEAD_MAX_RAW,
     OKIN_POSITION_NOTIFY_CHAR_UUID,
 )
-from .base import BedController
+from .base import (
+    POSITION_UNIT_DEGREES,
+    BedController,
+    PositionNumberSpec,
+    build_position_number_spec,
+)
 from .okin_protocol import build_cst_command
 
 if TYPE_CHECKING:
@@ -140,6 +146,24 @@ class OkinCstController(BedController):
     @property
     def supports_preset_incline(self) -> bool:
         return True
+
+    @property
+    def position_number_specs(self) -> tuple[PositionNumberSpec, ...]:
+        """Expose only the axes CST publishes feedback for.
+
+        CST reports angles for back and legs only, whatever motor count the user
+        configured, so this does not fall back to the standard motor_count gate.
+        """
+        return tuple(
+            build_position_number_spec(
+                axis,
+                max_value=self._coordinator.get_max_angle(axis),
+                unit=POSITION_UNIT_DEGREES,
+            )
+            # sorted() because OKIN_CST_POSITION_AXES is a frozenset and entity
+            # creation order must not vary between runs.
+            for axis in sorted(OKIN_CST_POSITION_AXES)
+        )
 
     @property
     def supports_memory_presets(self) -> bool:

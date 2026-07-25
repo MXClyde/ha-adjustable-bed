@@ -143,10 +143,8 @@ def test_neutral_axis_builds_a_generic_cover_description() -> None:
     """An APK-proven axis with tentative semantics must still create an entity."""
     controller, _client = _controller("HHC0000040CDEF")
     auxiliary = next(spec for spec in controller.motor_control_specs if spec.key == "auxiliary_1")
-    coordinator = MagicMock()
-    coordinator.bed_type = "motosleep"
 
-    description = _build_cover_description(coordinator, auxiliary)
+    description = _build_cover_description(auxiliary)
 
     assert description.key == "auxiliary_1"
     assert description.translation_key == "auxiliary_1"

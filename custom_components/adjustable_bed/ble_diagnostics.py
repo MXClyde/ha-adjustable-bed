@@ -725,10 +725,8 @@ class BLEDiagnosticRunner:
                 _LOGGER.debug("Registering raw notification callback with coordinator")
                 self.coordinator.set_raw_notify_callback(self._raw_notify_callback)
                 controller = self.coordinator.controller
-                requires_notify_channel = bool(
-                    controller is not None
-                    and getattr(controller, "requires_notification_channel", False)
-                    is True
+                requires_notify_channel = (
+                    controller is not None and controller.requires_notification_channel
                 )
                 if (
                     self.coordinator.disable_angle_sensing

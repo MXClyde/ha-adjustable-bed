@@ -59,7 +59,7 @@ from custom_components.adjustable_bed.const import (
 )
 from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
 
-from .conftest import TEST_ADDRESS, TEST_NAME
+from .conftest import TEST_ADDRESS, TEST_NAME, make_controller_mock
 
 
 class TestCoordinatorInit:
@@ -270,7 +270,7 @@ class TestCoordinatorConnection:
             patch(
                 "custom_components.adjustable_bed.coordinator.create_controller",
                 new_callable=AsyncMock,
-                return_value=MagicMock(),
+                return_value=make_controller_mock(),
             ),
         ):
             coordinator = AdjustableBedCoordinator(hass, entry)
@@ -731,7 +731,7 @@ class TestCoordinatorPositionSeek:
         coordinator._client.is_connected = True
         coordinator._position_data["legs"] = 0.0
 
-        controller = MagicMock()
+        controller = make_controller_mock()
         controller.supports_direct_position_control = False
         controller.reverses_position_seek_on_overshoot = False
         controller.uses_custom_position_seek_steps = True
@@ -781,7 +781,7 @@ class TestCoordinatorPositionSeek:
         coordinator._client.is_connected = True
         coordinator._position_data["legs"] = 0.0
 
-        controller = MagicMock()
+        controller = make_controller_mock()
         controller.supports_direct_position_control = False
         controller.reverses_position_seek_on_overshoot = True
         controller.uses_custom_position_seek_steps = False
@@ -830,7 +830,7 @@ class TestCoordinatorPositionSeek:
         coordinator._client.is_connected = True
         coordinator._position_data["legs"] = 0.0
 
-        controller = MagicMock()
+        controller = make_controller_mock()
         controller.supports_direct_position_control = False
         controller.reverses_position_seek_on_overshoot = False
         controller.uses_custom_position_seek_steps = True
@@ -883,7 +883,7 @@ class TestCoordinatorPositionSeek:
         coordinator._client.is_connected = True
         coordinator._position_data["legs"] = 0.0
 
-        controller = MagicMock()
+        controller = make_controller_mock()
         controller.supports_direct_position_control = False
         controller.reverses_position_seek_on_overshoot = False
         controller.uses_custom_position_seek_steps = True
@@ -938,7 +938,7 @@ class TestCoordinatorPositionSeek:
         coordinator._client.is_connected = True
         coordinator._position_data["legs"] = 0.0
 
-        controller = MagicMock()
+        controller = make_controller_mock()
         controller.supports_direct_position_control = False
         controller.reverses_position_seek_on_overshoot = False
         controller.uses_custom_position_seek_steps = True
@@ -1036,7 +1036,7 @@ class TestCoordinatorPositionSeek:
             patch(
                 "custom_components.adjustable_bed.coordinator.create_controller",
                 new_callable=AsyncMock,
-                return_value=MagicMock(),
+                return_value=make_controller_mock(),
             ),
         ):
             coordinator = AdjustableBedCoordinator(hass, entry)
@@ -1092,7 +1092,7 @@ class TestCoordinatorPositionSeek:
             patch(
                 "custom_components.adjustable_bed.coordinator.create_controller",
                 new_callable=AsyncMock,
-                return_value=MagicMock(),
+                return_value=make_controller_mock(),
             ) as mock_create_controller,
         ):
             coordinator = AdjustableBedCoordinator(hass, entry)
@@ -1144,7 +1144,7 @@ class TestCoordinatorPositionSeek:
             patch(
                 "custom_components.adjustable_bed.coordinator.create_controller",
                 new_callable=AsyncMock,
-                return_value=MagicMock(),
+                return_value=make_controller_mock(),
             ),
             patch(
                 "custom_components.adjustable_bed.coordinator.bluetooth.async_discovered_service_info",
@@ -1202,7 +1202,7 @@ class TestCoordinatorPositionSeek:
             patch(
                 "custom_components.adjustable_bed.coordinator.create_controller",
                 new_callable=AsyncMock,
-                return_value=MagicMock(),
+                return_value=make_controller_mock(),
             ),
             patch(
                 "custom_components.adjustable_bed.coordinator.bluetooth.async_discovered_service_info",

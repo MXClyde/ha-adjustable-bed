@@ -49,7 +49,13 @@ from ..const import (
     KEESON_VARIANT_SINO,
     KEESON_VARIANT_SLEEP_HARMONY,
 )
-from .base import BedController, MotorControlSpec
+from .base import (
+    POSITION_UNIT_PERCENT,
+    BedController,
+    MotorControlSpec,
+    PositionNumberSpec,
+    build_position_number_spec,
+)
 from .okin_protocol import int_to_bytes
 
 if TYPE_CHECKING:
@@ -645,6 +651,29 @@ class KeesonController(BedController):
             "tilt": "keeson_head",
             "feet": "keeson_legs",
         }
+
+    @property
+    def position_number_specs(self) -> tuple[PositionNumberSpec, ...]:
+        """Return Keeson's percentage sliders.
+
+        Keeson remotes are labelled head/feet, but the firmware reports those
+        axes as "back"/"legs" in its position frames, so the entity keys and the
+        position keys deliberately differ. Positions are percentages, not angles,
+        so the user's angle calibration does not apply.
+
+        Only the Ergomotion variant reports positions at all; the shared Keeson
+        protocol is also used by Serta and OKIN FFE frames, which report none.
+        """
+        if self._variant != KEESON_VARIANT_ERGOMOTION:
+            return ()
+        return (
+            build_position_number_spec(
+                "head", max_value=100.0, unit=POSITION_UNIT_PERCENT, position_key="back"
+            ),
+            build_position_number_spec(
+                "feet", max_value=100.0, unit=POSITION_UNIT_PERCENT, position_key="legs"
+            ),
+        )
 
     @property
     def motor_control_specs(self) -> tuple[MotorControlSpec, ...]:

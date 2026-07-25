@@ -145,15 +145,15 @@ async def async_setup_entry(
     coordinator: AdjustableBedCoordinator = hass.data[DOMAIN][entry.entry_id]
     has_massage = entry.data.get(CONF_HAS_MASSAGE, False)
     controller = coordinator.controller
-    if controller is not None and getattr(controller, "auto_enable_massage", False):
+    if controller is not None and controller.auto_enable_massage:
         has_massage = True
 
     entities: list[SelectEntity] = []
 
     # Set up massage timer select (only for beds with massage and timer support)
     if has_massage and controller is not None:
-        if getattr(controller, "supports_massage_timer", False):
-            timer_options = getattr(controller, "massage_timer_options", [])
+        if controller.supports_massage_timer:
+            timer_options = controller.massage_timer_options
             if timer_options:
                 _LOGGER.debug(
                     "Setting up massage timer select for %s (options: %s)",
@@ -190,7 +190,7 @@ async def async_setup_entry(
             _async_remove_stale_select_entity(hass, coordinator, LIGHT_TIMER_DESCRIPTION.key)
 
         thermal_timer_options = list(getattr(controller, THERMAL_TIMER_DESCRIPTION.options_attr, []))
-        thermal_sides = tuple(getattr(controller, "thermal_climate_sides", ()))
+        thermal_sides = controller.thermal_climate_sides
         if thermal_sides and thermal_timer_options:
             _LOGGER.debug(
                 "Setting up side-specific thermal timer selects for %s (sides: %s, options: %s)",
@@ -231,7 +231,7 @@ async def async_setup_entry(
         footwarming_timer_options = list(
             getattr(controller, FOOTWARMING_TIMER_DESCRIPTION.options_attr, [])
         )
-        footwarming_sides = tuple(getattr(controller, "footwarming_climate_sides", ()))
+        footwarming_sides = controller.footwarming_climate_sides
         if footwarming_sides and footwarming_timer_options:
             _LOGGER.debug(
                 "Setting up side-specific footwarming timer selects for %s (sides: %s, options: %s)",
@@ -273,12 +273,8 @@ async def async_setup_entry(
                     )
                 )
 
-    foundation_preset_sides: tuple[str, ...] = tuple(
-        getattr(controller, "foundation_preset_sides", ())
-    )
-    foundation_preset_options: list[str] = list(
-        getattr(controller, "foundation_preset_options", ())
-    )
+    foundation_preset_sides = controller.foundation_preset_sides if controller else ()
+    foundation_preset_options = controller.foundation_preset_options if controller else []
     if foundation_preset_sides and foundation_preset_options:
         _LOGGER.debug(
             "Setting up side-specific foundation preset selects for %s (sides: %s, options: %s)",

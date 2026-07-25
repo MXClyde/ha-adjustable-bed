@@ -32,6 +32,8 @@ from custom_components.adjustable_bed.const import (
 )
 from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
 
+from .conftest import make_controller_mock
+
 
 @pytest.fixture
 def _shorten_mocked_config_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -382,7 +384,7 @@ class TestJensenCoordinatorAuthRefresh:
         coordinator = AdjustableBedCoordinator(hass, mock_jensen_config_entry)
         coordinator._client = MagicMock()
         coordinator._client.is_connected = True
-        coordinator._controller = MagicMock()
+        coordinator._controller = make_controller_mock()
         coordinator._controller.send_pin = AsyncMock()
         coordinator._controller.command_called = AsyncMock()
 
@@ -407,7 +409,7 @@ class TestJensenCoordinatorAuthRefresh:
         coordinator = AdjustableBedCoordinator(hass, mock_jensen_config_entry)
         coordinator._client = MagicMock()
         coordinator._client.is_connected = True
-        coordinator._controller = MagicMock()
+        coordinator._controller = make_controller_mock()
         coordinator._controller.send_pin = AsyncMock()
         coordinator._controller.write_command = AsyncMock()
 
@@ -435,7 +437,7 @@ class TestJensenCoordinatorAuthRefresh:
         coordinator = AdjustableBedCoordinator(hass, mock_jensen_config_entry)
         coordinator._client = MagicMock()
         coordinator._client.is_connected = True
-        coordinator._controller = MagicMock()
+        coordinator._controller = make_controller_mock()
         coordinator._controller.send_pin = AsyncMock()
         coordinator._controller.stop_all = AsyncMock()
 
@@ -477,7 +479,7 @@ class TestJensenCoordinatorAuthRefresh:
         coordinator = AdjustableBedCoordinator(hass, mock_jensen_config_entry)
         coordinator._client = MagicMock()
         coordinator._client.is_connected = True
-        coordinator._controller = MagicMock()
+        coordinator._controller = make_controller_mock()
         coordinator._controller.send_pin = AsyncMock()
         coordinator._controller.supports_direct_position_control = True
         coordinator._controller.angle_to_native_position = MagicMock(return_value=123)
@@ -516,7 +518,7 @@ class TestJensenCoordinatorAuthRefresh:
         coordinator = AdjustableBedCoordinator(hass, mock_jensen_config_entry)
         coordinator._client = MagicMock()
         coordinator._client.is_connected = True
-        coordinator._controller = MagicMock()
+        coordinator._controller = make_controller_mock()
         coordinator._controller.send_pin = AsyncMock()
         coordinator._controller.supports_direct_position_control = True
         coordinator._controller.angle_to_native_position = MagicMock(return_value=55)

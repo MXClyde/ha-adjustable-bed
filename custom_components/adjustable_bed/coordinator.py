@@ -127,13 +127,9 @@ from .const import (
     OKIN_CST_POSITION_AXES,
     OKIN_FOOT_MAX_ANGLE,
     OKIN_HEAD_MAX_ANGLE,
-    POSITION_CHECK_INTERVAL,
     POSITION_MODE_ACCURACY,
     POSITION_OVERSHOOT_TOLERANCE,
     POSITION_SEEK_TIMEOUT,
-    POSITION_STALL_COUNT,
-    POSITION_STALL_THRESHOLD,
-    POSITION_TOLERANCE,
     REVERIE_BACK_MAX_ANGLE,
     RICHMAT_REMOTE_AUTO,
     VARIANT_AUTO,
@@ -593,6 +589,10 @@ class AdjustableBedCoordinator:
         Returns:
             Maximum angle in degrees for the specified motor.
         """
+        # Deliberately keyed on bed type rather than the controller's
+        # motor_max_angles: this limit must hold while disconnected, so that
+        # set_position validation still rejects a target the frame cannot reach
+        # when the controller is momentarily absent.
         if position_key in ("back", "head"):
             if self._bed_type == BED_TYPE_OKIN_CST:
                 return OKIN_HEAD_MAX_ANGLE
@@ -3191,9 +3191,7 @@ class AdjustableBedCoordinator:
             _LOGGER.warning("Cannot start notifications: no controller available")
             return
 
-        requires_notify_channel = getattr(self._controller, "requires_notification_channel", False)
-        if not isinstance(requires_notify_channel, bool):
-            requires_notify_channel = False
+        requires_notify_channel = self._controller.requires_notification_channel
 
         # Some controllers depend on notifications for command responses or
         # authentication even when angle sensing is disabled.
@@ -3694,9 +3692,15 @@ class AdjustableBedCoordinator:
                     _LOGGER.error("Cannot seek position: no controller available")
                     raise NoControllerError("No controller available")
 
+                # Pin the controller for the whole seek. A disconnect callback can
+                # clear self._controller while we await below, and every step of the
+                # seek -- including the STOP in the finally block -- must keep acting
+                # on the controller we validated rather than dereferencing None.
+                controller = self._controller
+
                 await self._async_refresh_controller_auth()
 
-                supports_direct_position_control = self._controller.supports_direct_position_control
+                supports_direct_position_control = controller.supports_direct_position_control
 
                 # Get current position, attempting a read if not available.
                 # Direct-position controllers can operate without a current reading.
@@ -3713,47 +3717,14 @@ class AdjustableBedCoordinator:
                             f"Cannot seek {position_key}: no position data available"
                         )
 
-                position_tolerance = getattr(
-                    self._controller, "position_seek_tolerance", POSITION_TOLERANCE
+                position_tolerance = controller.position_seek_tolerance
+                position_check_interval = controller.position_seek_check_interval
+                position_stall_count = controller.position_seek_stall_count
+                position_stall_threshold = controller.position_seek_stall_threshold
+                chain_seek_steps = controller.chains_position_seek_steps_while_moving
+                position_seek_chain_min_remaining_distance = (
+                    controller.position_seek_chain_min_remaining_distance
                 )
-                if not isinstance(position_tolerance, (int, float)):
-                    position_tolerance = POSITION_TOLERANCE
-                position_check_interval = getattr(
-                    self._controller,
-                    "position_seek_check_interval",
-                    POSITION_CHECK_INTERVAL,
-                )
-                if not isinstance(position_check_interval, (int, float)):
-                    position_check_interval = POSITION_CHECK_INTERVAL
-                position_stall_count = getattr(
-                    self._controller, "position_seek_stall_count", POSITION_STALL_COUNT
-                )
-                if not isinstance(position_stall_count, int):
-                    position_stall_count = POSITION_STALL_COUNT
-                position_stall_threshold = getattr(
-                    self._controller,
-                    "position_seek_stall_threshold",
-                    POSITION_STALL_THRESHOLD,
-                )
-                if not isinstance(position_stall_threshold, (int, float)):
-                    position_stall_threshold = POSITION_STALL_THRESHOLD
-                chain_seek_steps = getattr(
-                    self._controller,
-                    "chains_position_seek_steps_while_moving",
-                    False,
-                )
-                if not isinstance(chain_seek_steps, bool):
-                    chain_seek_steps = False
-                position_seek_chain_min_remaining_distance = getattr(
-                    self._controller,
-                    "position_seek_chain_min_remaining_distance",
-                    position_tolerance,
-                )
-                if not isinstance(
-                    position_seek_chain_min_remaining_distance,
-                    (int, float),
-                ):
-                    position_seek_chain_min_remaining_distance = position_tolerance
 
                 # Check if already at target (within tolerance)
                 if (
@@ -3785,7 +3756,7 @@ class AdjustableBedCoordinator:
                 # Check if controller supports direct position control (e.g., Reverie)
                 # This bypasses the incremental seek loop for beds that can set positions directly
                 if supports_direct_position_control:
-                    native_position = self._controller.angle_to_native_position(
+                    native_position = controller.angle_to_native_position(
                         position_key, target_angle
                     )
                     _LOGGER.debug(
@@ -3793,7 +3764,7 @@ class AdjustableBedCoordinator:
                         position_key,
                         native_position,
                     )
-                    await self._controller.set_motor_position(position_key, native_position)
+                    await controller.set_motor_position(position_key, native_position)
                     self._handle_position_update(position_key, target_angle)
                     return  # finally block handles disconnect timer
 
@@ -3806,7 +3777,6 @@ class AdjustableBedCoordinator:
 
                 # Determine initial direction
                 moving_up = target_angle > current_angle
-                controller = self._controller
                 reverse_on_overshoot = controller.reverses_position_seek_on_overshoot
                 use_custom_seek_steps = controller.uses_custom_position_seek_steps
 
@@ -3916,8 +3886,8 @@ class AdjustableBedCoordinator:
                             )
                             # Only send explicit stop for controllers that don't auto-stop
                             # (Linak auto-stops and explicit STOP can cause reverse blips)
-                            if not getattr(self._controller, "auto_stops_on_idle", False):
-                                await move_stop_fn(self._controller)
+                            if not controller.auto_stops_on_idle:
+                                await move_stop_fn(controller)
                                 await asyncio.sleep(0.3)  # Ensure stop completes before reversal
                             # Check if a new stop was requested while we were stopping
                             if self._cancel_counter > entry_cancel_count:
@@ -3937,8 +3907,8 @@ class AdjustableBedCoordinator:
                             )
                             # Only send explicit stop for controllers that don't auto-stop
                             # (Linak auto-stops and explicit STOP can cause reverse blips)
-                            if not getattr(self._controller, "auto_stops_on_idle", False):
-                                await move_stop_fn(self._controller)
+                            if not controller.auto_stops_on_idle:
+                                await move_stop_fn(controller)
                                 await asyncio.sleep(0.3)  # Ensure stop completes before reversal
                             # Check if a new stop was requested while we were stopping
                             if self._cancel_counter > entry_cancel_count:
@@ -3994,10 +3964,10 @@ class AdjustableBedCoordinator:
                 finally:
                     # Stop the motor unless it auto-stops on idle
                     # Some controllers (e.g., Linak) auto-stop and sending explicit
-                    # STOP can cause brief reverse movement
-                    if not getattr(self._controller, "auto_stops_on_idle", False):
+                    # STOP can cause brief reverse movement.
+                    if not controller.auto_stops_on_idle:
                         try:
-                            await move_stop_fn(self._controller)
+                            await move_stop_fn(controller)
                         except Exception:
                             _LOGGER.exception(
                                 "CRITICAL: Failed to stop motor %s - manual intervention may be required",

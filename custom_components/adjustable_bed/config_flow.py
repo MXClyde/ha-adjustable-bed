@@ -50,7 +50,6 @@ from .const import (
     BED_TYPE_DIAGNOSTIC,
     BED_TYPE_JENSEN,
     BED_TYPE_KAIDI,
-    BED_TYPE_KEESON,
     BED_TYPE_LEGGETT_GEN2,
     BED_TYPE_LEGGETT_OKIN,
     BED_TYPE_LEGGETT_PLATT,
@@ -104,7 +103,6 @@ from .const import (
     DEFAULT_POSITION_MODE,
     DEFAULT_PROTOCOL_VARIANT,
     DOMAIN,
-    KEESON_VARIANT_ERGOMOTION,
     LEGGETT_VARIANT_GEN2,
     MALOUF_LAYOUT_AUTO,
     MALOUF_LAYOUTS,
@@ -117,6 +115,7 @@ from .const import (
     RICHMAT_REMOTES,
     VARIANT_AUTO,
     DetectionResult,
+    bed_type_has_position_feedback,
     get_richmat_features,
     get_richmat_motor_count,
     passive_position_reconciliation_default_enabled,
@@ -199,13 +198,6 @@ def _is_valid_motor_count(
 ) -> bool:
     """Return whether a motor count is valid for the selected protocol."""
     return motor_count in _motor_count_options(bed_type, protocol_variant)
-
-
-def _has_position_feedback(bed_type: str | None, protocol_variant: str) -> bool:
-    """Return whether the selected protocol exposes motor position feedback."""
-    return bed_type in BEDS_WITH_POSITION_FEEDBACK or (
-        bed_type == BED_TYPE_KEESON and protocol_variant == KEESON_VARIANT_ERGOMOTION
-    )
 
 
 def _default_motor_count(
@@ -1692,9 +1684,8 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         defaults_bed_type = preselected_bed_type or confident_bed_type
         if defaults_bed_type:
             # Keeson with Ergomotion variant supports position feedback
-            has_position_feedback = defaults_bed_type in BEDS_WITH_POSITION_FEEDBACK or (
-                defaults_bed_type == BED_TYPE_KEESON
-                and preselected_protocol_variant == KEESON_VARIANT_ERGOMOTION
+            has_position_feedback = bed_type_has_position_feedback(
+                defaults_bed_type, preselected_protocol_variant
             )
             default_disable_angle = not has_position_feedback
             # Use bed-specific motor pulse defaults if available
@@ -1906,9 +1897,8 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         # Determine smart defaults based on preselected bed type and variant
         if preselected_bed_type:
             # Keeson with Ergomotion variant supports position feedback
-            has_position_feedback = preselected_bed_type in BEDS_WITH_POSITION_FEEDBACK or (
-                preselected_bed_type == BED_TYPE_KEESON
-                and preselected_protocol_variant == KEESON_VARIANT_ERGOMOTION
+            has_position_feedback = bed_type_has_position_feedback(
+                preselected_bed_type, preselected_protocol_variant
             )
             default_disable_angle = not has_position_feedback
             # Use bed-specific motor pulse defaults if available
@@ -2351,12 +2341,7 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         from bleak import BleakClient
         from bleak_retry_connector import establish_connection
 
-        # Keeson exposes position feedback only on its Ergomotion variant, so
-        # mirror the same special-case the confirm step uses for angle sensing.
-        has_position_feedback = bool(bed_type) and (
-            bed_type in BEDS_WITH_POSITION_FEEDBACK
-            or (bed_type == BED_TYPE_KEESON and protocol_variant == KEESON_VARIANT_ERGOMOTION)
-        )
+        has_position_feedback = bed_type_has_position_feedback(bed_type, protocol_variant)
         report = CapabilityReport(position_feedback=has_position_feedback)
 
         try:
@@ -2921,7 +2906,7 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                 )
                 self._pending_data[CONF_MOTOR_PULSE_COUNT] = pulse_count
                 self._pending_data[CONF_MOTOR_PULSE_DELAY_MS] = pulse_delay
-                self._pending_data[CONF_DISABLE_ANGLE_SENSING] = not _has_position_feedback(
+                self._pending_data[CONF_DISABLE_ANGLE_SENSING] = not bed_type_has_position_feedback(
                     requested_bed_type,
                     requested_variant,
                 )
@@ -2945,14 +2930,14 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                 user_input.pop(CONF_PROTOCOL_VARIANT, None)
             if (
                 self.config_entry.data.get(CONF_BED_TYPE) != bed_type
-                and _has_position_feedback(bed_type, form_variant)
-                != _has_position_feedback(bed_type, requested_variant)
+                and bed_type_has_position_feedback(bed_type, form_variant)
+                != bed_type_has_position_feedback(bed_type, requested_variant)
             ):
                 # Rebuild once more when the chosen variant changes position
                 # capability, so the user sees the new sensing default and can
                 # still explicitly override it on the following submission.
                 self._pending_data = {**self._pending_data, **user_input}
-                self._pending_data[CONF_DISABLE_ANGLE_SENSING] = not _has_position_feedback(
+                self._pending_data[CONF_DISABLE_ANGLE_SENSING] = not bed_type_has_position_feedback(
                     bed_type,
                     requested_variant,
                 )

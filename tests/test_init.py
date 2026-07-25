@@ -1821,7 +1821,7 @@ class TestServices:
         """Standard set_position validation should honor configured back/head calibration."""
         from homeassistant.helpers import device_registry as dr
 
-        from custom_components.adjustable_bed import _async_register_services
+        from custom_components.adjustable_bed import async_register_services
 
         entry = MockConfigEntry(
             domain=DOMAIN,
@@ -1849,6 +1849,7 @@ class TestServices:
         )
 
         coordinator = MagicMock()
+        coordinator.entry = entry
         coordinator.controller = MagicMock()
         coordinator.name = entry.title
         coordinator.disable_angle_sensing = False
@@ -1861,7 +1862,7 @@ class TestServices:
         coordinator.async_seek_position = AsyncMock()
         hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
-        await _async_register_services(hass)
+        await async_register_services(hass)
 
         await hass.services.async_call(
             DOMAIN,
@@ -1917,7 +1918,7 @@ class TestServices:
         from homeassistant.exceptions import ServiceValidationError
         from homeassistant.helpers import device_registry as dr
 
-        from custom_components.adjustable_bed import _async_register_services
+        from custom_components.adjustable_bed import async_register_services
 
         entry = MockConfigEntry(
             domain=DOMAIN,
@@ -1945,6 +1946,7 @@ class TestServices:
         )
 
         coordinator = MagicMock()
+        coordinator.entry = entry
         coordinator.controller = MagicMock()
         coordinator.name = entry.title
         coordinator.disable_angle_sensing = False
@@ -1956,7 +1958,7 @@ class TestServices:
         }[motor]
         hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
-        await _async_register_services(hass)
+        await async_register_services(hass)
 
         with pytest.raises(ServiceValidationError, match=r"Valid range: 0-50.0°"):
             await hass.services.async_call(
