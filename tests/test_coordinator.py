@@ -1845,6 +1845,75 @@ class TestBondMarkerReliability:
         # integration, so two writes would queue two reloads mid-connect.
         assert update_entry.call_count == 1
 
+    async def test_unpaired_compatibility_fallback_reports_itself_as_unpaired(
+        self,
+        hass: HomeAssistant,
+        mock_bluetooth_adapters,
+        mock_bleak_client: MagicMock,
+    ):
+        """An adapter without pair= support must not look like a paired connect.
+
+        ESPHome < 2024.3.0 raises NotImplementedError, and the coordinator
+        retries the same attempt as a plain unpaired connection. If the flag
+        kept its planned value the bond probe would judge that link as paired,
+        and the unreliable-marker latch could never release on such an adapter.
+        """
+        del mock_bluetooth_adapters
+        coordinator = self._make_bonded_coordinator(
+            hass,
+            **{CONF_BLE_BOND_MARKER_UNRELIABLE: True, CONF_BLE_BOND_ESTABLISHED: False},
+        )
+
+        adapter_result = MagicMock()
+        adapter_result.device = MagicMock()
+        adapter_result.device.address = TEST_ADDRESS
+        adapter_result.device.name = TEST_NAME
+        adapter_result.device.details = {"source": "local"}
+        adapter_result.source = "local"
+        adapter_result.rssi = -60
+        adapter_result.connectable = True
+        adapter_result.available_sources = ["local"]
+
+        calls: list[bool] = []
+
+        async def _establish(*_args, **kwargs):
+            paired = bool(kwargs.get("pair"))
+            calls.append(paired)
+            if paired:
+                raise NotImplementedError("pairing not supported")
+            return mock_bleak_client
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.coordinator.select_adapter",
+                new_callable=AsyncMock,
+                return_value=adapter_result,
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.establish_connection",
+                side_effect=_establish,
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.create_controller",
+                new_callable=AsyncMock,
+                return_value=make_controller_mock(),
+            ),
+            patch.object(
+                AdjustableBedCoordinator,
+                "_async_verify_bonded",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            assert await coordinator.async_connect() is True
+
+        # The paired attempt was tried and fell back to an unpaired one...
+        assert calls == [True, False]
+        # ...so the probe must see this connection as unpaired.
+        assert coordinator._attempt_used_pairing is False
+
+        await coordinator.async_disconnect()
+
     async def test_latch_holds_while_only_paired_connections_succeed(
         self,
         hass: HomeAssistant,

@@ -1851,6 +1851,12 @@ class AdjustableBedCoordinator:
                             pairing_details["connection_result"] = (
                                 "pairing_unsupported_connected_without_pairing"
                             )
+                            # The link that actually came up did not pair, so the
+                            # bond probe must judge it as unpaired. Leaving the
+                            # planned value here would stop the unreliable-marker
+                            # latch from ever releasing on adapters that lack
+                            # pair= support (ESPHome < 2024.3.0).
+                            self._attempt_used_pairing = False
                         else:
                             raise
                     except (BleakError, TimeoutError, OSError) as pair_err:
