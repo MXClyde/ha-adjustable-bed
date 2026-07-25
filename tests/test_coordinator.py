@@ -1738,7 +1738,9 @@ class TestBondMarkerReliability:
     therefore burned one guaranteed-failed attempt plus its backoff.
     """
 
-    def _make_bonded_coordinator(self, hass: HomeAssistant) -> AdjustableBedCoordinator:
+    def _make_bonded_coordinator(
+        self, hass: HomeAssistant, **extra_data: object
+    ) -> AdjustableBedCoordinator:
         entry = MockConfigEntry(
             domain=DOMAIN,
             title=TEST_NAME,
@@ -1751,6 +1753,7 @@ class TestBondMarkerReliability:
                 CONF_DISABLE_ANGLE_SENSING: True,
                 CONF_PREFERRED_ADAPTER: "auto",
                 CONF_BLE_BOND_ESTABLISHED: True,
+                **extra_data,
             },
             unique_id=TEST_ADDRESS,
             entry_id="bond_marker_reliability_test",
@@ -1795,6 +1798,66 @@ class TestBondMarkerReliability:
         _, use_pairing, _ = coordinator._prepare_pairing_attempt(device, pairing_details)
         assert use_pairing is True
         assert pairing_details["decision"] == "bond_marker_unreliable"
+
+    async def test_latch_releases_once_a_bond_survives_without_pairing(
+        self,
+        hass: HomeAssistant,
+    ):
+        """The latch must be self-correcting, not permanent.
+
+        A backend that rejects re-pairing an existing bond fails the paired
+        attempt, falls back via _skip_pair_next_attempt, and connects unpaired.
+        If that unpaired connection verifies as bonded, the bond clearly does
+        survive here, so keeping the latch would alternate a failed paired
+        attempt with a successful unpaired one on every single connect.
+        """
+        coordinator = self._make_bonded_coordinator(
+            hass,
+            **{CONF_BLE_BOND_MARKER_UNRELIABLE: True, CONF_BLE_BOND_ESTABLISHED: False},
+        )
+        assert coordinator._ble_bond_marker_unreliable is True
+        client = MagicMock()
+        client.is_connected = True
+        client.read_gatt_char = AsyncMock(return_value=b"CU170")
+        coordinator._client = client
+
+        # The fallback attempt connects without requesting pairing...
+        coordinator._attempt_used_pairing = False
+
+        with patch(
+            "custom_components.adjustable_bed.coordinator.delete_pairing_required_issue",
+            new_callable=AsyncMock,
+        ):
+            assert await coordinator._async_verify_bonded() is True
+
+        # ...and the probe succeeding releases the latch and re-arms the marker.
+        assert coordinator._ble_bond_marker_unreliable is False
+        assert coordinator.entry.data[CONF_BLE_BOND_MARKER_UNRELIABLE] is False
+        assert coordinator._ble_bond_established is True
+
+    async def test_latch_holds_while_only_paired_connections_succeed(
+        self,
+        hass: HomeAssistant,
+    ):
+        """A bond verified on a paired attempt says nothing about skipping pairing."""
+        coordinator = self._make_bonded_coordinator(
+            hass,
+            **{CONF_BLE_BOND_MARKER_UNRELIABLE: True, CONF_BLE_BOND_ESTABLISHED: False},
+        )
+        client = MagicMock()
+        client.is_connected = True
+        client.read_gatt_char = AsyncMock(return_value=b"CU170")
+        coordinator._client = client
+        coordinator._attempt_used_pairing = True
+
+        with patch(
+            "custom_components.adjustable_bed.coordinator.delete_pairing_required_issue",
+            new_callable=AsyncMock,
+        ):
+            assert await coordinator._async_verify_bonded() is True
+
+        assert coordinator._ble_bond_marker_unreliable is True
+        assert coordinator._ble_bond_established is False
 
     async def test_auth_failure_while_pairing_keeps_marker_trusted(
         self,

@@ -352,6 +352,10 @@ class AdjustableBedCoordinator:
         # CONF_BLE_BOND_ESTABLISHED said we were already bonded. An auth failure
         # under that condition is what proves the marker unreliable.
         self._attempt_trusted_bond_marker: bool = False
+        # Whether the most recent attempt actually requested pair=True. A bond
+        # that verifies on an attempt that did NOT pair proves the bond survives
+        # on this stack, which is what releases the latch below.
+        self._attempt_used_pairing: bool = False
 
         # Connection history tracking for diagnostics (issue #168)
         self._connection_attempt_count: int = 0
@@ -836,6 +840,28 @@ class AdjustableBedCoordinator:
             },
         )
 
+    def _clear_bond_marker_unreliable(self) -> None:
+        """Release the always-pair latch after the bond demonstrably persisted."""
+        if not self._ble_bond_marker_unreliable:
+            return
+
+        _LOGGER.info(
+            "Bond for %s survived a connection that did not request pairing; "
+            "trusting the cached bond marker again",
+            self._address,
+        )
+        self._ble_bond_marker_unreliable = False
+        if not self.entry.data.get(CONF_BLE_BOND_MARKER_UNRELIABLE):
+            return
+
+        self.hass.config_entries.async_update_entry(
+            self.entry,
+            data={
+                **self.entry.data,
+                CONF_BLE_BOND_MARKER_UNRELIABLE: False,
+            },
+        )
+
     async def _async_handle_ble_authentication_error(
         self,
         err: BleakError,
@@ -967,6 +993,12 @@ class AdjustableBedCoordinator:
             return True
 
         # Read succeeded → the encrypted link works → we are bonded.
+        if self._ble_bond_marker_unreliable and not self._attempt_used_pairing:
+            # The bond survived to a connection that never asked to pair, so
+            # whatever made the marker unreliable no longer applies (a different
+            # adapter, a firmware change, a proxy that now persists bonds). Let
+            # the marker work again rather than requesting pairing forever.
+            self._clear_bond_marker_unreliable()
         self._skip_pair_next_attempt = False
         self._mark_ble_bond_established()
         await delete_pairing_required_issue(self.hass, self._address)
@@ -1394,6 +1426,7 @@ class AdjustableBedCoordinator:
         self._attempt_trusted_bond_marker = (
             bed_requires_pairing and not use_pairing and pairing_decision == "bond_marker_present"
         )
+        self._attempt_used_pairing = use_pairing
         # Consume the transient skip flag: it only suppresses pairing for the
         # single attempt immediately following a failed pair.
         self._skip_pair_next_attempt = False
