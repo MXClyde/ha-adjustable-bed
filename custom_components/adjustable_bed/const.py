@@ -797,7 +797,22 @@ RICHMAT_NAME_PATTERNS: Final = ("qrrm", "sleep function", "x1rm", "dhn-")
 ERGOMOTION_NAME_PATTERNS: Final = ("ergomotion", "ergo", "serta-i")
 
 # Octo name patterns
-# Source: blenames.json from de.octoactuators.octosmartcontrolapp APK
+# Source: the official OCTO device table, verified 2026-07-25 against both the
+# bundled assets/www/data/blenames.json in de.octoactuators.octosmartcontrolapp
+# 1.03.01 (versionCode 10301) and the live endpoint the app refreshes it from,
+# https://octo-customer.com/getble/act= . Both returned byte-identical JSON, so
+# this list is complete and current: 14 entries, 13 of them visible.
+#
+# Two deliberate differences from that table:
+# - OCTOHDev ("OCTO hidden device", visible=0) is omitted. It is OCTO's own
+#   hidden development device, and the app suppresses it in the scanner.
+# - da1458x is ours only. It is the default name of the Dialog Semiconductor
+#   SoC used in some receivers, reported by users rather than listed by OCTO.
+#
+# Note the app matches these names with `===` on the full advertised name and
+# uses the table only to pretty-print the pairing list; it discovers devices by
+# the FFE0 service UUID. We match by prefix instead, because we need the name to
+# disambiguate FFE0 from the other protocol families that share it.
 # These are the official BLE device name prefixes for Octo controllers:
 # - RTV: Lift 1M
 # - RC2: Receiver II
@@ -1933,6 +1948,34 @@ def connection_gated_by_bond(bed_type: str, protocol_variant: str | None = None)
     if bed_type == BED_TYPE_LEGGETT_GEN2:
         return True
     return bed_type == BED_TYPE_LEGGETT_PLATT and protocol_variant == LEGGETT_VARIANT_GEN2
+
+
+def grants_one_connection_per_pairing_window(
+    bed_type: str, protocol_variant: str | None = None
+) -> bool:
+    """Return True when a live link must never be spent or thrown away.
+
+    LP Comfort Connect (Leggett & Platt Gen2) grants roughly one usable BLE
+    connection per bed power cycle: issue #385's support bundles record exactly
+    one completed connection followed by an unbroken run of connect timeouts
+    (3.3.0: ``connect_completed_total: 1`` at 39s after startup, then 41
+    consecutive failures, every one of them this bed) until the box is
+    unplugged again.
+
+    Two consequences follow for every code path that touches such a box:
+
+    1. Never open a throwaway connection. A probe or a standalone pairing
+       connect that disconnects in ``finally`` consumes the only connection the
+       coordinator was going to get.
+    2. Never trade a working link for a cleaner state. Reconnecting to "do it
+       properly" strands the bed until the user power-cycles it.
+
+    LP Control matches this: it connects once with ``autoConnect=true``, fires
+    ``createBond()`` after service discovery, never observes the result (the app
+    has no ``ACTION_BOND_STATE_CHANGED`` receiver and no bond retry anywhere),
+    and continues the session on that same link bonded or not.
+    """
+    return connection_gated_by_bond(bed_type, protocol_variant)
 
 
 # Bed types that support angle sensing (position feedback)

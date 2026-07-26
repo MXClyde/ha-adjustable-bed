@@ -24,6 +24,7 @@ from .adapter import (
     get_service_info_snapshots_by_address,
     select_adapter,
 )
+from .address_lock import async_get_connect_lock
 from .const import (
     ADAPTER_AUTO,
     CONF_PREFERRED_ADAPTER,
@@ -222,41 +223,58 @@ class BLEDiagnosticRunner:
             allow_non_connectable=True,
         )
 
-        try:
-            await self._connect()
-
-            if self._client and self._client.is_connected:
-                services_info = await self._enumerate_services()
-                device_information = await self._read_device_information()
-
-            if await self._ensure_connected():
-                try:
-                    await self._subscribe_to_notifications(services_info)
-
-                    _LOGGER.info(
-                        "Capturing notifications for %d seconds. "
-                        "Operate the physical remote to generate data.",
-                        self.capture_duration,
-                    )
-                    await asyncio.sleep(self.capture_duration)
-                finally:
-                    await self._unsubscribe_from_notifications(services_info)
-            else:
-                message = (
-                    "Skipped notification capture: connection lost and "
-                    "could not be re-established"
+        # Hold the address lock for the whole capture only when this runner owns
+        # the connection. A concurrent setup retry would otherwise run
+        # close_stale_connections_by_address() and disconnect our client
+        # mid-capture (issue #385), and leaving the block always releases it.
+        #
+        # With a coordinator we must NOT hold it: if the shared link drops,
+        # _on_disconnect() schedules _async_auto_reconnect() in a *separate*
+        # task, and the lock is only reentrant within one task. Holding it for
+        # the capture would block that reconnect for the whole capture window,
+        # losing every later notification and leaving the bed offline until
+        # cleanup. The coordinator owns that link, so let it manage it; the
+        # standalone fallback inside _connect() still takes the lock narrowly.
+        async with contextlib.AsyncExitStack() as stack:
+            if self.coordinator is None:
+                await stack.enter_async_context(
+                    async_get_connect_lock(self.hass, self.address)
                 )
-                _LOGGER.warning(message)
-                self._errors.append(message)
+            try:
+                await self._connect()
 
-        except asyncio.CancelledError:
-            raise
-        except Exception as err:
-            error_msg = f"Diagnostic error: {err}"
-            _LOGGER.exception(error_msg)
-            self._errors.append(error_msg)
-        finally:
-            await self._disconnect()
+                if self._client and self._client.is_connected:
+                    services_info = await self._enumerate_services()
+                    device_information = await self._read_device_information()
+
+                if await self._ensure_connected():
+                    try:
+                        await self._subscribe_to_notifications(services_info)
+
+                        _LOGGER.info(
+                            "Capturing notifications for %d seconds. "
+                            "Operate the physical remote to generate data.",
+                            self.capture_duration,
+                        )
+                        await asyncio.sleep(self.capture_duration)
+                    finally:
+                        await self._unsubscribe_from_notifications(services_info)
+                else:
+                    message = (
+                        "Skipped notification capture: connection lost and "
+                        "could not be re-established"
+                    )
+                    _LOGGER.warning(message)
+                    self._errors.append(message)
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                error_msg = f"Diagnostic error: {err}"
+                _LOGGER.exception(error_msg)
+                self._errors.append(error_msg)
+            finally:
+                await self._disconnect()
 
         end_time = datetime.now(UTC)
         best_snapshot = self._best_snapshot()
@@ -424,13 +442,17 @@ class BLEDiagnosticRunner:
 
             try:
                 connect_start = time.monotonic()
-                self._client = await establish_connection(
-                    BleakClient,
-                    device,
-                    f"diagnostic_{self.address}",
-                    max_attempts=1,
-                    timeout=CONNECTION_TIMEOUT,
-                )
+                # Narrow lock around our own connect. When run_diagnostics()
+                # already holds it for this capture, the reentrant lock makes
+                # this a no-op for the same task.
+                async with async_get_connect_lock(self.hass, self.address):
+                    self._client = await establish_connection(
+                        BleakClient,
+                        device,
+                        f"diagnostic_{self.address}",
+                        max_attempts=1,
+                        timeout=CONNECTION_TIMEOUT,
+                    )
                 attempt_details["connect_elapsed_seconds"] = round(
                     time.monotonic() - connect_start, 3
                 )
@@ -467,8 +489,14 @@ class BLEDiagnosticRunner:
                 self._connection_attempt_details.append(attempt_details)
 
                 if self._client is not None:
-                    with contextlib.suppress(Exception):
-                        await self._client.disconnect()
+                    # Take the address lock for the teardown too. With a
+                    # coordinator the capture deliberately does not hold it, so
+                    # an unprotected disconnect here could land inside a
+                    # competing caller's connect (issue #385). Reentrant, so it
+                    # is a no-op when the standalone capture already holds it.
+                    async with async_get_connect_lock(self.hass, self.address):
+                        with contextlib.suppress(Exception):
+                            await self._client.disconnect()
                     self._client = None
 
                 if attempt == 1:

@@ -222,3 +222,91 @@ async def create_pairing_required_issue(
 async def delete_pairing_required_issue(hass: HomeAssistant, address: str) -> None:
     """Remove the pairing-required Repairs issue once the bed is bonded."""
     async_delete_issue(hass, DOMAIN, _pairing_required_issue_id(address))
+
+
+# OCTO's own lost-PIN recovery page. Passed to the Repairs issue as a
+# placeholder because hassfest rejects literal URLs inside translation strings.
+OCTO_PIN_RECOVERY_URL = "https://octo-customer.com/pinlost/"
+
+
+def _octo_pin_required_issue_id(address: str) -> str:
+    """Return the stable Repairs issue id for a PIN-locked Octo receiver."""
+    return f"octo_pin_required_{address.replace(':', '_').lower()}"
+
+
+def update_octo_pin_required_issue(
+    hass: HomeAssistant,
+    address: str,
+    name: str,
+    pin_locked_without_pin: bool | None,
+) -> None:
+    """Raise or clear the "Octo receiver is PIN locked" Repairs issue.
+
+    A locked receiver still connects and still reports its capabilities, but
+    will not act on commands until it is authenticated. That is
+    indistinguishable from a broken protocol implementation unless we say so,
+    and the fix (enter the PIN in the options flow) is not discoverable.
+
+    ``None`` means capability discovery did not resolve the lock state, and the
+    last known state is left untouched. Retracting the warning on a transient
+    discovery timeout would be a claim we have not earned.
+    """
+    if pin_locked_without_pin is None:
+        return
+
+    issue_id = _octo_pin_required_issue_id(address)
+
+    if not pin_locked_without_pin:
+        async_delete_issue(hass, DOMAIN, issue_id)
+        return
+
+    # A locked receiver drops the link roughly every 30 seconds and every
+    # reconnect rediscovers the same lock, so log only on the transition.
+    # The issue registry survives the controller being recreated; an instance
+    # flag would not.
+    if async_get_issue_registry(hass).async_get_issue(DOMAIN, issue_id) is None:
+        _LOGGER.warning(
+            "Octo bed %s (%s) reports its PIN lock engaged but no PIN is configured. "
+            "The bed stays connected and reports its capabilities, but will not act on "
+            "commands until it is authenticated. Enter the receiver's 4-digit OCTO app "
+            "PIN in the integration options",
+            name,
+            address,
+        )
+
+    async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id,
+        is_fixable=False,
+        is_persistent=True,
+        severity=IssueSeverity.WARNING,
+        translation_key="octo_pin_required",
+        translation_placeholders={
+            "name": name,
+            "address": address,
+            "recovery_url": OCTO_PIN_RECOVERY_URL,
+        },
+        learn_more_url=(
+            "https://github.com/kristofferR/ha-adjustable-bed/blob/master/docs/beds/octo.md"
+            "#lost-pin-factory-reset"
+        ),
+    )
+
+    _LOGGER.debug(
+        "Created Repairs issue for PIN-locked Octo receiver: %s (%s)",
+        name,
+        address,
+    )
+
+
+def clear_octo_pin_required_issue(hass: HomeAssistant, address: str) -> None:
+    """Drop the PIN-locked repair without needing a successful connection.
+
+    The issue is otherwise only cleared from the connect path, so a user who
+    follows the repair and saves a PIN while the bed is unreachable would keep
+    seeing an issue claiming no PIN is configured. Callers use this when the
+    configuration itself makes the issue moot (a PIN was saved, the bed type
+    changed) or when the entry goes away.
+    """
+    async_delete_issue(hass, DOMAIN, _octo_pin_required_issue_id(address))

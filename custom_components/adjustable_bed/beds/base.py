@@ -1030,6 +1030,17 @@ class BedController(ABC):
         return False
 
     @property
+    def protocol_diagnostics(self) -> dict[str, Any]:
+        """Return protocol state worth reporting in diagnostics/support bundles.
+
+        Controllers that negotiate capabilities, authentication, or variants at
+        connect time should override this so a support bundle records what the
+        handshake actually resolved to. Never include secrets such as PINs -
+        report whether one is configured, not its value.
+        """
+        return {}
+
+    @property
     def allow_position_polling_during_commands(self) -> bool:
         """Return True if movement-time position polling is safe for this protocol.
 
@@ -1162,6 +1173,26 @@ class BedController(ABC):
         Override in subclasses that support programming.
         """
         return False
+
+    @property
+    def memory_slot_names(self) -> tuple[str | None, ...]:
+        """Return per-slot display names discovered from the bed.
+
+        Indexed from slot 1, so element 0 names memory slot 1. ``None`` (or a
+        short tuple) means the bed reported no name for that slot and the
+        generic "Memory N" label should stand. Empty by default: most protocols
+        have no concept of a named slot.
+        """
+        return ()
+
+    def is_memory_slot_programmable(self, memory_num: int) -> bool:
+        """Return whether a specific 1-based memory slot can be overwritten.
+
+        Defaults to the controller-wide capability. Override where the bed
+        reports per-slot protection, so a locked slot does not get a Save
+        button that the hardware would refuse.
+        """
+        return self.supports_memory_programming
 
     @property
     def foundation_preset_sides(self) -> tuple[str, ...]:

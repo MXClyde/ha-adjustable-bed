@@ -20,7 +20,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.exc import BleakError
@@ -44,10 +44,23 @@ OCTO_MOTOR_HEAD = 0x02
 OCTO_MOTOR_LEGS = 0x04
 OCTO_MOTOR_3 = 0x08  # Third motor (lumbar/tilt) - for beds with CAP_MOTORCOUNT > 2
 OCTO_MOTOR_4 = 0x10  # Fourth motor - for beds with CAP_MOTORCOUNT > 3
+OCTO_MOTOR_34 = OCTO_MOTOR_3 | OCTO_MOTOR_4  # CD_MOTOR34 - 4-motor combined step
+
+# CAP_MEMINFO description IDs. Source: clean-room analysis of OCTO Smart
+# Control 1.03.01; the app resolves these through translation keys md00-md04
+# and renders the raw key ("md07") for anything unmapped, so unknown IDs are
+# treated as unnamed here instead.
+OCTO_MEMORY_DESCRIPTIONS: dict[int, str] = {
+    0x01: "Anti-Snore",
+    0x02: "Zero-G",
+    0x03: "Lordose",
+    0x04: "Flat",
+}
 
 # Feature IDs
 OCTO_FEATURE_MOTORCOUNT = 0x000001  # Number of motors (CAP_MOTORCOUNT)
 OCTO_FEATURE_MEMCOUNT = 0x000002  # Number of memory positions
+OCTO_FEATURE_MEMINFO = 0x000004  # Per-slot classes and description IDs (CAP_MEMINFO)
 OCTO_FEATURE_PIN = 0x000003
 OCTO_FEATURE_SYNCHRO = 0x000101  # Synchro/linked mode capability (CAP_SYNCHRO)
 OCTO_FEATURE_LIGHT = 0x000102
@@ -63,6 +76,22 @@ OCTO_DRIVEMODE_TIMEOUT = 3.0
 
 # Feature discovery timeout
 OCTO_FEATURE_TIMEOUT = 5.0
+
+# How long to stream a memory recall before releasing the motors.
+#
+# This bound is ours, not OCTO's. In the official app a memory recall is a
+# press-and-hold control: it repeats MOTOR_MEMPOS every 350ms for exactly as
+# long as the user holds the button, and stops on release. There is no arrival
+# or completion signal anywhere in the protocol (the inbound NORMAL branch is
+# empty, and no position capability exists), and no timeout or watchdog, so a
+# headless client has no in-band way to learn that the bed has arrived.
+#
+# We therefore stream for a generous fixed window instead, long enough for a
+# full-travel move rather than the ~1s that a motor button press implies. The
+# bed stops itself at its end stops, the STOP frame is always sent afterwards,
+# and pressing Stop cancels the stream immediately.
+OCTO_MEMORY_RECALL_SECONDS = 30.0
+OCTO_MEMORY_RECALL_INTERVAL_MS = 350
 
 # Maximum encoded OCTO packet size: two delimiters plus the worst case where
 # every byte in the five-byte header and 16-bit-length data field is escaped.
@@ -107,6 +136,11 @@ class OctoController(BedController):
         self._has_rgbwi: bool = False  # True if CAP_LIGHT_RGBWI (0x000104) detected
         self._rgbwi_value_type: int | None = None  # valueType byte from discovery response
         self._memory_count: int | None = None  # None = not yet discovered
+        # CAP_MEMINFO: slot classes and per-slot description IDs
+        self._memory_mem_count: int = 0  # memCount as reported by CAP_MEMINFO
+        self._memory_fix_count: int = 0
+        self._memory_lock_count: int = 0
+        self._memory_descriptions: tuple[int, ...] = ()
         self._discovered_motor_count: int | None = None  # None = not yet discovered
         self._has_synchro: bool | None = None  # None = not yet discovered
         self._synchro_active: bool | None = None  # None = unknown
@@ -115,6 +149,7 @@ class OctoController(BedController):
         self._features_complete: asyncio.Event = (
             asyncio.Event()
         )  # Set when 0xFFFFFF sentinel received
+        self._pin_sent: bool = False  # True once a PIN packet was written this session
 
         _LOGGER.debug(
             "OctoController initialized (PIN %s)",
@@ -377,8 +412,13 @@ class OctoController(BedController):
                     self._coordinator.motor_count,
                 )
         elif feature_id == OCTO_FEATURE_PIN:
-            # value[0] = hasPin (0x01 if bed has PIN feature)
-            # value[1] = pinLock (0x01 if unlocked, other if locked)
+            # CAP_BLE_PIN. Per clean-room analysis of OCTO Smart Control 1.03.01
+            # (versionCode 10301) the record is:
+            #   characteristic[0] = the device has the PIN feature (not parsed
+            #                       here; _extract_feature_value_pair skips it)
+            #   value[0]          = a PIN is set on the device
+            #   value[1]          = 0x01 unlocked, anything else locked
+            # So _has_pin is really "a PIN is set", which is what gates us.
             self._has_pin = len(value) > 0 and value[0] == 0x01
             self._pin_locked = len(value) > 1 and value[1] != 0x01
             _LOGGER.info(
@@ -390,6 +430,8 @@ class OctoController(BedController):
             # Presence of synchro feature means bed supports linked mode
             self._has_synchro = True
             _LOGGER.info("Synchro feature detected: bed supports linked/sync mode")
+        elif feature_id == OCTO_FEATURE_MEMINFO:
+            self._handle_meminfo_response(data, value)
         elif feature_id == OCTO_FEATURE_MEMCOUNT:
             # value[0] = number of memory slots (typically 1-4)
             self._memory_count = value[0] if value else 0
@@ -413,6 +455,80 @@ class OctoController(BedController):
 
         # Signal that we received at least one feature response
         self._features_loaded.set()
+
+    def _handle_meminfo_response(self, data: list[int], value: list[int]) -> None:
+        """Parse CAP_MEMINFO (0x000004): slot classes and description IDs.
+
+        The characteristic block is three bytes, [memCount, fixCount, lockCount],
+        and the value block holds one description ID per slot. The official app
+        ignores the whole record unless the characteristic is exactly three
+        bytes, and ignores the descriptions unless there is exactly one per
+        slot, so both guards are reproduced here: a short value block must not
+        silently downgrade a locked slot into a writable one.
+        """
+        # data = [cap_id(3), flag, char_len, characteristic..., value_type, value...]
+        char_len = data[4] if len(data) > 4 else 0
+        characteristic = data[5 : 5 + char_len]
+        if len(characteristic) != 3:
+            _LOGGER.debug("Ignoring CAP_MEMINFO with %d characteristic bytes", len(characteristic))
+            return
+
+        mem_count, fix_count, lock_count = characteristic
+        # The app clamps both class counts into the slot range before use.
+        fix_count = min(fix_count, mem_count)
+        lock_count = min(lock_count, mem_count - fix_count)
+
+        self._memory_mem_count = mem_count
+        self._memory_fix_count = fix_count
+        self._memory_lock_count = lock_count
+        self._memory_descriptions = tuple(value) if len(value) == mem_count else ()
+
+        _LOGGER.info(
+            "Memory info feature detected: %d slots (%d fixed, %d locked), descriptions=%s",
+            mem_count,
+            fix_count,
+            lock_count,
+            list(self._memory_descriptions) or "not reported",
+        )
+
+    def _memory_slot_class(self, memory_num: int) -> str:
+        """Return "standard", "fix" or "lock" for a 1-based memory slot.
+
+        Classes partition the slot range contiguously with standard slots at
+        the low indices: standard, then fix, then lock.
+        """
+        # CAP_MEMINFO is optional. Without a valid record we know nothing about
+        # slot protection, and must not infer any: treating unknown as locked
+        # would hide every Save button on a bed that simply never reports it.
+        if self._memory_mem_count == 0:
+            return "standard"
+
+        # Partition on the count this MEMINFO record carried, not on
+        # CAP_MEMCOUNT: the two capabilities arrive in whatever order the bed
+        # sends them, and using a count of 0 here would drive lock_start
+        # negative and classify every slot as locked.
+        mem_count = self._memory_mem_count
+        lock_start = mem_count - self._memory_lock_count
+        fix_start = lock_start - self._memory_fix_count
+        index = memory_num - 1
+        if index >= lock_start:
+            return "lock"
+        if index >= fix_start:
+            return "fix"
+        return "standard"
+
+    @property
+    def memory_slot_names(self) -> tuple[str | None, ...]:
+        """Return per-slot names from the CAP_MEMINFO description IDs."""
+        return tuple(
+            OCTO_MEMORY_DESCRIPTIONS.get(description) for description in self._memory_descriptions
+        )
+
+    def is_memory_slot_programmable(self, memory_num: int) -> bool:
+        """Return False for locked slots, which the bed will not let us save."""
+        if not self.supports_memory_programming:
+            return False
+        return self._memory_slot_class(memory_num) != "lock"
 
     def _on_notification(self, _sender: BleakGATTCharacteristic, data: bytearray) -> None:
         """Handle BLE notifications from the bed."""
@@ -504,6 +620,59 @@ class OctoController(BedController):
         return bool(self._pin)
 
     @property
+    def pin_locked_without_pin(self) -> bool | None:
+        """Return whether the bed is PIN locked with no PIN configured.
+
+        A locked receiver still connects and still answers the capability
+        query, but will not act on commands until it is authenticated, so this
+        looks like a bed that connects fine and then does nothing. The official
+        app hides every control (motors, light and presets alike) while locked.
+        Users report the light still responding while the motors do not, which
+        is how this usually presents in practice, but that asymmetry is a field
+        observation rather than something the app establishes.
+
+        Returns None when capability discovery has not resolved CAP_PIN. That
+        is deliberately distinct from False: a transient discovery timeout must
+        not be read as "the lock was resolved", or one failed reconnect would
+        retract a correct warning.
+        """
+        if self._pin:
+            return False
+        if self._has_pin is None:
+            return None
+        return bool(self._has_pin) and bool(self._pin_locked)
+
+    @property
+    def protocol_diagnostics(self) -> dict[str, Any]:
+        """Report what connect-time capability discovery resolved to.
+
+        ``None`` means the capability was never reported. When
+        ``feature_discovery_complete`` is False, discovery timed out and the
+        non-None booleans are the fallback defaults from ``discover_features()``
+        rather than device-reported state. The configured PIN is never included.
+        """
+        return {
+            "feature_discovery_complete": self._features_complete.is_set(),
+            "has_pin": self._has_pin,
+            "pin_locked": self._pin_locked,
+            "pin_configured": bool(self._pin),
+            "pin_sent": self._pin_sent,
+            "pin_locked_without_pin": self.pin_locked_without_pin,
+            "has_lights": self._has_lights,
+            "has_rgbwi": self._has_rgbwi,
+            "memory_count": self._memory_count,
+            "memory_fix_count": self._memory_fix_count,
+            "memory_lock_count": self._memory_lock_count,
+            "memory_slot_names": list(self.memory_slot_names),
+            "discovered_motor_count": self._discovered_motor_count,
+            "has_synchro": self._has_synchro,
+            "synchro_active": self._synchro_active,
+            "keepalive_running": (
+                self._keepalive_task is not None and not self._keepalive_task.done()
+            ),
+        }
+
+    @property
     def _is_one_motor_lift(self) -> bool:
         """Return whether this controller represents an OCTO one-motor lift."""
         return self._coordinator.motor_count == 1
@@ -585,6 +754,16 @@ class OctoController(BedController):
         if self._is_one_motor_lift:
             return 0
         return self._memory_count if self._memory_count is not None else 0
+
+    @property
+    def supports_memory_programming(self) -> bool:
+        """Return True if the bed exposes saveable memory slots.
+
+        Octo saves a position with CONFIG/SAVE_MOTORPOS. Slots the bed reports
+        as locked via CAP_MEMINFO are excluded individually by
+        is_memory_slot_programmable().
+        """
+        return self.supports_memory_presets
 
     @property
     def discovered_motor_count(self) -> int | None:
@@ -691,8 +870,13 @@ class OctoController(BedController):
         self._has_rgbwi = False
         self._rgbwi_value_type = None
         self._memory_count = None
+        self._memory_mem_count = 0
+        self._memory_fix_count = 0
+        self._memory_lock_count = 0
+        self._memory_descriptions = ()
         self._discovered_motor_count = None
         self._has_synchro = None
+        self._pin_sent = False
 
         _LOGGER.debug("Requesting bed features...")
 
@@ -727,6 +911,11 @@ class OctoController(BedController):
                     self._has_synchro,
                 )
 
+                # The PIN-lock warning is deliberately not logged here: a locked
+                # receiver drops the link every ~30s, and each reconnect
+                # rediscovers the same lock. update_octo_pin_required_issue()
+                # logs it once per transition instead.
+
                 # Query current drivemode if synchro is supported
                 if self._has_synchro:
                     await self._query_drivemode()
@@ -734,9 +923,11 @@ class OctoController(BedController):
                 return True
             except TimeoutError:
                 _LOGGER.debug("Feature discovery timed out - bed may not support feature query")
-                # Set defaults for beds that don't respond to feature query
-                self._has_pin = bool(self._pin)  # Assume PIN needed if configured
-                self._pin_locked = bool(self._pin)
+                # Set defaults for beds that don't respond to feature query.
+                # _has_pin/_pin_locked deliberately stay None: requires_pin already
+                # falls back to "PIN needed if one is configured" for the unknown
+                # case, so writing that guess here would only make the support
+                # bundle report a guess as a device-reported capability.
                 self._has_lights = True  # Assume lights exist for backward compatibility
                 self._memory_count = 0  # Assume no memory support if not reported
                 self._has_synchro = False  # Assume no synchro if not reported
@@ -859,6 +1050,18 @@ class OctoController(BedController):
         """Stop fourth motor."""
         await self._stop_motors()
 
+    async def _move_motor34_up(self) -> None:
+        """Move motors 3 and 4 up together (CD_MOTOR34)."""
+        await self._octo_move_with_stop(OCTO_MOTOR_34, "up")
+
+    async def _move_motor34_down(self) -> None:
+        """Move motors 3 and 4 down together (CD_MOTOR34)."""
+        await self._octo_move_with_stop(OCTO_MOTOR_34, "down")
+
+    async def _move_motor34_stop(self) -> None:
+        """Stop motors 3 and 4."""
+        await self._stop_motors()
+
     async def _move_tv_lift_up(self) -> None:
         """Raise an OCTO one-motor TV lift."""
         await self._octo_move_with_stop(OCTO_MOTOR_HEAD, "up")
@@ -941,6 +1144,19 @@ class OctoController(BedController):
                     max_angle=45,
                 )
             )
+            # The official 4-motor layout offers motors 3+4 as one hardware
+            # synchronised step (CD_MOTOR34), which is not the same as driving
+            # the two covers one after the other. The app labels this step with
+            # a pictogram rather than text, so the name here is ours.
+            specs.append(
+                MotorControlSpec(
+                    key="head_feet",
+                    translation_key="head_feet",
+                    open_fn=lambda ctrl: cast(OctoController, ctrl)._move_motor34_up(),
+                    close_fn=lambda ctrl: cast(OctoController, ctrl)._move_motor34_down(),
+                    stop_fn=lambda ctrl: cast(OctoController, ctrl)._move_motor34_stop(),
+                )
+            )
 
         return tuple(specs)
 
@@ -958,21 +1174,44 @@ class OctoController(BedController):
     def stale_motor_entity_keys(self) -> frozenset[str]:
         """Return entity keys belonging to the other OCTO actuator layout."""
         if self._is_one_motor_lift:
-            return frozenset({"back", "legs", "head", "feet"})
-        return frozenset({"tv_lift"})
+            return frozenset({"back", "legs", "head", "feet", "head_feet"})
+        stale = {"tv_lift"}
+        if self._coordinator.motor_count < 4:
+            # Reconfiguring 4 motors down to 2 or 3 drops the combined step, and
+            # without this it lingers in the registry as an unavailable ghost.
+            stale.add("head_feet")
+        return frozenset(stale)
 
     # Preset methods
     async def preset_both_up(self) -> None:
         """Move both head and legs up simultaneously."""
         await self._octo_move_with_stop(OCTO_MOTOR_HEAD | OCTO_MOTOR_LEGS, "up")
 
+    @property
+    def _all_motors_mask(self) -> int:
+        """Return the bitmask covering every motor this receiver has.
+
+        Clean-room analysis of OCTO Smart Control 1.03.01 shows the official app
+        drives an all-motors step as M12 0x06 (2 motors), M123 0x0E (3) or
+        M1234 0x1E (4), and exposes it as a down-only control.
+        """
+        mask = OCTO_MOTOR_HEAD | OCTO_MOTOR_LEGS
+        motor_count = self._coordinator.motor_count
+        if motor_count >= 3:
+            mask |= OCTO_MOTOR_3
+        if motor_count >= 4:
+            mask |= OCTO_MOTOR_4
+        return mask
+
     async def preset_flat(self) -> None:
         """Go to flat position.
 
-        Octo doesn't have a flat preset, so we move both motors down.
+        Octo has no flat preset, so every motor is driven down at once. This
+        must cover motors 3 and 4 as well: sending only M12 on a 3M/4M receiver
+        (RC3, BM3, and 4-motor bases) leaves the extra actuators where they
+        were, so the bed never actually reaches flat.
         """
-        # Move both head and legs down simultaneously
-        await self._octo_move_with_stop(OCTO_MOTOR_HEAD | OCTO_MOTOR_LEGS, "down")
+        await self._octo_move_with_stop(self._all_motors_mask, "down")
 
     async def preset_memory(self, memory_num: int) -> None:
         """Go to memory preset position.
@@ -994,10 +1233,38 @@ class OctoController(BedController):
 
         # Protocol uses 0-based slot index
         slot = memory_num - 1
-        await self._write_octo_command(
-            command=[0x02, 0x72],  # NORMAL packet, MOTOR_MEMPOS command
-            data=[slot],
+        # MOTOR_MEMPOS is hold-to-run, not one-shot. The motor-button cadence
+        # bounds a button press, which is far shorter than a memory travel, so
+        # stream for OCTO_MEMORY_RECALL_SECONDS instead and release afterwards.
+        # Interruptible: write_command honours the coordinator cancel event, so
+        # the Stop button ends the recall early.
+        repeat_count = max(
+            1, int(OCTO_MEMORY_RECALL_SECONDS * 1000 / OCTO_MEMORY_RECALL_INTERVAL_MS)
         )
+        # The recall runs under the coordinator command lock, which the PIN
+        # keep-alive task also needs. A 30s hold would starve it past the
+        # receiver's ~30s authentication timeout and drop the link mid-recall,
+        # so re-authenticate here instead, in chunks shorter than that window.
+        # send_pin() is a no-op unless the bed actually requires a PIN.
+        chunk_repeats = max(
+            1, int(OCTO_PIN_KEEPALIVE_INTERVAL * 1000 / OCTO_MEMORY_RECALL_INTERVAL_MS)
+        )
+        try:
+            sent = 0
+            while sent < repeat_count:
+                if self._coordinator.cancel_command.is_set():
+                    break
+                await self.send_pin()
+                chunk = min(chunk_repeats, repeat_count - sent)
+                await self._write_octo_command(
+                    command=[0x02, 0x72],  # NORMAL packet, MOTOR_MEMPOS command
+                    data=[slot],
+                    repeat_count=chunk,
+                    repeat_delay_ms=OCTO_MEMORY_RECALL_INTERVAL_MS,
+                )
+                sent += chunk
+        finally:
+            await self._stop_motors()
 
     async def program_memory(self, memory_num: int) -> None:
         """Save current position to memory slot.
@@ -1014,6 +1281,15 @@ class OctoController(BedController):
                 "Invalid memory slot %d (bed has %d slots)",
                 memory_num,
                 self.memory_slot_count,
+            )
+            return
+
+        if not self.is_memory_slot_programmable(memory_num):
+            # The Save button is hidden for locked slots, but adjustable_bed.
+            # save_preset and automations reach this directly.
+            _LOGGER.warning(
+                "Memory slot %d is locked on this Octo bed and cannot be overwritten",
+                memory_num,
             )
             return
 
@@ -1107,7 +1383,18 @@ class OctoController(BedController):
             await self._write_octo_command(
                 command=[0x20, 0x43],
                 data=pin_data,
+                # Authentication is not a cancellable user command. The write
+                # helper returns without writing when the coordinator's cancel
+                # event is already set, and that event stays set after a stop
+                # until the next prepared operation clears it - so a stop
+                # followed by an auto-reconnect would silently skip the PIN,
+                # leaving the bed locked and dropping the link ~30s later.
+                # Serialization is unaffected: the keep-alive path already runs
+                # under async_execute_controller_command, and the connect-time
+                # call runs inside the connection lock. A PIN frame moves nothing.
+                cancel_event=asyncio.Event(),
             )
+            self._pin_sent = True
             _LOGGER.debug("PIN authentication sent successfully")
         except (ValueError, BleakError) as err:
             _LOGGER.warning("Failed to send PIN: %s", err)
