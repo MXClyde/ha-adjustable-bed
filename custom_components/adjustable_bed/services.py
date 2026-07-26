@@ -766,12 +766,6 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
         # the user only learns that after a maintainer asks for a second one. Say
         # it up front, at the moment they still have the bed in front of them.
         logs_missing = include_logs and evidence.get("log_capture_status") == "unavailable"
-        # The capture has finished either way, so the pre-capture notice ("the
-        # capture is running anyway") has served its purpose. The Ready
-        # notification below carries the same guidance for a log-less bundle,
-        # so leaving the old one up would only duplicate it and misdescribe the
-        # state.
-        async_dismiss(hass, log_notification_id)
         logging_notice = ""
         if logs_missing:
             log_error = evidence.get("log_capture_error")
@@ -803,9 +797,6 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
             capture_duration + 120,
             address,
         )
-        # No bundle will exist, so the pre-capture notice ("the capture is
-        # running anyway") would sit there permanently claiming otherwise.
-        async_dismiss(hass, log_notification_id)
         async_create(
             hass,
             f"Support bundle generation timed out after {capture_duration + 120} seconds "
@@ -817,7 +808,6 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
         raise
     except Exception as err:
         _LOGGER.exception("Failed to generate support bundle for %s", address)
-        async_dismiss(hass, log_notification_id)
         async_create(
             hass,
             f"Failed to generate support bundle for {address}:\n\n{err}",
@@ -825,6 +815,14 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
             notification_id=f"adjustable_bed_support_bundle_error_{address.replace(':', '_').lower()}",
         )
         raise
+    finally:
+        # Whatever happened, the capture is no longer running, so the
+        # pre-capture notice must not keep claiming that it is. A finally also
+        # covers cancellation: CancelledError inherits from BaseException, so an
+        # automation stopped mid-capture would skip an except Exception handler
+        # and strand the notice forever. Dismissing an id that was never created
+        # is a no-op.
+        async_dismiss(hass, log_notification_id)
 
 async def async_register_services(hass: HomeAssistant) -> None:
     """Register the Adjustable Bed services (idempotent)."""
