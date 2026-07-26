@@ -99,6 +99,16 @@ _ESCAPED_BYTE = re.compile(r"\\x[0-9a-fA-F]{2}")
 # a byte, and lowercase would match ordinary words such as "be" and "ad". Only counted alongside
 # packet vocabulary, never on its own.
 _BARE_BYTE = re.compile(r"\b(?=[0-9A-F]{2}\b)[0-9A-F]*[A-F][0-9A-F]*\b")
+# Bytes written in decimal. The trigger has to be assignment, not proximity: "Command repeat
+# count | 10" is a config default in this very file, so a decimal only counts when it is assigned
+# directly to packet vocabulary ("STOP command: 18") or appears in a bracketed run of them
+# ("packet bytes: [5, 2, 170]").
+_BYTE_VALUE = r"(?:25[0-5]|2[0-4]\d|1\d\d|\d{1,2})"
+_DECIMAL_BYTE_ASSIGNMENT = re.compile(
+    rf"\b(?:command|opcode|frame|packet|payload|byte)s?\b\s*[:=]\s*{_BYTE_VALUE}\b",
+    re.IGNORECASE,
+)
+_DECIMAL_BYTE_LIST = re.compile(rf"\[\s*{_BYTE_VALUE}\s*(?:,\s*{_BYTE_VALUE}\s*)+\]")
 # Packet vocabulary. "STOP command: 0x12" is a complete answer from a single byte, so one byte is
 # enough once the line says what the byte is for.
 _PACKET_CONTEXT = re.compile(
@@ -203,8 +213,11 @@ def _answer_key_violation(line: str) -> str | None:
         or _ESCAPED_BYTE.search(line)
         or _BYTE_SEQUENCE_PAIR.search(line)
         or _BARE_BYTE.search(line)
+        or _DECIMAL_BYTE_LIST.search(line)
     ):
         return "byte in packet context"
+    if _DECIMAL_BYTE_ASSIGNMENT.search(line):
+        return "decimal byte assigned to packet vocabulary"
     # Prose is an answer too: "<model> stops by ending its held-command refresh" is exactly the
     # STOP/release behaviour the analyst is required to recover from the artifact.
     if _MODEL_CODE.search(line) and _BEHAVIOUR_CONTEXT.search(line):
@@ -221,6 +234,14 @@ def _answer_key_violation(line: str) -> str | None:
 # A line that opens a new Markdown block: list item, heading, quote, table row, fence, or a blank
 # separator. Anything else continues the sentence above it.
 _NEW_BLOCK = re.compile(r"^\s*(?:[-*+>#|]|\d+[.)]|```|~~~|$)")
+
+
+def _display_path(path: Path) -> str:
+    """Repo-relative where possible, absolute otherwise (the memory indexes live outside it)."""
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def _is_continuation(line: str) -> bool:
@@ -330,6 +351,8 @@ def test_injected_instructions_carry_no_answer_key(relative_path: str) -> None:
         'PACKET = b"\\x12\\x34"',
         "STOP command: AA",
         "Service UUID is 1800",
+        "STOP command: 18",
+        "packet bytes: [5, 2, 170]",
         "Service UUID: 1234",
         "characteristic = 0x1812",
         "Device-name pattern: BED_*",
@@ -410,13 +433,15 @@ def test_no_analyst_visible_doc_points_at_the_comparison_notes() -> None:
     """
     # Every deliberately supplied document, the JSON schema included: it is copied into each
     # analyst workspace, and a "see disassembly/PROTOCOL_NOTES.md" line in one of its descriptions
-    # would carry no protocol value of its own and so pass the answer-key scan untouched.
+    # would carry no protocol value of its own and so pass the answer-key scan untouched. The
+    # auto-memory indexes are injected wholesale and reach the analyst the same way.
     candidates = [
         *(REPO_ROOT / name for name in _ANALYST_VISIBLE_DOCS),
         *(REPO_ROOT / "docs").rglob("*.md"),
+        *_MEMORY_INDEXES,
     ]
     offenders = [
-        f"{path.relative_to(REPO_ROOT)}:{number}"
+        f"{_display_path(path)}:{number}"
         for path in candidates
         if path.is_file()
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)

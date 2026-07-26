@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://local.invalid/schemas/phase4-analysis-v1.7-2026-07-26.json",
+  "$id": "https://local.invalid/schemas/phase4-analysis-v1.8-2026-07-26.json",
   "title": "Phase 4 APK protocol analysis",
   "type": "object",
   "required": [
@@ -22,7 +22,7 @@
   ],
   "properties": {
     "schema_revision": {
-      "const": "phase4-analysis-v1.7-2026-07-26"
+      "const": "phase4-analysis-v1.8-2026-07-26"
     },
     "status": {
       "enum": ["COMPLETE", "PARTIAL", "BLOCKED", "INPUT_MISMATCH"]
@@ -193,7 +193,12 @@
           "model_mappings": {"type": ["array", "null"]},
           "timing": {"type": ["object", "null"]},
           "release_behavior": {"type": ["object", "null"]},
-          "evidence": {"type": "array"},
+          "evidence": {
+            "comment": "Non-empty, like candidate and command evidence. A protocol with populated discovery, GATT and timing claims but no artifact reference is exactly the unsupported report the evidence standard exists to prevent.",
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1}
+          },
           "selectors_unknown_reason": {"type": "string", "minLength": 1},
           "discovery_rules_unknown_reason": {"type": "string", "minLength": 1},
           "gatt_unknown_reason": {"type": "string", "minLength": 1},

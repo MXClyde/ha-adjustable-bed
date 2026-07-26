@@ -49,7 +49,7 @@ INPUTS
 - Supplied files: <<SUPPLIED_FILES>>
 - Output directory: "<<WORKSPACE>>"
 - Known acquisition limitations: see input/identity.json -> known_acquisition_limitations
-- Required analysis.json schema and revision: input/analysis.schema.json, revision phase4-analysis-v1.7-2026-07-26
+- Required analysis.json schema and revision: input/analysis.schema.json, revision phase4-analysis-v1.8-2026-07-26
 
 NON-NEGOTIABLE RULES
 
@@ -485,4 +485,8 @@ Only `decompiler_warnings_resolved` (no decompiler produced a relevant warning) 
 `variant_reconciliation` (the artifact has no multi-variant catalog to shard) may be reported
 NOT_APPLICABLE in a COMPLETE run, and only with evidence for why the gate does not apply. Every
 other gate must be PASS. If any gate fails, use PARTIAL or BLOCKED and explain exactly what
-remains. A precise partial report is better than a confident but unsupported complete report.
+remains, with one exception: a failed `identity_verified` gate is reported as INPUT_MISMATCH, the
+status Phase A step 1 requires. Do not downgrade that case to PARTIAL. PARTIAL asserts that the
+artifact was analysed, and the schema holds it to populated stack and tool coverage and non-null
+identity hashes, none of which a run that stopped at identity verification can honestly supply.
+A precise partial report is better than a confident but unsupported complete report.

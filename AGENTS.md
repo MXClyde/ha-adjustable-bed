@@ -199,7 +199,7 @@ The supported-protocol list lives in the README's "Supported Beds" table — tha
 | `position_mode` | Speed vs accuracy tradeoff | speed |
 | `octo_pin` | PIN for Octo beds | "" |
 | `jensen_pin` | PIN for Jensen beds | "" |
-| `cb24_bed_selection` | Bed A/B selection for CB24 split beds | bed A |
+| `cb24_bed_selection` | Bed A/B selection for CB24 split beds | default (neither side) |
 | `richmat_remote` | Remote code for Richmat beds | auto |
 | `back_max_angle` | Max angle for back motor (degrees) | 68.0 |
 | `legs_max_angle` | Max angle for legs motor (degrees) | 45.0 |
