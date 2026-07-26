@@ -781,6 +781,9 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
             capture_duration + 120,
             address,
         )
+        # No bundle will exist, so the pre-capture notice ("the capture is
+        # running anyway") would sit there permanently claiming otherwise.
+        async_dismiss(hass, log_notification_id)
         async_create(
             hass,
             f"Support bundle generation timed out after {capture_duration + 120} seconds "
@@ -792,6 +795,7 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
         raise
     except Exception as err:
         _LOGGER.exception("Failed to generate support bundle for %s", address)
+        async_dismiss(hass, log_notification_id)
         async_create(
             hass,
             f"Failed to generate support bundle for {address}:\n\n{err}",

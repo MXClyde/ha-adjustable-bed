@@ -327,9 +327,15 @@ def _tail_text(log_path: str, max_bytes: int) -> str:
     Refuses anything that is not a regular file: opening a FIFO blocks until a
     writer appears, which would hang the capture in its executor thread.
     """
-    if not stat.S_ISREG(os.stat(log_path).st_mode):  # noqa: PTH116 - HA config path
-        raise _NotARegularFile(f"{log_path} is not a regular file")
-    with open(log_path, "rb") as handle:  # noqa: PTH123 - plain path from HA config
+    fd = os.open(log_path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise _NotARegularFile(f"{log_path} is not a regular file")
+        handle = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+    with handle:
         handle.seek(0, 2)
         size = handle.tell()
         start = max(0, size - max_bytes)
@@ -415,20 +421,23 @@ def _probe_log_file(log_path: str) -> tuple[bool, str | None, str | None]:
     block, so the hazard is settled before anything is opened.
     """
     try:
-        info = os.stat(log_path)  # noqa: PTH116 - plain path from HA config
+        # O_NONBLOCK makes opening a FIFO return immediately instead of waiting
+        # for a writer, and fstat then describes the object actually opened.
+        # Statting the path first and opening it afterwards would leave a window
+        # where the path could be swapped for a FIFO in between.
+        handle = os.open(log_path, os.O_RDONLY | os.O_NONBLOCK)
     except FileNotFoundError as err:
         return False, "missing", str(err)
     except OSError as err:
         return False, "unreadable", str(err)
 
+    try:
+        info = os.fstat(handle)
+    finally:
+        os.close(handle)
+
     if not stat.S_ISREG(info.st_mode):
         return False, "not_a_file", f"{log_path} is not a regular file"
-
-    try:
-        with open(log_path, "rb"):  # noqa: PTH123 - plain path from HA config
-            pass
-    except OSError as err:
-        return False, "unreadable", str(err)
     return True, None, None
 
 

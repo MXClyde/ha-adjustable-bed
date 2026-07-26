@@ -1755,3 +1755,56 @@ class TestSupportBundleLogProbeSafety:
             await handle_generate_support_bundle(call)
 
         assert "adjustable_bed_support_bundle_logs_aa_bb_cc_dd_ee_ff" in dismissed
+
+
+    async def test_failed_capture_dismisses_the_warning(self, hass):
+        """No bundle means the "capture is running anyway" notice must go."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        import pytest as _pytest
+        from homeassistant.core import ServiceCall
+
+        from custom_components.adjustable_bed.services import (
+            handle_generate_support_bundle,
+        )
+
+        dismissed: list[str] = []
+        call = ServiceCall(
+            hass,
+            DOMAIN,
+            "generate_support_bundle",
+            {"target_address": "AA:BB:CC:DD:EE:FF", "capture_duration": 5},
+        )
+        with (
+            patch(
+                "custom_components.adjustable_bed.support_report.async_check_log_file",
+                AsyncMock(
+                    return_value={
+                        "available": False,
+                        "reason": "missing",
+                        "path": "/config/home-assistant.log",
+                        "error": "[Errno 2] No such file or directory",
+                    }
+                ),
+            ),
+            patch(
+                "custom_components.adjustable_bed.support_bundle.generate_support_bundle",
+                AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+            patch(
+                "custom_components.adjustable_bed.download.register_download",
+                MagicMock(return_value="/api/download/bundle.json"),
+            ),
+            patch(
+                "homeassistant.components.persistent_notification.async_create",
+                lambda *a, **k: None,
+            ),
+            patch(
+                "homeassistant.components.persistent_notification.async_dismiss",
+                lambda _hass, nid: dismissed.append(nid),
+            ),
+            _pytest.raises(RuntimeError),
+        ):
+            await handle_generate_support_bundle(call)
+
+        assert "adjustable_bed_support_bundle_logs_aa_bb_cc_dd_ee_ff" in dismissed
