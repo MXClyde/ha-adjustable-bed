@@ -40,6 +40,7 @@ from .adapter import (
     read_ble_device_info,
     select_adapter,
 )
+from .address_lock import async_get_connect_lock
 from .ble_auth import is_ble_authentication_error
 from .const import (
     ADAPTER_AUTO,
@@ -136,6 +137,7 @@ from .const import (
     connection_gated_by_bond,
     get_richmat_features,
     get_richmat_motor_count,
+    grants_one_connection_per_pairing_window,
     passive_position_reconciliation_default_enabled,
     requires_pairing,
     requires_pairing_after_service_discovery,
@@ -329,6 +331,9 @@ class AdjustableBedCoordinator:
         # Track if pairing is supported by the Bluetooth adapter (None = unknown)
         self._pairing_supported: bool | None = None
         self._ble_bond_established: bool = bool(entry.data.get(CONF_BLE_BOND_ESTABLISHED, False))
+        # Set just before an internal bond-marker write; see
+        # _begin_internal_entry_update().
+        self._pending_internal_bond_marker: bool | None = None
         self._last_bond_verification: dict[str, Any] = {
             "status": "not_attempted",
             "timestamp": None,
@@ -755,6 +760,41 @@ class AdjustableBedCoordinator:
             if isinstance(pairing, dict):
                 pairing["bond_verification"] = dict(result)
 
+    def _begin_internal_entry_update(self, bond_established: bool) -> None:
+        """Mark the next entry update as an internal bond-marker write.
+
+        Every ``async_update_entry`` fires the options update listener, which
+        reloads the entry — unloading the coordinator and disconnecting the bed.
+        Recording our own bond-marker state here lets that listener recognise
+        the write as internal and skip the reload. Without this, simply noting
+        "this link is not bonded" would tear down the link we just decided to
+        keep, and a bed that grants one connection per pairing window would be
+        unreachable until it is power-cycled (issue #385).
+
+        Only arm the marker when a listener can actually consume it. During
+        initial setup the bond is written before ``async_setup_entry`` registers
+        the update listener and stores this coordinator, so nothing would ever
+        clear it — and the next genuine options change, which keeps the same
+        bond value, would then be mistaken for this write and silently skip the
+        reload it needs.
+        """
+        if self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id) is not self:
+            self._pending_internal_bond_marker = None
+            return
+        self._pending_internal_bond_marker = bond_established
+
+    def consume_internal_entry_update(self, entry: ConfigEntry) -> bool:
+        """Return True when ``entry`` reflects our own bond-marker write.
+
+        Consumes the marker, so a genuine user-driven options change that
+        happens to follow one still reloads normally.
+        """
+        pending = self._pending_internal_bond_marker
+        if pending is None:
+            return False
+        self._pending_internal_bond_marker = None
+        return bool(entry.data.get(CONF_BLE_BOND_ESTABLISHED, False)) is pending
+
     def _mark_ble_bond_established(self) -> None:
         """Record that future connections should skip `pair=True`."""
         if self._ble_bond_established:
@@ -764,6 +804,7 @@ class AdjustableBedCoordinator:
         if self.entry.data.get(CONF_BLE_BOND_ESTABLISHED):
             return
 
+        self._begin_internal_entry_update(True)
         self.hass.config_entries.async_update_entry(
             self.entry,
             data={
@@ -781,6 +822,7 @@ class AdjustableBedCoordinator:
         if not self.entry.data.get(CONF_BLE_BOND_ESTABLISHED):
             return
 
+        self._begin_internal_entry_update(False)
         self.hass.config_entries.async_update_entry(
             self.entry,
             data={
@@ -794,6 +836,7 @@ class AdjustableBedCoordinator:
         err: BleakError,
         *,
         holding_lock: bool = False,
+        retain_link: bool = False,
         attempt_details: dict[str, Any] | None = None,
     ) -> None:
         """Handle a failure caused by an unauthenticated BLE connection.
@@ -801,6 +844,13 @@ class AdjustableBedCoordinator:
         ``holding_lock`` must be True when called from a context that already
         holds ``self._lock`` (e.g. bond verification inside the connect path),
         so the disconnect uses the lock-free variant and does not deadlock.
+
+        ``retain_link`` must be True only where an unbonded link is still worth
+        keeping, i.e. the post-connect bond probe, whose caller goes on to run
+        controller startup on that same link. It must stay False once startup
+        has already failed: a link with no controller cannot drive the bed, and
+        keeping it would only block the physical remote while leaving the
+        coordinator in a half-initialised state.
         """
         if not requires_pairing(self._bed_type, self._protocol_variant):
             return
@@ -820,6 +870,29 @@ class AdjustableBedCoordinator:
         self._bond_probe_timed_out = False
         self._clear_ble_bond_established()
 
+        await self._async_raise_pairing_issue()
+
+        if self._client is not None and self._client.is_connected:
+            if retain_link and grants_one_connection_per_pairing_window(
+                self._bed_type, self._protocol_variant
+            ):
+                # Disconnecting would cost us the box's single connection and
+                # the reconnect that "fixes" the bond can never happen. Leave
+                # the link up; the repair issue above tells the user to re-pair.
+                _LOGGER.warning(
+                    "Keeping the unbonded link to %s open: this bed grants one "
+                    "connection per pairing window, so disconnecting to re-pair "
+                    "would leave it unreachable until it is power-cycled.",
+                    self._address,
+                )
+                return
+            if holding_lock:
+                await self._async_disconnect_locked(reason="authentication_failed")
+            else:
+                await self.async_disconnect(reason="authentication_failed")
+
+    async def _async_raise_pairing_issue(self) -> None:
+        """Surface the guided pairing repair, best-effort."""
         try:
             await create_pairing_required_issue(
                 self.hass, self._address, self._name, self.entry.entry_id
@@ -831,11 +904,111 @@ class AdjustableBedCoordinator:
                 exc_info=True,
             )
 
-        if self._client is not None and self._client.is_connected:
-            if holding_lock:
-                await self._async_disconnect_locked(reason="authentication_failed")
-            else:
-                await self.async_disconnect(reason="authentication_failed")
+    async def _async_pair_on_live_link(self, pairing_details: dict[str, Any]) -> bool:
+        """Create the BLE bond on an already-connected, service-discovered link.
+
+        Returns True when the bond was created, False when it failed and the bed
+        type tolerates staying unbonded.
+
+        For a bed that only grants one connection per pairing window, letting a
+        bond failure propagate is self-defeating: the caller tears the link down
+        and the box then refuses every reconnect until it is power-cycled. LP
+        Control never takes that risk — it fires ``createBond()`` and continues
+        on the same link without ever checking whether it succeeded — so mirror
+        that and keep the connection. Whether an unbonded link can actually
+        drive the motors is firmware behaviour the APK cannot prove, but a live
+        link can be tried while a dropped one is guaranteed useless.
+
+        This applies to a backend that cannot pair at all
+        (``NotImplementedError``/``TypeError``, e.g. ESPHome < 2024.3.0) just as
+        much as to a rejected bond: the caller's compatibility fallback would
+        reconnect with ``pair=False``, but the link we already hold was itself
+        made with ``pair=False``, so it would spend the bed's one connection to
+        obtain an identical one.
+        """
+        client = self._client
+        if client is None:
+            return False
+        advisory = grants_one_connection_per_pairing_window(
+            self._bed_type, self._protocol_variant
+        )
+        try:
+            await client.pair()
+        except (NotImplementedError, TypeError) as err:
+            if not advisory:
+                raise
+            self._pairing_supported = False
+            pairing_details["adapter_pairing_supported"] = False
+            _LOGGER.warning(
+                "Bluetooth backend for %s cannot create BLE bonds (%s). Keeping "
+                "the live connection and continuing unbonded. If you use an "
+                "ESPHome proxy, update it to 2024.3.0 or newer.",
+                self._address,
+                err,
+            )
+            pairing_details["error"] = str(err)
+            pairing_details["error_type"] = type(err).__name__
+            self._record_bond_verification("advisory_bond_unsupported", err)
+            # Startup can still finish on the unbonded link, and the later bond
+            # probe only raises the repair on a *definitive* auth error - a
+            # timeout or non-auth BleakError is treated as inconclusive. Raise
+            # it here so a failed bond always leaves the user a guided fix.
+            await self._async_raise_pairing_issue()
+            return False
+        except (BleakError, TimeoutError, OSError) as err:
+            if not advisory:
+                raise
+            self._pairing_supported = True
+            pairing_details["adapter_pairing_supported"] = True
+            _LOGGER.warning(
+                "Could not create the BLE bond with %s (%s). Keeping the live "
+                "connection and continuing unbonded — this bed only accepts one "
+                "connection per pairing window, so dropping it now would strand "
+                "the bed until it is power-cycled.",
+                self._address,
+                err,
+            )
+            pairing_details["error"] = str(err)
+            pairing_details["error_type"] = type(err).__name__
+            self._record_bond_verification("advisory_bond_failed", err)
+            await self._async_raise_pairing_issue()
+            return False
+        return True
+
+    async def async_pair_now(self) -> bool:
+        """Re-run BLE pairing on demand and report whether the bond is live.
+
+        Drives the pairing repair for a bed that only grants one connection per
+        pairing window. Two things matter here:
+
+        * The cached bond marker must be cleared on the *runtime* coordinator,
+          not just in ``entry.data``. ``_ble_bond_established`` is read from the
+          entry once at construction, so editing entry data alone would leave
+          this connection still skipping ``pair=True``.
+        * When a link is already up, pair on that link. Reconnecting to "pair
+          properly" would spend the bed's single connection.
+
+        Returns True only when the bond is confirmed, so a repair cannot report
+        success while the link is still unbonded.
+        """
+        async with self._lock:
+            self._clear_ble_bond_established()
+            self._skip_pair_next_attempt = False
+            self._bond_probe_timed_out = False
+
+            if self._client is not None and self._client.is_connected:
+                pairing_details: dict[str, Any] = {}
+                if await self._async_pair_on_live_link(pairing_details):
+                    self._mark_ble_bond_established()
+                    await delete_pairing_required_issue(self.hass, self._address)
+                    return True
+                # The bond request failed but the link survived; the probe is
+                # the authority on whether we are nevertheless bonded.
+                return await self._async_verify_bonded() and self._ble_bond_established
+
+            if not await self._async_connect_locked():
+                return False
+            return self._ble_bond_established
 
     async def _async_verify_bonded(
         self, attempt_details: dict[str, Any] | None = None
@@ -884,9 +1057,16 @@ class AdjustableBedCoordinator:
                 await self._async_handle_ble_authentication_error(
                     err,
                     holding_lock=True,
+                    retain_link=True,
                     attempt_details=attempt_details,
                 )
-                return False
+                # For a one-connection-per-window bed the handler deliberately
+                # kept the link, so report success and let controller startup
+                # use it. Retrying "with pairing" would only spend the bed's
+                # single connection on a reconnect that cannot happen.
+                return grants_one_connection_per_pairing_window(
+                    self._bed_type, self._protocol_variant
+                )
             _LOGGER.debug(
                 "Bond verification read for %s was inconclusive (%s); proceeding.",
                 self._address,
@@ -1352,7 +1532,13 @@ class AdjustableBedCoordinator:
         _LOGGER.debug("Cleaning up failed connection attempt...")
         self._intentional_disconnect = True
         try:
-            await client.disconnect()
+            # Hold the address lock across the teardown. The connect attempt
+            # released it before this runs, so an unprotected disconnect here
+            # could land inside a competing caller's connect and abort it —
+            # the same hazard the lock was added to prevent (issue #385).
+            # Reentrant, so a caller that still holds it is unaffected.
+            async with async_get_connect_lock(self.hass, self._address):
+                await client.disconnect()
             _LOGGER.debug("Disconnect cleanup successful")
         except Exception as disconnect_err:
             _LOGGER.debug(
@@ -1371,10 +1557,23 @@ class AdjustableBedCoordinator:
         self._intentional_disconnect = False
 
         if self._client is not None and self._client.is_connected:
-            _LOGGER.debug("Already connected to %s, reusing connection", self._address)
-            if reset_timer:
-                self._reset_disconnect_timer()
-            return True
+            if self._controller is not None:
+                _LOGGER.debug(
+                    "Already connected to %s, reusing connection", self._address
+                )
+                if reset_timer:
+                    self._reset_disconnect_timer()
+                return True
+            # Connected but half-initialised. Release the orphan before making a
+            # fresh attempt: establish_connection() would otherwise overwrite
+            # self._client and leak this still-live link, and the
+            # close_stale_connections_by_address() fallback is None on
+            # non-BlueZ backends, so nothing else would ever close it.
+            _LOGGER.debug(
+                "Releasing half-initialised connection to %s before reconnecting",
+                self._address,
+            )
+            await self._async_cleanup_failed_connection()
 
         # Routine reconnects after an intentional/idle disconnect are expected for
         # non-persistent beds and shouldn't spam the log. Only the first successful
@@ -1571,26 +1770,6 @@ class AdjustableBedCoordinator:
                     self._connection_timeout,
                 )
 
-                # Best-effort BlueZ cleanup. Some failed attempts leave stale pending
-                # connections behind, which can cause repeated connect timeouts.
-                if close_stale_connections_by_address is not None:
-                    try:
-                        close_result = close_stale_connections_by_address(self._address)
-                        if inspect.isawaitable(close_result):
-                            await close_result
-                    except (OSError, BleakError) as err:
-                        _LOGGER.debug(
-                            "Could not close stale connections for %s: %s",
-                            self._address,
-                            err,
-                        )
-                    except Exception:
-                        _LOGGER.warning(
-                            "Unexpected error closing stale connections for %s",
-                            self._address,
-                            exc_info=True,
-                        )
-
                 # Always provide a callback so bleak-retry-connector can refresh the
                 # BLEDevice between retries. In auto mode this prevents using a stale
                 # device object from an older scan snapshot.
@@ -1682,7 +1861,38 @@ class AdjustableBedCoordinator:
                 self._connecting = True
                 # Notify callbacks so binary sensor can show "connecting" state
                 self._notify_connection_state_change(False)
+                # Serialize with the config flow, repair flow and diagnostic so
+                # an overlapping attempt cannot abort this one (issue #385). The
+                # lock must cover the stale-connection cleanup below as well as
+                # the connect itself: that cleanup disconnects the address, so
+                # running it outside the lock would tear down a client another
+                # caller is holding under lock protection.
+                connect_lock = async_get_connect_lock(self.hass, self._address)
+                await connect_lock.acquire()
                 try:
+                    # Best-effort BlueZ cleanup. Some failed attempts leave stale
+                    # pending connections behind, which can cause repeated
+                    # connect timeouts.
+                    if close_stale_connections_by_address is not None:
+                        try:
+                            close_result = close_stale_connections_by_address(
+                                self._address
+                            )
+                            if inspect.isawaitable(close_result):
+                                await close_result
+                        except (OSError, BleakError) as err:
+                            _LOGGER.debug(
+                                "Could not close stale connections for %s: %s",
+                                self._address,
+                                err,
+                            )
+                        except Exception:
+                            _LOGGER.warning(
+                                "Unexpected error closing stale connections for %s",
+                                self._address,
+                                exc_info=True,
+                            )
+
                     # Use max_attempts=1 here since outer loop handles retries
                     # Disable the services cache to force fresh GATT discovery for
                     # every pairing-required bed, not just the pair=True attempt.
@@ -1715,19 +1925,29 @@ class AdjustableBedCoordinator:
                         # establish_connection() returns after Bleak has loaded
                         # the service collection, so pairing here preserves that
                         # proven application ordering on BlueZ as well.
+                        bond_created = True
                         if pair_after_service_discovery:
                             _LOGGER.info(
                                 "Connected to %s and discovered services; "
                                 "creating the BLE bond now",
                                 self._address,
                             )
-                            await self._client.pair()
+                            bond_created = await self._async_pair_on_live_link(
+                                pairing_details
+                            )
                         # If we get here with pairing enabled, mark it as supported
-                        if use_pairing:
+                        if use_pairing and bond_created:
                             self._pairing_supported = True
                             self._mark_ble_bond_established()
                             pairing_details["adapter_pairing_supported"] = True
                             pairing_details["connection_result"] = "pairing_connection_succeeded"
+                        elif use_pairing:
+                            # Advisory bond failed; the link is up and stays up.
+                            # _async_pair_on_live_link already recorded whether
+                            # the backend supports pairing at all.
+                            pairing_details["connection_result"] = (
+                                "advisory_bond_failed_link_retained"
+                            )
                         else:
                             pairing_details["connection_result"] = "connected_without_pairing"
                     except (NotImplementedError, TypeError) as pair_err:
@@ -1806,6 +2026,7 @@ class AdjustableBedCoordinator:
                             raise
                         raise
                 finally:
+                    connect_lock.release()
                     if not keep_connecting_through_startup:
                         self._connecting = False
                     # Don't notify here - the connect success/failure paths will notify
@@ -2231,11 +2452,11 @@ class AdjustableBedCoordinator:
                     # Authentication can first fail during controller startup,
                     # after a slow DIS probe was treated as inconclusive. Clear
                     # the stale marker here so the next retry requests pairing.
-                    # Keep this best-effort: the handler disconnects the client,
-                    # and disconnect cleanup can itself raise. Letting that escape
-                    # would replace the original authentication error and abort
-                    # the remaining retries. CancelledError is a BaseException, so
-                    # cancellation still propagates.
+                    # Keep this best-effort: the handler usually disconnects the
+                    # client, and disconnect cleanup can itself raise. Letting
+                    # that escape would replace the original authentication error
+                    # and abort the remaining retries. CancelledError is a
+                    # BaseException, so cancellation still propagates.
                     try:
                         await self._async_handle_ble_authentication_error(
                             err, holding_lock=True
@@ -2246,6 +2467,37 @@ class AdjustableBedCoordinator:
                             self._address,
                             exc_info=True,
                         )
+                    if grants_one_connection_per_pairing_window(
+                        self._bed_type, self._protocol_variant
+                    ):
+                        # Startup already failed, so the handler released the
+                        # link (retain_link is False here): a link with no
+                        # controller cannot drive the bed and would only block
+                        # the physical remote. Retrying cannot recover either,
+                        # because the box will not grant a second connection
+                        # until it is power-cycled. Stop instead of burning the
+                        # remaining attempts; the repair issue the handler
+                        # raised tells the user to re-pair.
+                        _LOGGER.warning(
+                            "Authentication failed for %s during startup. This "
+                            "bed grants one connection per pairing window, so "
+                            "further retries cannot succeed until it is "
+                            "power-cycled; stopping reconnect attempts.",
+                            self._address,
+                        )
+                        await self._async_cleanup_failed_connection()
+                        self._connecting = False
+                        attempt_details["total_elapsed_seconds"] = round(
+                            time.monotonic() - attempt_start, 3
+                        )
+                        attempt_details["result"] = "failed"
+                        attempt_details["error"] = str(err)
+                        attempt_details["error_type"] = type(err).__name__
+                        attempt_details["error_category"] = "AUTHENTICATION"
+                        self._last_connection_error = str(err)
+                        self._last_connection_error_type = type(err).__name__
+                        self._connection_attempt_details.append(attempt_details)
+                        break
                 attempt_elapsed = time.monotonic() - attempt_start
                 attempt_details["total_elapsed_seconds"] = round(attempt_elapsed, 3)
                 attempt_details["result"] = "failed"
