@@ -73,6 +73,13 @@ TIMED_MOVE_MOTOR_OPTIONS = (
 
 # Default capture duration for diagnostics (seconds)
 DEFAULT_CAPTURE_DURATION = 120
+
+# Bound for the best-effort pre-capture log probe. Generous for a local stat,
+# short enough that a stalled mount cannot delay the capture noticeably.
+_LOG_PROBE_TIMEOUT = 5.0
+
+# hass.data key: notification id -> tokens of the invocations that raised it.
+_LOG_NOTICE_OWNERS = f"{DOMAIN}_log_notice_owners"
 MIN_CAPTURE_DURATION = 10
 MAX_CAPTURE_DURATION = 300
 
@@ -610,10 +617,14 @@ async def handle_timed_move(call: ServiceCall) -> None:
 async def handle_generate_support_bundle(call: ServiceCall) -> None:
     """Handle generate_support_bundle service call."""
     hass = call.hass
-    from homeassistant.components.persistent_notification import async_create
+    from homeassistant.components.persistent_notification import (
+        async_create,
+        async_dismiss,
+    )
 
     from .download import register_download
     from .support_bundle import generate_support_bundle, save_support_bundle
+    from .support_report import async_check_log_file, build_missing_log_notice
 
     device_ids = call.data.get(CONF_DEVICE_ID, [])
     target_address = call.data.get(ATTR_TARGET_ADDRESS)
@@ -676,6 +687,81 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
         )
 
     assert address is not None
+
+    # Probe the log file before capturing. The capture runs for minutes, and a
+    # bundle without logs is missing the evidence that matters most for
+    # connection problems, so warn while the user can still fix it and re-run
+    # rather than only telling them afterwards (issue #385).
+    log_notification_id = (
+        f"adjustable_bed_support_bundle_logs_{address.replace(':', '_').lower()}"
+    )
+    # Only retract a notice this invocation still owns. The id is
+    # address-stable on purpose, so a later run can clear a stale warning left
+    # by an earlier one; per-invocation ids would lose that. The cost is that
+    # overlapping captures share the id, so record who raised it last and let
+    # only that invocation retract it. A later capture that re-raises the notice
+    # takes ownership, and the earlier one then leaves it alone.
+    log_notice_token = object()
+    owns_log_notice = False
+    # What the probe concluded, kept so the finished-bundle notice can repeat the
+    # guidance even when the capture itself reports something else (an empty file
+    # comes back as "empty", not "unavailable") or never read the log at all.
+    probe_reason: str | None = None
+    probe_error: str | None = None
+    if include_logs:
+        try:
+            # O_NONBLOCK does not make regular-file I/O asynchronous, so a
+            # stalled network or FUSE mount can still block the open. This probe
+            # runs before the capture's own timeout, so bound it here or the
+            # service could hang without ever starting or reporting. The
+            # executor thread stays blocked either way, but the service does not.
+            log_check = await asyncio.wait_for(
+                async_check_log_file(hass), _LOG_PROBE_TIMEOUT
+            )
+        except TimeoutError:
+            # Inconclusive, not proof of a wedged path: Home Assistant's shared
+            # executor can be saturated enough that the job never started. Say
+            # nothing and change nothing - the capture performs its own read and
+            # reports what it actually found. Disabling logs here would drop them
+            # from a minutes-long capture over a five-second queue delay.
+            _LOGGER.warning(
+                "Timed out checking whether %s is readable; capturing anyway",
+                hass.config.path("home-assistant.log"),
+            )
+            log_check = None
+        if log_check is not None:
+            if log_check["available"]:
+                # A previous run may have warned about missing logs, and that
+                # warning is address-stable, so it would otherwise sit there
+                # contradicting a bundle that does contain logs. Only clear it
+                # when no capture still owns it: another logless capture may be
+                # running right now and its warning is not stale.
+                if not hass.data.get(_LOG_NOTICE_OWNERS, {}).get(log_notification_id):
+                    async_dismiss(hass, log_notification_id)
+            else:
+                probe_reason = log_check["reason"]
+                probe_error = log_check["error"]
+                _LOGGER.warning(
+                    "Support bundle for %s will not include logs: %s (%s)",
+                    address,
+                    log_check["path"],
+                    probe_reason,
+                )
+                async_create(
+                    hass,
+                    build_missing_log_notice(
+                        log_check["reason"], log_check["error"], future=True
+                    )
+                    + "\n\nThe capture is running anyway, so you will still get a "
+                    "bundle with Bluetooth diagnostics.",
+                    title="Adjustable Bed: this bundle will have no logs",
+                    notification_id=log_notification_id,
+                )
+                hass.data.setdefault(_LOG_NOTICE_OWNERS, {}).setdefault(
+                    log_notification_id, set()
+                ).add(log_notice_token)
+                owns_log_notice = True
+
     try:
         report = await asyncio.wait_for(
             generate_support_bundle(
@@ -709,41 +795,27 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
         # A bundle without logs usually cannot explain why a command failed, and
         # the user only learns that after a maintainer asks for a second one. Say
         # it up front, at the moment they still have the bed in front of them.
-        logs_missing = include_logs and evidence.get("log_capture_status") == "unavailable"
+        # The capture is the authority: it actually read the file, so a log that
+        # appeared or filled up during the window really is usable whatever the
+        # probe saw beforehand. The one carry-over is a file the probe measured
+        # as empty, which the capture reports as "empty" rather than
+        # "unavailable" but which is still unusable.
+        log_status = evidence.get("log_capture_status")
+        logs_missing = include_logs and (
+            log_status == "unavailable"
+            or (log_status == "empty" and probe_reason == "empty_file")
+        )
         logging_notice = ""
         if logs_missing:
-            log_error = evidence.get("log_capture_error")
+            log_error = evidence.get("log_capture_error") or probe_error
             _LOGGER.warning(
                 "Support bundle for %s was generated without logs: %s",
                 address,
                 log_error or "the Home Assistant log file could not be read",
             )
-            if evidence.get("log_capture_reason") == "unreadable":
-                # `logger:` only changes levels; it cannot fix a permission
-                # problem or a log path Home Assistant is not writing to.
-                logging_notice = (
-                    "\n\n⚠️ **This bundle contains no logs.** The Home Assistant log "
-                    f"file could not be read (`{log_error}`), so the reason a command "
-                    "failed is usually not recoverable from it. Check the file's "
-                    "permissions and the configured log path, then run this service "
-                    "again."
-                )
-            else:
-                # `logger:` only sets levels - it does not create a file handler,
-                # so it cannot help an install that logs to stdout instead of
-                # home-assistant.log. Point at the flow that always yields a
-                # downloadable log.
-                logging_notice = (
-                    "\n\n⚠️ **This bundle contains no logs.** Home Assistant is not "
-                    "writing a `home-assistant.log` file (common on container "
-                    "installs that log to stdout), so the reason a command failed is "
-                    "usually not recoverable from it.\n\n"
-                    "Use **Settings → Devices & services → Adjustable Bed → ⋮ → "
-                    "Enable debug logging** instead, reproduce the problem, then "
-                    "**Disable debug logging** to download the captured log and "
-                    "attach it alongside this bundle. The full log is also available "
-                    "under **Settings → System → Logs → Load full logs**."
-                )
+            logging_notice = "\n\n" + build_missing_log_notice(
+                evidence.get("log_capture_reason") or probe_reason, log_error
+            )
 
         async_create(
             hass,
@@ -782,6 +854,21 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
             notification_id=f"adjustable_bed_support_bundle_error_{address.replace(':', '_').lower()}",
         )
         raise
+    finally:
+        # Whatever happened, the capture is no longer running, so the
+        # pre-capture notice must not keep claiming that it is. A finally also
+        # covers cancellation: CancelledError inherits from BaseException, so an
+        # automation stopped mid-capture would skip an except Exception handler
+        # and strand the notice forever.
+        owners = hass.data.get(_LOG_NOTICE_OWNERS, {}).get(log_notification_id)
+        if owns_log_notice and owners is not None:
+            owners.discard(log_notice_token)
+            # Retract only once the last overlapping logless capture is done,
+            # so a short one finishing first cannot pull the notice out from
+            # under a longer one that is still running without logs.
+            if not owners:
+                hass.data[_LOG_NOTICE_OWNERS].pop(log_notification_id, None)
+                async_dismiss(hass, log_notification_id)
 
 async def async_register_services(hass: HomeAssistant) -> None:
     """Register the Adjustable Bed services (idempotent)."""
