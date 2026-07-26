@@ -39,6 +39,10 @@ _PRUNED = {
     "smartbed-mqtt-discord-chats",
 }
 
+# Filenames a harness auto-injects based on working directory. Outside the repo root, either one
+# is an ancestor of a run workspace and reaches the analyst unbidden.
+_INJECTED_FILENAMES = frozenset({"CLAUDE.md", "AGENTS.md"})
+
 # Instruction files that the harness may inject into a clean-room analyst, plus the documents we
 # hand it deliberately. All must be free of protocol values. The schema is copied into every run's
 # input/, so a UUID or packet example added to a description or default would contaminate the run
@@ -63,10 +67,17 @@ _SHORT_UUID = re.compile(
     r"(?:[0-9a-fA-F]{4}|[0-9a-fA-F]{8}|[0-9a-fA-F]{32})\b"
 )
 _HEX_BYTE = re.compile(r"0x[0-9a-fA-F]{2}\b")
+# Packet vocabulary. "STOP command: 0x12" is a complete answer from a single byte, so one byte is
+# enough once the line says what the byte is for.
+_PACKET_CONTEXT = re.compile(
+    r"\b(?:command|opcode|frame|packet|payload|checksum|crc|byte value)s?\b", re.IGNORECASE
+)
 # Uppercase pairs are the conventional way to write a packet, so two are enough to be a give-away.
 _BYTE_SEQUENCE = re.compile(r"\b[0-9A-F]{2}(?:[\s,]+[0-9A-F]{2})+\b")
 # Lower and mixed case need three, because two-letter hex words ("be ad") occur in ordinary prose.
 _BYTE_SEQUENCE_LOOSE = re.compile(r"\b[0-9a-fA-F]{2}(?:[\s,]+[0-9a-fA-F]{2}){2,}\b")
+# A bare pair of any case, which only counts alongside packet vocabulary.
+_BYTE_SEQUENCE_PAIR = re.compile(r"\b[0-9a-fA-F]{2}(?:[\s,]+[0-9a-fA-F]{2})+\b")
 
 # A pointer *to* the comparison notes, as opposed to a prohibition mentioning them by name.
 # Both forms that previously existed in AGENTS.md are covered: a markdown link target, and a
@@ -92,6 +103,10 @@ def _answer_key_violation(line: str) -> str | None:
         return "multiple hex bytes"
     if _BYTE_SEQUENCE.search(line) or _BYTE_SEQUENCE_LOOSE.search(line):
         return "byte sequence"
+    if _PACKET_CONTEXT.search(line) and (
+        _HEX_BYTE.search(line) or _BYTE_SEQUENCE_PAIR.search(line)
+    ):
+        return "byte in packet context"
     return None
 
 
@@ -119,21 +134,23 @@ def _walk_repo() -> list[Path]:
     return found
 
 
-def test_no_directory_scoped_claude_md() -> None:
-    """Only the repo root may hold a CLAUDE.md.
+def test_no_directory_scoped_instruction_file() -> None:
+    """Only the repo root may hold an auto-injected instruction file.
 
-    A CLAUDE.md anywhere else is auto-injected into agents working beneath it. The known offender
-    was ``disassembly/CLAUDE.md``, a symlink to protocol notes sitting directly above the
-    clean-room workspaces.
+    Both names are injected by working directory, so either one sitting above a run workspace
+    reaches the analyst before its first action. The known offender was ``disassembly/CLAUDE.md``,
+    a symlink to the protocol notes; deleting it left the notes themselves at
+    ``disassembly/AGENTS.md``, which is injected by the same mechanism under the other name. They
+    now live at ``disassembly/PROTOCOL_NOTES.md``, which no harness injects.
     """
     offenders = [
-        path.relative_to(REPO_ROOT)
+        str(path.relative_to(REPO_ROOT))
         for path in _walk_repo()
-        if path.name == "CLAUDE.md" and path.parent != REPO_ROOT
+        if path.name in _INJECTED_FILENAMES and path.parent != REPO_ROOT
     ]
     assert not offenders, (
-        "Directory-scoped CLAUDE.md files are auto-injected into any agent working beneath them, "
-        f"which contaminates a clean-room run: {offenders}"
+        f"{sorted(_INJECTED_FILENAMES)} are auto-injected into any agent working beneath them, "
+        f"which contaminates a clean-room run. Rename to a name no harness injects: {offenders}"
     )
 
 
@@ -151,7 +168,7 @@ def test_injected_instructions_carry_no_answer_key(relative_path: str) -> None:
 
     assert not violations, (
         f"{relative_path} is visible to a clean-room analyst and must state no protocol values. "
-        f"Move them to disassembly/AGENTS.md (comparison pass only). Found:\n"
+        f"Move them to disassembly/PROTOCOL_NOTES.md (comparison pass only). Found:\n"
         + "\n".join(violations)
     )
 
@@ -166,6 +183,8 @@ def test_injected_instructions_carry_no_answer_key(relative_path: str) -> None:
         "the frame is aa bb cc",
         "the frame is AA, BB, CC",
         "prefix 0x12 then 0x34",
+        "STOP command: 0x12",
+        "the command is aa bb",
     ],
 )
 def test_answer_key_forms_are_detected(line: str) -> None:
@@ -210,7 +229,7 @@ def test_no_tracked_doc_points_at_the_comparison_notes() -> None:
         if _POINTER.search(line)
     ]
     assert not offenders, (
-        "disassembly/AGENTS.md is untracked and is comparison material; point readers at "
+        "disassembly/PROTOCOL_NOTES.md is untracked and is comparison material; point readers at "
         f"docs/apk-analysis/TOOLING.md instead: {offenders}"
     )
 
@@ -266,8 +285,11 @@ def test_schema_gate_ids_match_prompt() -> None:
     assert conditional_ids <= schema_ids, (
         f"conditional_gate_id names gates that do not exist: {sorted(conditional_ids - schema_ids)}"
     )
-    assert gates["minItems"] == len(schema_ids), (
-        f"completion_gates requires minItems {gates['minItems']} for {len(schema_ids)} gates"
+    # Bounding the array at the gate count is what makes each contains clause mean "exactly one":
+    # without maxItems a report could file the same gate twice with conflicting results.
+    assert gates["minItems"] == gates["maxItems"] == len(schema_ids), (
+        f"completion_gates is bounded [{gates['minItems']}, {gates['maxItems']}] for "
+        f"{len(schema_ids)} gates; both bounds must equal the gate count"
     )
     required_present = {
         clause["contains"]["properties"]["gate"]["const"] for clause in gates["allOf"]

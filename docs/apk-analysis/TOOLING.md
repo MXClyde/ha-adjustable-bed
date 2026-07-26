@@ -8,7 +8,7 @@ recover all of that from the artifact alone. If any such value appears here, tha
 defect: fix the document, and treat any run that read it as contaminated.
 
 Protocol knowledge and cross-app comparison material live in the machine-local, gitignored
-`disassembly/AGENTS.md`, which is for the post-freeze comparison pass only.
+`disassembly/PROTOCOL_NOTES.md`, which is for the post-freeze comparison pass only.
 -->
 
 How to decompile an Android bed-controller app and where its logic hides. This is tooling and

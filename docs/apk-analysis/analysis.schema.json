@@ -127,6 +127,23 @@
           "release_behavior",
           "evidence"
         ],
+        "comment": "Null is allowed throughout because the prompt requires an unknown to be reported as null with an explanation rather than omitted. What is rejected is a wrong shape, such as a scalar where the report promises a table.",
+        "properties": {
+          "id": {"type": "string"},
+          "reachability": {"type": "string"},
+          "selectors": {"type": ["array", "null"]},
+          "discovery_rules": {"type": ["object", "null"]},
+          "gatt": {"type": ["object", "null"]},
+          "session_sequence": {"type": ["array", "null"]},
+          "packet_format": {"type": ["object", "null"]},
+          "commands": {"type": ["array", "null"]},
+          "notifications": {"type": ["array", "null"]},
+          "capabilities": {"type": ["object", "null"]},
+          "model_mappings": {"type": ["array", "null"]},
+          "timing": {"type": ["object", "null"]},
+          "release_behavior": {"type": ["object", "null"]},
+          "evidence": {"type": "array"}
+        },
         "additionalProperties": true
       }
     },
@@ -148,7 +165,9 @@
     },
     "completion_gates": {
       "type": "array",
+      "comment": "minItems and maxItems both equal the gate count, so with the contains clauses below every gate appears exactly once and cannot be reported twice with conflicting results.",
       "minItems": 17,
+      "maxItems": 17,
       "items": {
         "type": "object",
         "required": ["gate", "result", "evidence"],
@@ -199,6 +218,10 @@
       },
       "then": {
         "properties": {
+          "blockers": {
+            "comment": "An unresolved blocker and a COMPLETE status are contradictory: a resolved historical constraint belongs in limitations.",
+            "maxItems": 0
+          },
           "completion_gates": {
             "items": {
               "allOf": [

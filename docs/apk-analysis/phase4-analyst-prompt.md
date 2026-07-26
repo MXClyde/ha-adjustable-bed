@@ -97,6 +97,7 @@ Complexity checkpoint before Phase B:
 
 5. Count every independently selectable product, model, remote-code, variant, protocol implementation, and configuration branch before deep tracing. Write a stable, sorted variant inventory containing the artifact-local identifier, source path or object identity, selector/mapping evidence, and content hash where practical.
 6. Estimate whether the complete inventory can be analyzed within one run. If it cannot, do not sample, truncate, or call a representative variant exhaustive. Partition the inventory deterministically into non-overlapping shards using stable identifiers or sorted ranges. Shards may run sequentially or independently, but each must use the same prompt and schema and must report the exact inventory entries it covers.
+   Every shard takes a stable shard ID and writes to its own paths: `work/<SHARD_ID>/` for tool output and `report/<SHARD_ID>/` for `ANALYSIS.md`, `analysis.json`, `SEARCH_LOG.md`, reproducer scripts and `REPORT.SHA256`. Shards must never share an output path, whether they run concurrently or in sequence: overwriting a sibling's report destroys the immutable per-shard evidence that reconciliation depends on. A single-shard run uses `report/` directly. The reconciliation pass writes `report/RECONCILIATION.md` plus its own `analysis.json`, and records each shard's ID, covered inventory entries, and `REPORT.SHA256` hashes.
 7. A shared transport may be analyzed once, but every shard must independently trace its product-specific reachability, dynamic selector fields, commands, capabilities, and model mappings. Shared-library constants remain candidates until a variant-specific path proves them reachable.
 8. Run a reconciliation pass after all shards. It must prove: total inventory equals analyzed entries plus evidence-backed aliases/duplicates, dead/unreachable entries, and explicitly blocked entries; no entry is missing or counted twice; conflicts between shards are preserved and resolved or marked unresolved.
 9. A common-transport report may be PARTIAL while variant shards remain. COMPLETE requires zero unaccounted inventory entries, not merely a recovered shared packet builder. Record the inventory manifest, shard definition, per-shard counts, reconciliation result, and remaining blockers in ANALYSIS.md, analysis.json, and SEARCH_LOG.md.
@@ -376,7 +377,8 @@ REQUIRED OUTPUTS
 
 The workspace is laid out as `input/` (supplied artifact, identity manifest, this prompt, schema),
 `work/` (all decompiler and tool output) and `report/` (everything below). Write all outputs under
-"<<WORKSPACE>>"/report/ and nowhere else.
+"<<WORKSPACE>>"/report/ and nowhere else. In a sharded run, substitute the shard's own
+`report/<SHARD_ID>/` for `report/` throughout, per the complexity checkpoint above.
 
 1. ANALYSIS.md, the human-readable forensic report, with these sections:
    - Identity, hashes, signer, source, and analysis status
