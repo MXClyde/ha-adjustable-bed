@@ -804,9 +804,17 @@ export class AdjustableBedCard extends LitElement {
   }
 
   private _motorStop(m: MotorEntity): void {
-    this._cancelHold(m);
-    if (m.cover) this._cover(m.cover, "stop_cover");
-    else if (this._bed?.stop) this._press(this._bed.stop);
+    if (m.cover) {
+      this._cancelHold(m);
+      this._cover(m.cover, "stop_cover");
+      return;
+    }
+    // A button-backed row has no stop of its own and falls through to the
+    // bed-wide stop, which halts whatever is moving. So it has to invalidate
+    // any active hold, not just this row's: pressing one row's stop while a
+    // different row is held would otherwise let that row's loop issue another
+    // press as soon as the stop landed, restarting the motor.
+    this._stopAll();
   }
 
   private _toggleSaveMode(): void {
