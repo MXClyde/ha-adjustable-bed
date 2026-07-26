@@ -386,3 +386,74 @@ def _read_log_file(log_path: str) -> list[dict[str, str]]:
             current["message"] += "\n" + redact_pins_only({"msg": line})["msg"]
 
     return logs[-MAX_LOG_ENTRIES:]
+
+
+def _probe_log_file(log_path: str) -> tuple[bool, str | None, str | None]:
+    """Return ``(available, reason, error)`` for the Home Assistant log file.
+
+    Runs in an executor (blocking file I/O). ``reason`` is ``"missing"`` or
+    ``"unreadable"`` when the file cannot be used.
+    """
+    try:
+        with open(log_path, "rb") as handle:  # noqa: PTH123 - plain path from HA config
+            handle.read(1)
+    except FileNotFoundError as err:
+        return False, "missing", str(err)
+    except OSError as err:
+        return False, "unreadable", str(err)
+    return True, None, None
+
+
+async def async_check_log_file(hass: HomeAssistant) -> dict[str, Any]:
+    """Check up front whether a support bundle will be able to include logs.
+
+    The capture itself takes minutes, and a bundle without logs is missing the
+    single most useful evidence for connection problems (issue #385: every
+    bundle in that report had ``log_capture_status: "unavailable"``). Probing
+    first lets the caller tell the user *before* they wait for a useless
+    capture.
+    """
+    log_path = hass.config.path("home-assistant.log")
+    available, reason, error = await hass.async_add_executor_job(
+        _probe_log_file, log_path
+    )
+    return {
+        "available": available,
+        "reason": reason,
+        "path": log_path,
+        "error": error,
+    }
+
+
+def build_missing_log_notice(
+    reason: str | None, error: str | None, *, future: bool = False
+) -> str:
+    """Explain a bundle that has (or will have) no logs, and how to fix it.
+
+    Shared by the pre-capture warning and the finished-bundle notification so
+    both give the same remedy. Note what is deliberately absent: telling the
+    user to configure `logger:`. That only sets levels; it does not create a
+    file handler, so it cannot help an install that logs to stdout.
+    """
+    headline = (
+        "⚠️ **This bundle will contain no logs.**"
+        if future
+        else "⚠️ **This bundle contains no logs.**"
+    )
+    if reason == "unreadable":
+        return (
+            f"{headline} The Home Assistant log file could not be read "
+            f"(`{error}`), so the reason a command failed is usually not "
+            "recoverable from it. Check the file's permissions and the "
+            "configured log path, then run this service again."
+        )
+    return (
+        f"{headline} Home Assistant is not writing a `home-assistant.log` file "
+        "(common on container installs that log to stdout), so the reason a "
+        "command failed is usually not recoverable from it.\n\n"
+        "Use **Settings → Devices & services → Adjustable Bed → ⋮ → "
+        "Enable debug logging** instead, reproduce the problem, then "
+        "**Disable debug logging** to download the captured log and attach it "
+        "alongside this bundle. The full log is also available under "
+        "**Settings → System → Logs → Load full logs**."
+    )

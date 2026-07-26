@@ -614,6 +614,7 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
 
     from .download import register_download
     from .support_bundle import generate_support_bundle, save_support_bundle
+    from .support_report import async_check_log_file, build_missing_log_notice
 
     device_ids = call.data.get(CONF_DEVICE_ID, [])
     target_address = call.data.get(ATTR_TARGET_ADDRESS)
@@ -676,6 +677,34 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
         )
 
     assert address is not None
+
+    # Probe the log file before capturing. The capture runs for minutes, and a
+    # bundle without logs is missing the evidence that matters most for
+    # connection problems, so warn while the user can still fix it and re-run
+    # rather than only telling them afterwards (issue #385).
+    if include_logs:
+        log_check = await async_check_log_file(hass)
+        if not log_check["available"]:
+            _LOGGER.warning(
+                "Support bundle for %s will not include logs: %s (%s)",
+                address,
+                log_check["path"],
+                log_check["reason"],
+            )
+            async_create(
+                hass,
+                build_missing_log_notice(
+                    log_check["reason"], log_check["error"], future=True
+                )
+                + "\n\nThe capture is running anyway, so you will still get a "
+                "bundle with Bluetooth diagnostics.",
+                title="Adjustable Bed: this bundle will have no logs",
+                notification_id=(
+                    "adjustable_bed_support_bundle_logs_"
+                    f"{address.replace(':', '_').lower()}"
+                ),
+            )
+
     try:
         report = await asyncio.wait_for(
             generate_support_bundle(
@@ -718,32 +747,9 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
                 address,
                 log_error or "the Home Assistant log file could not be read",
             )
-            if evidence.get("log_capture_reason") == "unreadable":
-                # `logger:` only changes levels; it cannot fix a permission
-                # problem or a log path Home Assistant is not writing to.
-                logging_notice = (
-                    "\n\n⚠️ **This bundle contains no logs.** The Home Assistant log "
-                    f"file could not be read (`{log_error}`), so the reason a command "
-                    "failed is usually not recoverable from it. Check the file's "
-                    "permissions and the configured log path, then run this service "
-                    "again."
-                )
-            else:
-                # `logger:` only sets levels - it does not create a file handler,
-                # so it cannot help an install that logs to stdout instead of
-                # home-assistant.log. Point at the flow that always yields a
-                # downloadable log.
-                logging_notice = (
-                    "\n\n⚠️ **This bundle contains no logs.** Home Assistant is not "
-                    "writing a `home-assistant.log` file (common on container "
-                    "installs that log to stdout), so the reason a command failed is "
-                    "usually not recoverable from it.\n\n"
-                    "Use **Settings → Devices & services → Adjustable Bed → ⋮ → "
-                    "Enable debug logging** instead, reproduce the problem, then "
-                    "**Disable debug logging** to download the captured log and "
-                    "attach it alongside this bundle. The full log is also available "
-                    "under **Settings → System → Logs → Load full logs**."
-                )
+            logging_notice = "\n\n" + build_missing_log_notice(
+                evidence.get("log_capture_reason"), log_error
+            )
 
         async_create(
             hass,

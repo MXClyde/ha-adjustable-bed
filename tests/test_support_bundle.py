@@ -1535,3 +1535,123 @@ class TestSupportBundleLoggingWarning:
         assert len(created) == 1
         assert "[Errno 13] Permission denied" in created[0]
         assert "logger:" not in created[0]
+
+
+class TestSupportBundlePreCaptureLogWarning:
+    """The user must learn a bundle will be log-less before waiting for it."""
+
+    @staticmethod
+    def _report() -> dict:
+        return {
+            "notifications": [],
+            "evidence": {
+                "log_capture_status": "unavailable",
+                "log_capture_reason": "missing",
+                "log_capture_error": "[Errno 2] No such file or directory",
+                "warnings": [],
+            },
+        }
+
+    async def _run(self, hass, check: dict) -> list[tuple[str, str]]:
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from homeassistant.core import ServiceCall
+
+        from custom_components.adjustable_bed.services import (
+            handle_generate_support_bundle,
+        )
+
+        events: list[tuple[str, str]] = []
+
+        def _capture(_hass, message, title=None, notification_id=None):
+            events.append((str(title), message))
+
+        async def _generate(*args, **kwargs):
+            events.append(("__capture_ran__", ""))
+            return self._report()
+
+        call = ServiceCall(
+            hass,
+            DOMAIN,
+            "generate_support_bundle",
+            {"target_address": "AA:BB:CC:DD:EE:FF", "capture_duration": 5},
+        )
+        with (
+            patch(
+                "custom_components.adjustable_bed.support_report.async_check_log_file",
+                AsyncMock(return_value=check),
+            ),
+            patch(
+                "custom_components.adjustable_bed.support_bundle.generate_support_bundle",
+                _generate,
+            ),
+            patch(
+                "custom_components.adjustable_bed.support_bundle.save_support_bundle",
+                MagicMock(return_value="/config/bundle.json"),
+            ),
+            patch(
+                "custom_components.adjustable_bed.download.register_download",
+                MagicMock(return_value="/api/download/bundle.json"),
+            ),
+            patch(
+                "homeassistant.components.persistent_notification.async_create",
+                _capture,
+            ),
+        ):
+            await handle_generate_support_bundle(call)
+        return events
+
+    async def test_warns_before_the_capture_runs(self, hass):
+        """The warning must land before the multi-minute capture, not after it."""
+        events = await self._run(
+            hass,
+            {
+                "available": False,
+                "reason": "missing",
+                "path": "/config/home-assistant.log",
+                "error": "[Errno 2] No such file or directory",
+            },
+        )
+
+        titles = [title for title, _ in events]
+        assert titles.index("Adjustable Bed: this bundle will have no logs") < titles.index(
+            "__capture_ran__"
+        )
+        pre_capture = next(msg for title, msg in events if "no logs" in title)
+        assert "will contain no logs" in pre_capture
+        assert "Enable debug logging" in pre_capture
+        # `logger:` only sets levels; it cannot create a missing log file.
+        assert "logger:" not in pre_capture
+        # The capture is not aborted: a Bluetooth-only bundle still has value.
+        assert "__capture_ran__" in titles
+
+    async def test_unreadable_log_reports_the_error_not_logging_advice(self, hass):
+        """A permission problem needs a different remedy than a missing file."""
+        events = await self._run(
+            hass,
+            {
+                "available": False,
+                "reason": "unreadable",
+                "path": "/config/home-assistant.log",
+                "error": "[Errno 13] Permission denied",
+            },
+        )
+
+        pre_capture = next(msg for title, msg in events if "no logs" in title)
+        assert "[Errno 13] Permission denied" in pre_capture
+        assert "permissions" in pre_capture
+        assert "Enable debug logging" not in pre_capture
+
+    async def test_no_warning_when_logs_are_available(self, hass):
+        """A healthy install must not be nagged."""
+        events = await self._run(
+            hass,
+            {
+                "available": True,
+                "reason": None,
+                "path": "/config/home-assistant.log",
+                "error": None,
+            },
+        )
+
+        assert not [t for t, _ in events if "will have no logs" in t]
