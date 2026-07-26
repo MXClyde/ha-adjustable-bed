@@ -26,12 +26,14 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Directories that legitimately contain their own checkout or vendored tree.
+# Directories that legitimately contain their own checkout or vendored tree. ``.claude`` is
+# deliberately absent: Claude Code treats a file there as project instructions, so pruning it would
+# leave ``.claude/CLAUDE.md`` able to carry protocol material to every analyst unseen. The walk only
+# retains the two instruction filenames, so descending into it costs nothing.
 _PRUNED = {
     ".git",
     ".venv",
     ".worktrees",
-    ".claude",
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
@@ -39,6 +41,11 @@ _PRUNED = {
     "smartbed-mqtt",
     "smartbed-mqtt-discord-chats",
 }
+
+# Worktree containers, pruned by relative path rather than by name. Each holds full checkouts whose
+# own root AGENTS.md is legitimate, so they are skipped, while ``.claude`` itself is still scanned
+# for the project instruction file that would be injected from there.
+_PRUNED_PATHS = {".claude/worktrees"}
 
 # Filenames a harness auto-injects based on working directory. Outside the repo root, either one
 # is an ancestor of a run workspace and reaches the analyst unbidden.
@@ -105,7 +112,8 @@ _BARE_BYTE = re.compile(r"\b(?=[0-9A-F]{2}\b)[0-9A-F]*[A-F][0-9A-F]*\b")
 # ("packet bytes: [5, 2, 170]").
 _BYTE_VALUE = r"(?:25[0-5]|2[0-4]\d|1\d\d|\d{1,2})"
 _DECIMAL_BYTE_ASSIGNMENT = re.compile(
-    rf"\b(?:command|opcode|frame|packet|payload|byte)s?\b\s*[:=]\s*{_BYTE_VALUE}\b",
+    rf"\b(?:command|opcode|frame|packet|payload|byte)s?\b\s*(?:[:=]|\s+(?:is|are))\s*"
+    rf"{_BYTE_VALUE}\b(?!\s*(?:bytes?|bits?|ms|msec|seconds?|entries|items|characters|chars))",
     re.IGNORECASE,
 )
 _DECIMAL_BYTE_LIST = re.compile(rf"\[\s*{_BYTE_VALUE}\s*(?:,\s*{_BYTE_VALUE}\s*)+\]")
@@ -121,12 +129,15 @@ _BYTE_SEQUENCE_LOOSE = re.compile(r"\b[0-9a-fA-F]{2}(?:[\s,]+[0-9a-fA-F]{2}){2,}
 # A bare pair of any case, which only counts alongside packet vocabulary.
 _BYTE_SEQUENCE_PAIR = re.compile(r"\b[0-9a-fA-F]{2}(?:[\s,]+[0-9a-fA-F]{2})+\b")
 
-# A pointer *to* the comparison notes, as opposed to a prohibition mentioning them by name.
-# Both forms that previously existed in AGENTS.md are covered: a markdown link target, and a
-# parenthetical "see `path`".
-_POINTER = re.compile(
-    r"\]\([^)]*disassembly/(?:AGENTS|CLAUDE|PROTOCOL_NOTES)\.md"
-    r"|see\s+\**\[?`?[^\s`)]*disassembly/(?:AGENTS|CLAUDE|PROTOCOL_NOTES)\.md",
+# Any mention of the comparison notes at all. Keying on introductory wording was too narrow:
+# "Consult disassembly/PROTOCOL_NOTES.md" and "Read it first" sent the analyst there just as
+# effectively as "see" did, and no list of verbs stays complete.
+_NOTES_PATH = re.compile(r"disassembly/(?:AGENTS|CLAUDE|PROTOCOL_NOTES)\.md", re.IGNORECASE)
+# Naming the file in order to forbid it is the intended usage, so a prohibition anywhere in the
+# surrounding sentence clears the mention. Prose wraps, so neighbouring lines count as context.
+_PROHIBITION = re.compile(
+    r"\b(?:never|must not|may not|cannot|can't|do not|don't|off-limits|forbidden|"
+    r"prohibited|only|instead)\b",
     re.IGNORECASE,
 )
 
@@ -236,6 +247,21 @@ def _answer_key_violation(line: str) -> str | None:
 _NEW_BLOCK = re.compile(r"^\s*(?:[-*+>#|]|\d+[.)]|```|~~~|$)")
 
 
+def _unguarded_notes_mentions(text: str) -> list[int]:
+    """Line numbers naming the comparison notes without a prohibition around them.
+
+    The sentence carrying the prohibition often wraps, so the line before and after count as
+    context. Anything left over is a mention that reads as somewhere to go.
+    """
+    lines = text.splitlines()
+    return [
+        index + 1
+        for index, line in enumerate(lines)
+        if _NOTES_PATH.search(line)
+        and not _PROHIBITION.search(" ".join(lines[max(0, index - 1) : index + 2]))
+    ]
+
+
 def _display_path(path: Path) -> str:
     """Repo-relative where possible, absolute otherwise (the memory indexes live outside it)."""
     try:
@@ -292,7 +318,9 @@ def _find_injected_files() -> list[Path]:
         dirnames[:] = [
             name
             for name in dirnames
-            if name not in _PRUNED and not os.path.islink(os.path.join(parent, name))
+            if name not in _PRUNED
+            and _display_path(Path(parent) / name) not in _PRUNED_PATHS
+            and not os.path.islink(os.path.join(parent, name))
         ]
         if Path(parent) == REPO_ROOT:
             continue
@@ -353,6 +381,8 @@ def test_injected_instructions_carry_no_answer_key(relative_path: str) -> None:
         "Service UUID is 1800",
         "STOP command: 18",
         "packet bytes: [5, 2, 170]",
+        "STOP command is 18",
+        "the opcode is 255",
         "Service UUID: 1234",
         "characteristic = 0x1812",
         "Device-name pattern: BED_*",
@@ -386,6 +416,7 @@ def test_answer_key_forms_are_detected(line: str) -> None:
         "- checksum/CRC algorithm with covered byte range, initial value, polynomial",
         "| `motor_pulse_count` | Command repeat count | 10 |",
         "the service is to be added",
+        "the payload is 20 bytes long",
         "which are frequently the exact methods doing bit manipulation and checksums",
         "Write reproducer code for every packet builder, checksum/CRC, and parser",
     ],
@@ -420,6 +451,29 @@ def test_neighbouring_list_items_are_not_joined() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("text", "is_offender"),
+    [
+        ("Consult disassembly/PROTOCOL_NOTES.md for the answer.", True),
+        ("Read disassembly/PROTOCOL_NOTES.md first.", True),
+        ("Background: disassembly/PROTOCOL_NOTES.md has the tables.", True),
+        ("disassembly/PROTOCOL_NOTES.md must never be read during a clean-room run.", False),
+        (
+            "`disassembly/PROTOCOL_NOTES.md` holds comparison notes. It is for the\n"
+            "post-freeze pass only and must never be read during a clean-room run.",
+            False,
+        ),
+    ],
+)
+def test_pointer_detection_ignores_only_prohibitions(text: str, is_offender: bool) -> None:
+    """Any mention that reads as somewhere to go counts, whatever verb introduces it.
+
+    Keying on "see" missed "Consult" and "Read ... first", and no list of verbs stays complete.
+    Naming the file in order to forbid it stays clean, including when that sentence wraps.
+    """
+    assert bool(_unguarded_notes_mentions(text)) is is_offender
+
+
 def test_no_analyst_visible_doc_points_at_the_comparison_notes() -> None:
     """Nothing may send a reader to the machine-local protocol notes.
 
@@ -444,8 +498,7 @@ def test_no_analyst_visible_doc_points_at_the_comparison_notes() -> None:
         f"{_display_path(path)}:{number}"
         for path in candidates
         if path.is_file()
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
-        if _POINTER.search(line)
+        for number in _unguarded_notes_mentions(path.read_text(encoding="utf-8"))
     ]
     assert not offenders, (
         "disassembly/PROTOCOL_NOTES.md is untracked and is comparison material; point readers at "

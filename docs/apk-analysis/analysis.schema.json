@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://local.invalid/schemas/phase4-analysis-v1.8-2026-07-26.json",
+  "$id": "https://local.invalid/schemas/phase4-analysis-v1.9-2026-07-26.json",
   "title": "Phase 4 APK protocol analysis",
   "type": "object",
   "required": [
@@ -22,7 +22,7 @@
   ],
   "properties": {
     "schema_revision": {
-      "const": "phase4-analysis-v1.8-2026-07-26"
+      "const": "phase4-analysis-v1.9-2026-07-26"
     },
     "status": {
       "enum": ["COMPLETE", "PARTIAL", "BLOCKED", "INPUT_MISMATCH"]
@@ -313,6 +313,27 @@
       }
     },
     {
+      "comment": "INPUT_MISMATCH means one thing: identity verification failed. Without this, the status could be attached to a report whose identity gate passed, and no consumer could tell a real mismatch from an arbitrary label.",
+      "if": {
+        "properties": {"status": {"const": "INPUT_MISMATCH"}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "completion_gates": {
+            "contains": {
+              "type": "object",
+              "required": ["gate", "result"],
+              "properties": {
+                "gate": {"const": "identity_verified"},
+                "result": {"const": "FAIL"}
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "comment": "A BLOCKED report exists to record the gap and the next step. One that lists no blocker preserves neither, and nobody can resume the analysis from it.",
       "if": {
         "properties": {"status": {"const": "BLOCKED"}},
@@ -335,6 +356,11 @@
             "comment": "An unresolved blocker and a COMPLETE status are contradictory: a resolved historical constraint belongs in limitations.",
             "maxItems": 0
           },
+          "variant_inventory": {"minItems": 1},
+          "candidate_ledger": {"minItems": 1},
+          "protocols": {"minItems": 1},
+          "test_vectors": {"minItems": 1},
+          "evidence": {"minItems": 1},
           "completion_gates": {
             "items": {
               "allOf": [
