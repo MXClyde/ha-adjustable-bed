@@ -43,7 +43,7 @@ INPUTS
 - Supplied files: <<SUPPLIED_FILES>>
 - Output directory: "<<WORKSPACE>>"
 - Known acquisition limitations: see input/identity.json -> known_acquisition_limitations
-- Required analysis.json schema and revision: input/analysis.schema.json, revision phase4-analysis-v1.2-2026-07-26
+- Required analysis.json schema and revision: input/analysis.schema.json, revision phase4-analysis-v1.3-2026-07-26
 
 NON-NEGOTIABLE RULES
 
@@ -404,8 +404,13 @@ The workspace is laid out as `input/` (supplied artifact, identity manifest, thi
    must contain identity, input hashes, status, stacks, tool coverage, candidates, protocols,
    variants, discovery rules, GATT roles, session sequence, packet formats, commands,
    notifications, capabilities, model mappings, test vectors, evidence, blockers, and
-   validation requests. Use null plus an explanation for unknown values. Do not omit a
-   field merely because it was not found.
+   validation requests. Do not omit a field merely because it was not found: report an
+   unknown as null and put the explanation in the sibling `<field>_unknown_reason` string,
+   for example `"commands": null` with `"commands_unknown_reason": "..."` stating what was
+   searched. The schema rejects a bare null, so an exhaustively searched absence stays
+   distinguishable from a section nobody examined.
+   A run that stops at INPUT_MISMATCH may leave the identity hashes null and the stack
+   inventory empty, since it is required to stop before establishing either.
 
 3. SEARCH_LOG.md, an audit trail containing:
    - tool versions and exact commands

@@ -79,6 +79,14 @@ _SHORT_UUID = re.compile(
     r"\b(?=[0-9a-fA-F]*[a-fA-F])(?=[0-9a-fA-F]*\d)"
     r"(?:[0-9a-fA-F]{4}|[0-9a-fA-F]{8}|[0-9a-fA-F]{32})\b"
 )
+# An explicit assignment such as "Service UUID: 1234" names the value outright, so a numeric-only
+# short UUID counts there. It cannot count on mere GATT vocabulary, because a bare four-digit run
+# is indistinguishable from an issue reference in prose like "the service broke in #1188".
+_LABELLED_UUID = re.compile(
+    r"\b(?:uuid|service|characteristic|descriptor)s?\b[^\n:=]{0,20}[:=]\s*"
+    r"(?:0x)?[0-9a-fA-F]{4}(?:[0-9a-fA-F]{4})?\b",
+    re.IGNORECASE,
+)
 _HEX_BYTE = re.compile(r"0x[0-9a-fA-F]{2}\b")
 # Packet vocabulary. "STOP command: 0x12" is a complete answer from a single byte, so one byte is
 # enough once the line says what the byte is for.
@@ -112,6 +120,33 @@ _BEHAVIOUR_CONTEXT = re.compile(
     re.IGNORECASE,
 )
 
+# The BLOCKED rule names device-name matching and command repeat/hold timing as answer keys, so
+# both need a detector. The vocabulary is deliberately narrow on each side.
+#
+# Names: only advertised-identity wording counts. "File-name patterns" in the tooling guide is
+# about which source files to open, and a discovery rule is worthless without a literal to match,
+# so a bare mention of "device-name rule" stays clean.
+_NAME_CONTEXT = re.compile(
+    r"\b(?:device[- ]names?|local[- ]names?|advertised names?|name prefix(?:es)?|BLE names?)\b",
+    re.IGNORECASE,
+)
+# A quoted filename is not a device name, and the rule text itself cites `SEARCH_LOG.md`, so
+# tokens ending in a file extension are excluded before anything else.
+_NAME_LITERAL = re.compile(
+    r"[\"'`](?![^\"'`]*\.[A-Za-z]{2,4}[\"'`])[A-Za-z0-9_.*^$\[\]|-]{2,}[\"'`]"
+    r"|\b[A-Z0-9_]{3,}\s*\*"
+)
+
+# Timing: only a repeat/hold cadence counts. The integration's own connection backoff and idle
+# timeouts are documented in AGENTS.md and are explicitly not protocol evidence, so "30-50ms
+# intervals" and "5-7.5s delays" must stay clean or the guard fires on its own instruction file.
+_REPEAT_CONTEXT = re.compile(
+    r"\b(?:repeat|resend|re-send|refresh|hold|held|press-and-hold|pulse)\w*\b", re.IGNORECASE
+)
+_TIMING_VALUE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:ms|msec|millisecond|sec|second)s?\b", re.IGNORECASE
+)
+
 
 def _answer_key_violation(line: str) -> str | None:
     """Describe why a line reads as protocol evidence, or return None if it is clean.
@@ -123,6 +158,8 @@ def _answer_key_violation(line: str) -> str | None:
         return "UUID literal"
     if _UUID_CONTEXT.search(line) and _SHORT_UUID.search(line):
         return "short UUID on a GATT line"
+    if _LABELLED_UUID.search(line):
+        return "short UUID assigned to a GATT label"
     # A lone byte (e.g. a config default) is fine; a pair starts describing a packet.
     if len(_HEX_BYTE.findall(line)) >= 2:
         return "multiple hex bytes"
@@ -136,6 +173,10 @@ def _answer_key_violation(line: str) -> str | None:
     # STOP/release behaviour the analyst is required to recover from the artifact.
     if _MODEL_CODE.search(line) and _BEHAVIOUR_CONTEXT.search(line):
         return "model-specific protocol behaviour in prose"
+    if _NAME_CONTEXT.search(line) and _NAME_LITERAL.search(line):
+        return "device-name matching pattern"
+    if _REPEAT_CONTEXT.search(line) and _TIMING_VALUE.search(line):
+        return "command repeat/hold timing"
     return None
 
 
@@ -214,6 +255,12 @@ def test_injected_instructions_carry_no_answer_key(relative_path: str) -> None:
         "prefix 0x12 then 0x34",
         "STOP command: 0x12",
         "the command is aa bb",
+        "Service UUID: 1234",
+        "characteristic = 0x1812",
+        "Device-name pattern: BED_*",
+        "the local name is `SLEEP-1`",
+        "Protocol X repeats every 150 ms",
+        "hold the button and resend every 100 ms",
     ],
 )
 def test_answer_key_forms_are_detected(line: str) -> None:
@@ -232,24 +279,37 @@ def test_answer_key_forms_are_detected(line: str) -> None:
         "the service regressed in e8fb668 and was fixed in #1188",
         "Registers conservative BLE connection parameters (30-50ms intervals)",
         "the service is to be added",
+        "Connection retry with progressive backoff (3 attempts, 5-7.5s delays)",
+        "Auto-disconnect after configurable idle time (default 40s)",
+        "File-name patterns worth opening directly: `*Ble*`, `*Bluetooth*`",
+        "- exact local-name rules, prefixes, suffixes, regexes, and exclusions",
     ],
 )
 def test_ordinary_prose_is_not_flagged(line: str) -> None:
     """A guard that fires on its own instruction files would just be switched off.
 
     Hex-shaped acronyms, git SHAs, issue numbers and two-letter words all live on lines that
-    legitimately mention GATT vocabulary.
+    legitimately mention GATT vocabulary. The integration's own connection timeouts and the
+    prompt's own description of what to look for must stay clean for the same reason.
     """
     assert _answer_key_violation(line) is None
 
 
-def test_no_tracked_doc_points_at_the_comparison_notes() -> None:
+def test_no_analyst_visible_doc_points_at_the_comparison_notes() -> None:
     """Nothing may send a reader to the machine-local protocol notes.
 
     Naming the file in a prohibition is fine and intended; linking to it as a place to go is the
     regression this guards. It is also untracked, so such a pointer dangles on a fresh clone.
+
+    Every root instruction file is checked, not just the tracked ``AGENTS.md``. A pointer carries
+    no protocol value of its own, so the answer-key scan passes it, and a machine-local root
+    ``CLAUDE.md`` is gitignored: a "see disassembly/PROTOCOL_NOTES.md" line there would reach every
+    analyst while being invisible to review and to every other check here.
     """
-    candidates = [REPO_ROOT / "AGENTS.md", *(REPO_ROOT / "docs").rglob("*.md")]
+    candidates = [
+        *(REPO_ROOT / name for name in sorted(_INJECTED_FILENAMES)),
+        *(REPO_ROOT / "docs").rglob("*.md"),
+    ]
     offenders = [
         f"{path.relative_to(REPO_ROOT)}:{number}"
         for path in candidates
@@ -260,6 +320,32 @@ def test_no_tracked_doc_points_at_the_comparison_notes() -> None:
     assert not offenders, (
         "disassembly/PROTOCOL_NOTES.md is untracked and is comparison material; point readers at "
         f"docs/apk-analysis/TOOLING.md instead: {offenders}"
+    )
+
+
+def test_nullable_protocol_sections_require_an_explanation() -> None:
+    """Every nullable protocol section needs a companion ``<field>_unknown_reason``.
+
+    The prompt tells the analyst to report an unknown as null plus an explanation. A bare null
+    would otherwise validate, leaving later matrix construction unable to tell an exhaustively
+    searched absence from a section nobody looked at. Adding a nullable section without its
+    explanation clause silently reopens that hole, so the two lists are checked against each other.
+    """
+    item = _load_schema()["properties"]["protocols"]["items"]
+    nullable = {
+        name for name, spec in item["properties"].items() if "null" in (spec.get("type") or [])
+    }
+    explained = {
+        clause["then"]["required"][0].removesuffix("_unknown_reason") for clause in item["allOf"]
+    }
+    assert nullable == explained, (
+        "Nullable protocol sections and their explanation clauses have drifted. "
+        f"Nullable without a clause: {sorted(nullable - explained)}. "
+        f"Clause without a nullable section: {sorted(explained - nullable)}."
+    )
+    missing_property = {f"{name}_unknown_reason" for name in nullable} - set(item["properties"])
+    assert not missing_property, (
+        f"Explanation fields are constrained nowhere, so any value would pass: {sorted(missing_property)}"
     )
 
 

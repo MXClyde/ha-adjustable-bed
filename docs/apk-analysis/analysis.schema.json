@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://local.invalid/schemas/phase4-analysis-v1.2-2026-07-26.json",
+  "$id": "https://local.invalid/schemas/phase4-analysis-v1.3-2026-07-26.json",
   "title": "Phase 4 APK protocol analysis",
   "type": "object",
   "required": [
@@ -22,7 +22,7 @@
   ],
   "properties": {
     "schema_revision": {
-      "const": "phase4-analysis-v1.2-2026-07-26"
+      "const": "phase4-analysis-v1.3-2026-07-26"
     },
     "status": {
       "enum": ["COMPLETE", "PARTIAL", "BLOCKED", "INPUT_MISMATCH"]
@@ -44,7 +44,7 @@
         "package_id": {"type": "string"},
         "version_name": {"type": "string"},
         "version_code": {"type": "string"},
-        "artifact_set_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "artifact_set_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
         "files": {
           "type": "array",
           "minItems": 1,
@@ -60,7 +60,8 @@
           }
         },
         "signer_certificate_sha256": {
-          "type": "array",
+          "comment": "Nullable so an INPUT_MISMATCH report can be truthful about a corrupt or unsigned artifact that yields no certificate hash. The not-INPUT_MISMATCH branch below restores the strict requirement for every artifact that did verify.",
+          "type": ["array", "null"],
           "minItems": 1,
           "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
         },
@@ -83,8 +84,8 @@
       }
     },
     "application_stacks": {
+      "comment": "No minimum here: an INPUT_MISMATCH run stops at Phase A step 1, before it may inventory stacks. The not-INPUT_MISMATCH branch below requires at least one entry for every run that got past identity verification.",
       "type": "array",
-      "minItems": 1,
       "items": {
         "type": "object",
         "required": ["stack", "present", "coverage", "evidence"],
@@ -127,7 +128,20 @@
           "release_behavior",
           "evidence"
         ],
-        "comment": "Null is allowed throughout because the prompt requires an unknown to be reported as null with an explanation rather than omitted. What is rejected is a wrong shape, such as a scalar where the report promises a table.",
+        "comment": "Null is allowed throughout because the prompt requires an unknown to be reported as null with an explanation rather than omitted. What is rejected is a wrong shape, such as a scalar where the report promises a table, and a bare null with no stated reason: each nullable section below carries a required <field>_unknown_reason companion, so an exhaustively searched absence stays distinguishable from an unexamined gap.",
+        "allOf": [
+          {"if": {"properties": {"selectors": {"type": "null"}}, "required": ["selectors"]}, "then": {"required": ["selectors_unknown_reason"]}},
+          {"if": {"properties": {"discovery_rules": {"type": "null"}}, "required": ["discovery_rules"]}, "then": {"required": ["discovery_rules_unknown_reason"]}},
+          {"if": {"properties": {"gatt": {"type": "null"}}, "required": ["gatt"]}, "then": {"required": ["gatt_unknown_reason"]}},
+          {"if": {"properties": {"session_sequence": {"type": "null"}}, "required": ["session_sequence"]}, "then": {"required": ["session_sequence_unknown_reason"]}},
+          {"if": {"properties": {"packet_format": {"type": "null"}}, "required": ["packet_format"]}, "then": {"required": ["packet_format_unknown_reason"]}},
+          {"if": {"properties": {"commands": {"type": "null"}}, "required": ["commands"]}, "then": {"required": ["commands_unknown_reason"]}},
+          {"if": {"properties": {"notifications": {"type": "null"}}, "required": ["notifications"]}, "then": {"required": ["notifications_unknown_reason"]}},
+          {"if": {"properties": {"capabilities": {"type": "null"}}, "required": ["capabilities"]}, "then": {"required": ["capabilities_unknown_reason"]}},
+          {"if": {"properties": {"model_mappings": {"type": "null"}}, "required": ["model_mappings"]}, "then": {"required": ["model_mappings_unknown_reason"]}},
+          {"if": {"properties": {"timing": {"type": "null"}}, "required": ["timing"]}, "then": {"required": ["timing_unknown_reason"]}},
+          {"if": {"properties": {"release_behavior": {"type": "null"}}, "required": ["release_behavior"]}, "then": {"required": ["release_behavior_unknown_reason"]}}
+        ],
         "properties": {
           "id": {"type": "string"},
           "reachability": {"type": "string"},
@@ -142,7 +156,18 @@
           "model_mappings": {"type": ["array", "null"]},
           "timing": {"type": ["object", "null"]},
           "release_behavior": {"type": ["object", "null"]},
-          "evidence": {"type": "array"}
+          "evidence": {"type": "array"},
+          "selectors_unknown_reason": {"type": "string", "minLength": 1},
+          "discovery_rules_unknown_reason": {"type": "string", "minLength": 1},
+          "gatt_unknown_reason": {"type": "string", "minLength": 1},
+          "session_sequence_unknown_reason": {"type": "string", "minLength": 1},
+          "packet_format_unknown_reason": {"type": "string", "minLength": 1},
+          "commands_unknown_reason": {"type": "string", "minLength": 1},
+          "notifications_unknown_reason": {"type": "string", "minLength": 1},
+          "capabilities_unknown_reason": {"type": "string", "minLength": 1},
+          "model_mappings_unknown_reason": {"type": "string", "minLength": 1},
+          "timing_unknown_reason": {"type": "string", "minLength": 1},
+          "release_behavior_unknown_reason": {"type": "string", "minLength": 1}
         },
         "additionalProperties": true
       }
@@ -211,6 +236,24 @@
     }
   },
   "allOf": [
+    {
+      "comment": "Identity verification either succeeded or the run stopped as INPUT_MISMATCH. Anything that got past it must carry a real signer hash, artifact-set hash, and at least one application stack.",
+      "if": {
+        "properties": {"status": {"not": {"const": "INPUT_MISMATCH"}}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "artifact": {
+            "properties": {
+              "artifact_set_sha256": {"type": "string"},
+              "signer_certificate_sha256": {"type": "array", "minItems": 1}
+            }
+          },
+          "application_stacks": {"minItems": 1}
+        }
+      }
+    },
     {
       "if": {
         "properties": {"status": {"const": "COMPLETE"}},
