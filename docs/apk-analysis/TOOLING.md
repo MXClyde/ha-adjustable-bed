@@ -164,8 +164,13 @@ File-name patterns worth opening directly: `*Ble*`, `*Bluetooth*`, `*Protocol*`,
 ```bash
 sudo apt update
 sudo apt install -y openjdk-17-jdk unzip jq ripgrep
+uv tool install check-jsonschema   # Draft 2020-12 validator, runs offline once installed
 # jadx, apktool, blutter, aapt2 and ffdec are installed per their own instructions below
 ```
+
+Install `check-jsonschema` before the workspace is handed over. The completion gates require the
+report to validate against the pinned schema, and without a validator in the toolchain that gate
+cannot be substantiated from inside the isolated workspace.
 
 ### jadx
 
@@ -190,6 +195,17 @@ Reads the manifest, package ID, version name and code from an APK.
 ### ffdec (JPEXS Free Flash Decompiler)
 
 Decompiles SWF, for Adobe AIR apps.
+
+### check-jsonschema
+
+Validates the finished report against the pinned schema. Run it before declaring a run complete:
+
+```bash
+check-jsonschema --schemafile "<WORKSPACE>"/input/analysis.schema.json \
+    "<WORKSPACE>"/report/analysis.json
+```
+
+A report that does not validate is not finished, whatever its status field says.
 
 ## Tips
 

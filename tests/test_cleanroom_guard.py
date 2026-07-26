@@ -17,7 +17,6 @@ Pure filesystem and regex work: no Home Assistant imports, no fixtures, sub-seco
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 
@@ -47,12 +46,26 @@ _INJECTED_FILENAMES = frozenset({"CLAUDE.md", "AGENTS.md"})
 # hand it deliberately. All must be free of protocol values. The schema is copied into every run's
 # input/, so a UUID or packet example added to a description or default would contaminate the run
 # just as surely as one in the prompt.
-_ANALYST_VISIBLE_DOCS = (
-    "AGENTS.md",
+_TRACKED_ANALYST_DOCS = (
     "docs/apk-analysis/TOOLING.md",
     "docs/apk-analysis/phase4-analyst-prompt.md",
     "docs/apk-analysis/analysis.schema.json",
 )
+
+
+def _analyst_visible_docs() -> tuple[str, ...]:
+    """Return every document the analyst can see, including untracked root instruction files.
+
+    The walk above deliberately permits instruction files at the repo root, so their *contents*
+    have to be scanned instead. ``CLAUDE.md`` is gitignored at every depth, so a machine-local root
+    copy (or a symlink to something else entirely) would otherwise carry protocol answers into
+    every analyst while remaining invisible to both review and this guard.
+    """
+    roots = [name for name in sorted(_INJECTED_FILENAMES) if (REPO_ROOT / name).is_file()]
+    return (*roots, *_TRACKED_ANALYST_DOCS)
+
+
+_ANALYST_VISIBLE_DOCS = _analyst_visible_docs()
 
 _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 # A short UUID is only recognisable from its label, and "Service: FFE0" is as much an answer as the
@@ -83,7 +96,19 @@ _BYTE_SEQUENCE_PAIR = re.compile(r"\b[0-9a-fA-F]{2}(?:[\s,]+[0-9a-fA-F]{2})+\b")
 # Both forms that previously existed in AGENTS.md are covered: a markdown link target, and a
 # parenthetical "see `path`".
 _POINTER = re.compile(
-    r"\]\(disassembly/(?:AGENTS|CLAUDE)\.md|see\s+\**\[?`?disassembly/(?:AGENTS|CLAUDE)\.md",
+    r"\]\([^)]*disassembly/(?:AGENTS|CLAUDE|PROTOCOL_NOTES)\.md"
+    r"|see\s+\**\[?`?[^\s`)]*disassembly/(?:AGENTS|CLAUDE|PROTOCOL_NOTES)\.md",
+    re.IGNORECASE,
+)
+
+
+# A model or module code: letters then a digit, e.g. a control-box part number. Brand names alone
+# are fine and appear throughout this repo's docs; a model code sitting next to a description of
+# how that model behaves on the wire is what gives an answer away in prose rather than in hex.
+_MODEL_CODE = re.compile(r"\b[A-Z]{2,}[0-9][A-Z0-9]*\b")
+_BEHAVIOUR_CONTEXT = re.compile(
+    r"\b(?:stops?|release|refresh|framing|checksum|handshake|keep-?alive|preamble|"
+    r"terminat\w+|acknowledg\w+)\b",
     re.IGNORECASE,
 )
 
@@ -107,6 +132,10 @@ def _answer_key_violation(line: str) -> str | None:
         _HEX_BYTE.search(line) or _BYTE_SEQUENCE_PAIR.search(line)
     ):
         return "byte in packet context"
+    # Prose is an answer too: "<model> stops by ending its held-command refresh" is exactly the
+    # STOP/release behaviour the analyst is required to recover from the artifact.
+    if _MODEL_CODE.search(line) and _BEHAVIOUR_CONTEXT.search(line):
+        return "model-specific protocol behaviour in prose"
     return None
 
 
@@ -303,11 +332,18 @@ def test_schema_gate_ids_match_prompt() -> None:
 # The per-project auto-memory index is injected into every subagent regardless of working
 # directory, so it is an analyst-visible document even though it lives outside the repo. Detail
 # belongs in the linked per-topic files, which are not injected.
-_MEMORY_INDEX = Path(
-    os.path.expanduser(
-        "~/.claude/projects/-home-kristoffer-Code-Home-Assistant-ha-adjustable-bed/memory/MEMORY.md"
-    )
-)
+def _memory_index_for_checkout() -> Path:
+    """Locate this checkout's auto-memory index.
+
+    Claude derives the project key from the checkout's absolute path, so hard-coding one
+    maintainer's path would silently skip this test on every other checkout, including CI images
+    and worktrees, exactly where an unnoticed index could be carrying answers.
+    """
+    project_key = str(REPO_ROOT).replace("/", "-").replace(" ", "-")
+    return Path.home() / ".claude" / "projects" / project_key / "memory" / "MEMORY.md"
+
+
+_MEMORY_INDEX = _memory_index_for_checkout()
 
 
 @pytest.mark.skipif(
