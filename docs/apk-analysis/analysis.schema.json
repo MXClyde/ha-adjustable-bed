@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://local.invalid/schemas/phase4-analysis-v1.10-2026-07-26.json",
+  "$id": "https://local.invalid/schemas/phase4-analysis-v1.11-2026-07-26.json",
   "title": "Phase 4 APK protocol analysis",
   "type": "object",
   "required": [
@@ -22,7 +22,7 @@
   ],
   "properties": {
     "schema_revision": {
-      "const": "phase4-analysis-v1.10-2026-07-26"
+      "const": "phase4-analysis-v1.11-2026-07-26"
     },
     "status": {
       "enum": ["COMPLETE", "PARTIAL", "BLOCKED", "INPUT_MISMATCH"]
@@ -235,7 +235,14 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "claim", "paths"],
+        "required": ["id", "claim", "paths", "confidence"],
+        "comment": "Confidence is required here because this file, not the prose report, is what later matrix construction reads. Without it a VERIFIED claim and a TENTATIVE one are indistinguishable to every downstream consumer.",
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "claim": {"type": "string", "minLength": 1},
+          "paths": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "confidence": {"$ref": "#/$defs/confidence"}
+        },
         "additionalProperties": true
       }
     },
@@ -402,6 +409,28 @@
         },
         "allOf": [
           {
+            "comment": "A protocol the report calls reachable must arrive with its transport actually reconstructed. commands: null plus a reason is the right answer for a run that could not recover them, but that run is PARTIAL, not COMPLETE: a reachable protocol with no command table cannot be implemented from. Dead, third-party and unresolved entries are exempt, since having no commands is the finding there.",
+            "properties": {
+              "protocols": {
+                "items": {
+                  "if": {
+                    "properties": {
+                      "reachability": {"enum": ["REACHABLE", "CONDITIONALLY REACHABLE"]}
+                    },
+                    "required": ["reachability"]
+                  },
+                  "then": {
+                    "properties": {
+                      "commands": {"type": "array", "minItems": 1},
+                      "gatt": {"type": "object"},
+                      "packet_format": {"type": "object"}
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
             "comment": "A recovered protocol has to come with a reproducible vector. A proven absence does not, but it does have to say so in limitations: an exhaustive negative result is a legitimate COMPLETE outcome, and forcing it to invent a protocol or sit in the PARTIAL queue forever would be worse.",
             "if": {
               "properties": {"protocols": {"minItems": 1}},
@@ -415,6 +444,17 @@
     }
   ],
   "$defs": {
+    "confidence": {
+      "comment": "The confidence labels the analyst prompt defines under EVIDENCE AND CONFIDENCE STANDARD.",
+      "enum": [
+        "VERIFIED",
+        "CORROBORATED",
+        "INFERRED",
+        "TENTATIVE",
+        "NOT FOUND",
+        "BLOCKED"
+      ]
+    },
     "reachability": {
       "comment": "The five dispositions Phase C of the analyst prompt defines. Every other categorical field here is enum-constrained; leaving this one free-form would let casing and wording drift between runs and break the matrix these reports exist to build.",
       "enum": [

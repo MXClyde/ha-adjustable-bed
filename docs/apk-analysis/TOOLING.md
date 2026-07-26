@@ -7,8 +7,9 @@ or a protocol-family name. It is written to be safe to hand to a clean-room anal
 recover all of that from the artifact alone. If any such value appears here, that is a repository
 defect: fix the document, and treat any run that read it as contaminated.
 
-Protocol knowledge and cross-app comparison material live in the machine-local, gitignored
-`disassembly/PROTOCOL_NOTES.md`, which is for the post-freeze comparison pass only.
+Protocol knowledge and cross-app comparison material live in a machine-local, gitignored notes
+file that is for the post-freeze comparison pass only. This document does not name it, because a
+clean-room analyst reads this document and must not be told where the answers are kept.
 -->
 
 How to decompile an Android bed-controller app and where its logic hides. This is tooling and

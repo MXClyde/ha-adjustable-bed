@@ -62,6 +62,56 @@ _TRACKED_ANALYST_DOCS = (
 )
 
 
+def _main_worktree() -> Path | None:
+    """The repository's main checkout, which every worktree of it lives inside."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except OSError, subprocess.SubprocessError:
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return Path(result.stdout.strip()).parent
+
+
+def _external_injection_sources() -> tuple[Path, ...]:
+    """Instruction files outside the checkout that still reach an analyst working inside it.
+
+    Injection is ancestor-based, so a file at ``/workspace/AGENTS.md`` above this checkout, or the
+    user-level ``~/.claude/CLAUDE.md``, is delivered to a clean-room run just as surely as one in
+    the repository. Neither filesystem guard here can see them, because both start at the repo
+    root, and a machine whose parent directory carried an answer key would invalidate every run on
+    it while the suite stayed green. They cannot be deleted like an in-repo offender, so their
+    contents are scanned instead.
+    """
+    own_checkout = _main_worktree()
+    found: list[Path] = []
+    for parent in REPO_ROOT.parents:
+        # A worktree lives inside the main checkout, so that checkout is an ancestor of it. Its
+        # AGENTS.md is this repository's own tracked file, scanned already and possibly sitting on
+        # a different branch; reporting another branch's copy would be noise, not a finding.
+        if own_checkout and (parent == own_checkout or own_checkout in parent.parents):
+            continue
+        found.extend(
+            parent / name for name in sorted(_INJECTED_FILENAMES) if (parent / name).is_file()
+        )
+    found.extend(
+        Path.home() / ".claude" / name
+        for name in sorted(_INJECTED_FILENAMES)
+        if (Path.home() / ".claude" / name).is_file()
+    )
+    return tuple(found)
+
+
+_EXTERNAL_INJECTION_SOURCES = _external_injection_sources()
+
+
 def _analyst_visible_docs() -> tuple[str, ...]:
     """Return every document the analyst can see, including untracked root instruction files.
 
@@ -119,8 +169,12 @@ _DECIMAL_BYTE_ASSIGNMENT = re.compile(
 _DECIMAL_BYTE_LIST = re.compile(rf"\[\s*{_BYTE_VALUE}\s*(?:,\s*{_BYTE_VALUE}\s*)+\]")
 # Packet vocabulary. "STOP command: 0x12" is a complete answer from a single byte, so one byte is
 # enough once the line says what the byte is for.
+# "BLE write: 0x12" and "on release, write b'\x12'" are command disclosures too, so the transport
+# verbs count as packet vocabulary alongside the nouns.
 _PACKET_CONTEXT = re.compile(
-    r"\b(?:command|opcode|frame|packet|payload|checksum|crc|byte value)s?\b", re.IGNORECASE
+    r"\b(?:command|opcode|frame|packet|payload|checksum|crc|byte value)s?\b"
+    r"|\b(?:write|writes|written|release|released|notify|notification)s?\b",
+    re.IGNORECASE,
 )
 # Uppercase pairs are the conventional way to write a packet, so two are enough to be a give-away.
 _BYTE_SEQUENCE = re.compile(r"\b[0-9A-F]{2}(?:[\s,]+[0-9A-F]{2})+\b")
@@ -135,9 +189,12 @@ _BYTE_SEQUENCE_PAIR = re.compile(r"\b[0-9a-fA-F]{2}(?:[\s,]+[0-9a-fA-F]{2})+\b")
 _NOTES_PATH = re.compile(r"disassembly/(?:AGENTS|CLAUDE|PROTOCOL_NOTES)\.md", re.IGNORECASE)
 # Naming the file in order to forbid it is the intended usage, so a prohibition anywhere in the
 # surrounding sentence clears the mention. Prose wraps, so neighbouring lines count as context.
+# Only an actual negative instruction clears the mention. "only" used to count, which made
+# "Only consult disassembly/PROTOCOL_NOTES.md" read as safe, and let an unrelated neighbouring
+# sentence containing the word exempt a genuine pointer.
 _PROHIBITION = re.compile(
-    r"\b(?:never|must not|may not|cannot|can't|do not|don't|off-limits|forbidden|"
-    r"prohibited|only|instead)\b",
+    r"\b(?:never|must not|may not|cannot|can't|do not|don't|is not to be|are not to be|"
+    r"off-limits|forbidden|prohibited)\b",
     re.IGNORECASE,
 )
 
@@ -406,6 +463,8 @@ def test_injected_instructions_carry_no_answer_key(relative_path: str) -> None:
         "the opcode is 255",
         "Local name is SLEEP-1",
         "Checksum: CRC-16/MODBUS",
+        'on release, write b"\\x12"',
+        "BLE write: 0x12",
         "Service UUID: 1234",
         "characteristic = 0x1812",
         "Device-name pattern: BED_*",
@@ -554,6 +613,28 @@ def test_reachability_enum_matches_prompt() -> None:
         "The analyst prompt and analysis.schema.json disagree on the reachability vocabulary. "
         f"Prompt only: {sorted(prompt_values - schema_values)}. "
         f"Schema only: {sorted(schema_values - prompt_values)}."
+    )
+
+
+def test_confidence_enum_matches_prompt() -> None:
+    """The confidence vocabulary must be exactly the labels the prompt defines.
+
+    Same reason as the reachability check: the analyst works from the prompt, so a label it names
+    but the schema rejects surfaces as a failed report rather than as a documentation bug.
+    """
+    schema_values = set(_load_schema()["$defs"]["confidence"]["enum"])
+    prompt = _load_prompt()
+    section = prompt.split("Use exactly these confidence labels:", 1)
+    assert len(section) == 2, "The analyst prompt no longer lists the confidence labels"
+    listed = {
+        match.group(1)
+        for line in section[1].splitlines()
+        if (match := re.match(r"^- ([A-Z][A-Z ]*[A-Z]):", line))
+    }
+    assert listed == schema_values, (
+        "The analyst prompt and analysis.schema.json disagree on the confidence labels. "
+        f"Prompt only: {sorted(listed - schema_values)}. "
+        f"Schema only: {sorted(schema_values - listed)}."
     )
 
 
@@ -712,6 +793,34 @@ def _memory_indexes_for_checkout() -> list[Path]:
 
 
 _MEMORY_INDEXES = _memory_indexes_for_checkout()
+
+
+@pytest.mark.skipif(
+    not _EXTERNAL_INJECTION_SOURCES,
+    reason="no ancestor or user-level instruction file on this machine",
+)
+def test_external_injection_sources_carry_no_answer_key() -> None:
+    """Instruction files above the checkout must be as clean as the ones inside it.
+
+    A parent-directory or user-level file is injected by the same ancestor rule and cannot be
+    deleted the way an in-repo offender can, so the only available check is its contents.
+    """
+    violations = [
+        f"{path}:{violation}"
+        for path in _EXTERNAL_INJECTION_SOURCES
+        for violation in _answer_key_violations(path.read_text(encoding="utf-8"))
+    ]
+    pointers = [
+        f"{path}:{number}"
+        for path in _EXTERNAL_INJECTION_SOURCES
+        for number in _unguarded_notes_mentions(path.read_text(encoding="utf-8"))
+    ]
+
+    assert not violations and not pointers, (
+        "An instruction file outside this checkout is injected into every agent working in it, "
+        "clean-room analysts included. Move protocol values and pointers out of it.\n"
+        + "\n".join(violations + pointers)
+    )
 
 
 @pytest.mark.skipif(not _MEMORY_INDEXES, reason="auto-memory index is machine-local; absent in CI")
