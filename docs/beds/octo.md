@@ -14,6 +14,45 @@ OCTO Smart Control also recognizes one-motor products that use the same
 protocol family. The integration supports the official `RTV` **Lift 1M** as a
 separate TV Lift device.
 
+### Bed brands that ship OCTO actuators
+
+OCTO Smart Control re-brands itself per OEM: the receiver reports a customer ID
+in `SYSTEM_DEVICEINFO`, and the app looks that up in a bundled `brandinginfo.json`
+to pick a logo and colour scheme. That table is effectively OCTO's OEM customer
+list, so a bed sold under any of these brands is very likely an OCTO base and
+should work with this integration:
+
+| Customer ID | Brand |
+|-------------|-------|
+| `00000001` | EcoBed |
+| `00000003` | sleepling |
+| `00000004` | sleepwell |
+| `0000000A` | bett1.de |
+| `0000000B` | Hüsler Nest |
+| `0000000C` | SWISSpur Schlafkomfort |
+| `0000000D` | BW (member of the JAB Anstoetz Group) |
+| `0000000E` | Dunlopillo |
+| `0000000F` | selecta by RöWa |
+| `00000010` | spirit by Hilding Anders |
+| `00000011` | Dorsal |
+| `00000012` | Werkmeister |
+| `00000013` | Inarredo |
+| `00000014` | Velda |
+| `00000100`, `00000101` | Swiss Sense |
+| `0000C054` | cosyworld |
+
+`00000000` is OCTO Actuators itself, `00000002` is a placeholder ("pink dummy"),
+`FFFFFFFD`/`FFFFFFFE` are demo entries, and `FFFFFFFF` marks a receiver whose
+customer ID is not app-enabled (the app then shows "This hardware does not
+provide app support. Please contact your dealer"). That last one is a licensing
+check and is unrelated to the PIN lock.
+
+Brand names are taken from `brandinginfo.json` in OCTO Smart Control 1.03.01
+and cross-checked against the bundled logo artwork, which is why two differ
+from the raw JSON labels: `00000003` is styled *sleepling*, and `0000000F` is
+RöWa's *selecta* line. This list is what the app knows and is not exhaustive:
+an OEM absent here can still use OCTO hardware.
+
 ## Apps
 
 | Analyzed | App | Package ID |
@@ -23,6 +62,72 @@ separate TV Lift device.
 ## PIN Configuration
 
 Some Octo beds require a 4-digit PIN to maintain the Bluetooth connection. Without the PIN, the bed will disconnect after ~30 seconds.
+
+### Symptom: the bed connects but nothing moves
+
+A PIN-locked receiver does **not** reject the connection. It connects and
+answers the capability query, but will not act on commands until it is
+authenticated, so a locked receiver with no PIN configured looks like a working
+integration whose controls do nothing.
+
+The official app hides *every* control while locked (motors, light and presets
+alike), so the app itself does not distinguish between them. Users have reported
+the under-bed light still responding while the motors do not, which is how this
+usually presents in the field, but that asymmetry is a field observation and is
+not established by the app.
+
+The integration raises a repair notification when capability discovery reports
+`CAP_BLE_PIN` locked while no PIN is configured. Enter the PIN in the
+integration options to fix it.
+
+### Lost PIN: factory reset
+
+There is **no factory-default PIN**. OCTO's recovery page
+(<https://octo-customer.com/pinlost/>, linked from the app) publishes a reset
+procedure per receiver instead of a default code. A factory-reset receiver has
+no PIN set (`CAP_BLE_PIN` `value[0]` becomes 0), so it is no longer locked.
+
+> ⚠️ Every one of these is a **factory reset**. OCTO's wording: "this resets
+> your controller to the factory settings! After this procedure, all data is
+> irrevocably deleted and remotes must be reteached!" For Brick 2 that also
+> includes "other connected peripherals (base station, cable remote control)".
+>
+> Find the PIN in the OCTO Smart Control app first. Treat the reset as the
+> fallback.
+
+| OCTO product | Likely BLE name | Procedure | Confirmation |
+|--------------|-----------------|-----------|--------------|
+| `CTL_RCV2` (Receiver II) | `RC2` | Button on the controller **10x in quick succession** | Light flashes 1x |
+| `CTL_BMB` (BrickMini Basic) | `BMB` | Button on the controller **10x in quick succession** | Light flashes 1x |
+| `CTL_BRICK2` (Brick 2) | `OCTOBrick2` | Button **1x briefly, then 1x long (approx. 10 s)** | Beeps 3x briefly |
+| `9021` | not established | Button **1x briefly, then 1x long (approx. 10 s)** | Light flashes 1x |
+| `1001` | not established | Button **1x briefly, then 1x long (approx. 10 s)** | Beeps 3x briefly |
+| `CTL_LIFT_MICRO` | not established | Reset from the **remote**, not the controller (below) | See below |
+
+The BLE-name column is a best-effort match against the official name prefixes;
+only the first three are confident. If your receiver is not one of those, pick
+it by its photo on the recovery page.
+
+`CTL_LIFT_MICRO` is reset from the remote instead. All four hold for approx.
+10 s, and the status LED starts flashing after 3 s then goes out at 10 s to
+confirm:
+
+| Remote | Keys to hold |
+|--------|--------------|
+| `2002` | `1` + `2` together. The remote must be in **SD mode** first (blue ring flashing; press `D` to activate it) |
+| `2003` | Both side buttons together |
+| `2007` | **Back up** + **Back down** together |
+| `2008` | **Back up** + **Back down** together |
+
+Procedures transcribed from <https://octo-customer.com/pinlost/> (retrieved
+2026-07-25).
+
+If a support bundle is needed, `controller.protocol_state` in the bundle records
+what discovery resolved: `has_pin`, `pin_locked`, `pin_configured`, `pin_sent`,
+and whether `feature_discovery_complete` was reached at all. `null` means the
+capability was never reported (usually a discovery timeout) rather than absent,
+and the repair is left untouched in that case rather than being retracted. The
+PIN value is never included.
 
 ### How to Configure Your PIN
 
@@ -184,6 +289,22 @@ Motors are controlled via bit masks (CAP_MOTORCOUNT determines how many are avai
 | Move Down | `[0x02, 0x71]` | `[motor_bits]` | Move motor(s) down |
 | Stop | `[0x02, 0x73]` | none | Stop all motors |
 
+The official app builds its control layout from `CAP_MOTORCOUNT` alone, and the
+combined steps it offers are:
+
+| Motors | Steps offered |
+|--------|---------------|
+| 1 | M1 `0x02` |
+| 2 | M1 `0x02`, M2 `0x04`, M1+2 `0x06` |
+| 3 | M3 `0x08`, M1, M2, M1+2, then M1+2+3 `0x0E` **down only** |
+| 4 | M1, M2, M3, M4 `0x10`, M1+2, M3+4 `0x18`, then M1+2+3+4 `0x1E` **down only** |
+
+The all-motors step is down-only in the app, which is what "Flat" means for
+this protocol: the integration's Flat control sends `0x06`, `0x0E` or `0x1E`
+according to the configured motor count, so 3M and 4M receivers (`RC3`, `BM3`
+and 4-motor bases) actually reach flat instead of leaving the extra actuators
+parked. A motor count the app does not recognize renders no controls at all.
+
 #### Light Commands
 
 | Command | Command Bytes | Data | Description |
@@ -211,11 +332,65 @@ The integration queries capabilities via `[0x20, 0x71]`. Known feature IDs:
 |------------|------|-------|
 | `0x000001` | CAP_MOTORCOUNT | Motor count reported by the device (1-4; Standard OCTO supports 1-4) |
 | `0x000002` | CAP_MEMCOUNT | Memory preset count |
-| `0x000003` | CAP_PIN | PIN requirement + lock state |
+| `0x000003` | CAP_BLE_PIN | PIN state + lock state (see below) |
+| `0x000004` | CAP_MEMINFO | Memory slot classes and per-slot names |
 | `0x000101` | CAP_SYNCHRO | Synchro/linked mode support |
 | `0x000102` | CAP_LIGHT | Under-bed light support (on/off) |
 | `0x000104` | CAP_LIGHT_RGBWI | RGB + White + Intensity light control |
 | `0xFFFFFF` | End sentinel | Marks end of feature list |
+
+#### Memory slots (`CAP_MEMINFO`, `0x000004`)
+
+Beds that report `CAP_MEMINFO` describe their memory slots in more detail than
+the bare count in `CAP_MEMCOUNT`:
+
+- `characteristic[]` is exactly three bytes, `[memCount, fixCount, lockCount]`.
+  A record with any other length is ignored entirely.
+- `value[]` holds one description ID per slot. It is used only when there is
+  exactly one entry per slot.
+
+The three classes partition the slot range contiguously, standard first:
+
+```text
+lockStart = memCount - lockCount
+fixStart  = lockStart - fixCount
+
+slot index <  fixStart   -> standard   (recall + save)
+fixStart <= index < lockStart -> fix   (recall + save, fixed name)
+index >= lockStart       -> lock       (recall only)
+```
+
+The integration hides the Save button for locked slots. If the value block is
+the wrong length the descriptions are dropped but the class protection is kept,
+so a malformed response cannot silently turn a locked slot into a writable one.
+
+Known description IDs are `0x01` Anti-Snore, `0x02` Zero-G, `0x03` Lordose and
+`0x04` Flat (`0x00` means unnamed). A named slot is used as the entity name, so
+you get a "Zero-G" button rather than "Memory 3". Unrecognized IDs fall back to
+the generic name.
+
+Recall and save differ by packet **type**, not just command byte:
+
+| Action | Packet | Data | Notes |
+|--------|--------|------|-------|
+| Recall slot | `NORMAL` `[0x02, 0x72]` | `[slot]` | **Hold-to-run**, repeated every 350 ms and released with `[0x02, 0x73]` |
+| Save slot | `CONFIG` `[0x10, 0x70]` | `[slot]` | One-shot |
+
+`slot` is 0-based on the wire while the UI counts from 1. Recall being
+hold-to-run matters: sending it once moves the bed a fraction of the way and
+then stalls.
+
+**There is no arrival signal.** In the official app, recall is a press-and-hold
+control that streams for exactly as long as the user holds the button. The
+protocol has no completion or position notification (the inbound `NORMAL`
+branch is empty and no position capability exists) and no timeout, so a
+headless client cannot know when the bed has reached the stored position.
+
+The integration therefore streams the recall for a fixed 30 second window and
+then releases the motors. That bound is **ours, not OCTO's**: it is chosen to
+outlast a full-travel move rather than to match the ~1 second a button press
+implies. The bed stops itself at its end stops, the STOP frame is always sent
+afterwards, and pressing Stop cancels the recall immediately.
 
 #### RGBWI Light Commands
 
@@ -228,6 +403,28 @@ Colors are set via `SYSTEM_SET_CAPS` packets targeting feature ID `0x000104`, wi
 | Set RGBWI | `[0x20, 0x73]` | `[valueType, 0x00, 0x01, 0x04, R, G, B, W, 0xFF]` | Set light color (R/G/B/W channels + full intensity) |
 
 #### PIN Authentication
+
+`CAP_BLE_PIN` (`0x000003`) carries three separate flags. Per a clean-room
+analysis of OCTO Smart Control 1.03.01 (versionCode 10301):
+
+| Field | Meaning |
+|-------|---------|
+| `characteristic[0]` | The device has the PIN feature at all |
+| `value[0]` | A PIN is set on the device |
+| `value[1]` | `0x01` unlocked, anything else locked |
+
+The PIN digits are sent as **raw integers 0-9, one byte per digit** (not ASCII
+and not BCD), four digits, as `[0x20, 0x43]` + the four bytes.
+
+The app re-authenticates on an event, not on a timer: the device pushes a
+`0x44` LOCK notification and the app answers by re-sending the stored PIN. A
+`0x43` STATE response with `data[0] != 1` means the PIN was rejected. The
+integration currently re-sends the PIN on a 25-second timer instead, which
+covers the same ground more bluntly; handling the `0x44` push and surfacing a
+rejected PIN are open improvements.
+
+The PIN feature does not exist in OCTO Smart Control 1.1.57 (versionCode
+10157); it was added by versionCode 10301.
 
 Some Octo beds require PIN authentication to control the bed. The integration automatically:
 1. Detects if the bed requires PIN via feature discovery (`command=[0x20, 0x71]`)

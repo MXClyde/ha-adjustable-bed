@@ -26,6 +26,7 @@ import {
   pairedChildDeviceIds,
   resolvePairedParentId,
 } from "./discovery";
+import { MotorHold } from "./hold";
 import { localize } from "./localize";
 import { settleSequentially } from "./settle-sequentially";
 import {
@@ -81,6 +82,32 @@ export class AdjustableBedCard extends LitElement {
   @state() private _synchronizationFailed = false;
 
   private _watched: string[] = [];
+  // Press-and-hold rules live in MotorHold; this class owns only the event
+  // wiring and the service calls it drives.
+  private readonly _hold = new MotorHold({
+    pulse: (m, dir) => {
+      if (m.cover) {
+        return this.hass?.callService(
+          "cover",
+          dir === "up" ? "open_cover" : "close_cover",
+          { entity_id: m.cover },
+        ) as Promise<void> | undefined;
+      }
+      const id = dir === "up" ? m.up : m.down;
+      return id
+        ? (this.hass?.callService("button", "press", {
+            entity_id: id,
+          }) as Promise<void> | undefined)
+        : undefined;
+    },
+    stopCover: (cover) => this._cover(cover, "stop_cover"),
+    // Which stop applies depends on the bed the held motor belongs to, so it is
+    // threaded in from the row that started the hold rather than read from a
+    // single bed-wide stop, which a paired render does not have.
+    stopBed: (stopEntityId) => {
+      if (stopEntityId) this._press(stopEntityId);
+    },
+  });
 
   public static async getConfigElement(): Promise<HTMLElement> {
     return document.createElement("adjustable-bed-card-editor");
@@ -101,6 +128,14 @@ export class AdjustableBedCard extends LitElement {
 
   public getCardSize(): number {
     return 8;
+  }
+
+  public override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    // Navigating away mid-hold never delivers pointerup, which would leave the
+    // repeat loop running forever and a cover-backed motor moving with nothing
+    // left to stop it.
+    this._hold.abandon();
   }
 
   protected override shouldUpdate(changed: PropertyValues): boolean {
@@ -735,7 +770,7 @@ export class AdjustableBedCard extends LitElement {
       }
       ${
         bed.stop
-          ? html`<button class="stop-all" @click=${() => this._press(bed.stop!)}>
+          ? html`<button class="stop-all" @click=${() => this._hold.stopAll(bed.stop)}>
               <ha-icon icon="mdi:stop"></ha-icon>
               <span>${localize(this.hass, "action.stop_all")}</span>
             </button>`
@@ -753,9 +788,10 @@ export class AdjustableBedCard extends LitElement {
   }
 
   // `stopId` is the STOP entity for the bed this row belongs to (a side's own
-  // stop for a paired side, the parent's stop_both for the combined block) —
-  // passed in rather than read from this._bed, which during a paired render
-  // points at the parent for every side.
+  // stop for a paired side, the parent's stop_both for the combined block). It
+  // is passed in rather than read from card-wide state, which during a paired
+  // render would point at the parent for every side. It also backs the
+  // press-and-hold release, so a hold on one side stops that side.
   private _motorRow(m: MotorEntity, stopId?: string): TemplateResult {
     const readout = this._readout(m);
     const upId = m.cover ?? m.up;
@@ -771,7 +807,13 @@ export class AdjustableBedCard extends LitElement {
           <button
             class="cg-btn"
             aria-label=${localize(this.hass, "action.up")}
-            @click=${() => this._motorAction(m, "up")}
+            @pointerdown=${(e: PointerEvent) => this._startHold(e, m, "up", stopId)}
+            @pointerup=${(e: PointerEvent) => this._endPointerHold(e, m)}
+            @pointercancel=${(e: PointerEvent) => this._endPointerHold(e, m)}
+            @keydown=${(e: KeyboardEvent) => this._startHold(e, m, "up", stopId)}
+            @keyup=${(e: KeyboardEvent) => this._endKeyHold(e, m)}
+            @blur=${() => this._endHold(m)}
+            @click=${(e: MouseEvent) => this._activateWithoutPointer(e, m, "up")}
             ?disabled=${!upId}
           >
             <ha-icon icon="mdi:chevron-up"></ha-icon>
@@ -787,7 +829,13 @@ export class AdjustableBedCard extends LitElement {
           <button
             class="cg-btn"
             aria-label=${localize(this.hass, "action.down")}
-            @click=${() => this._motorAction(m, "down")}
+            @pointerdown=${(e: PointerEvent) => this._startHold(e, m, "down", stopId)}
+            @pointerup=${(e: PointerEvent) => this._endPointerHold(e, m)}
+            @pointercancel=${(e: PointerEvent) => this._endPointerHold(e, m)}
+            @keydown=${(e: KeyboardEvent) => this._startHold(e, m, "down", stopId)}
+            @keyup=${(e: KeyboardEvent) => this._endKeyHold(e, m)}
+            @blur=${() => this._endHold(m)}
+            @click=${(e: MouseEvent) => this._activateWithoutPointer(e, m, "down")}
             ?disabled=${!downId}
           >
             <ha-icon icon="mdi:chevron-down"></ha-icon>
@@ -1162,18 +1210,83 @@ export class AdjustableBedCard extends LitElement {
 
   // ---- actions ------------------------------------------------------------
 
-  private _motorAction(m: MotorEntity, dir: "up" | "down"): void {
+  // Translates the DOM event into a hold, or ignores it. Everything about who
+  // owns the hold and when it ends is MotorHold's business.
+  private _startHold(
+    e: PointerEvent | KeyboardEvent,
+    m: MotorEntity,
+    dir: "up" | "down",
+    stopId?: string,
+  ): void {
+    let ownerPointerId: number | null = null;
+    if (e instanceof KeyboardEvent) {
+      // Ignore the auto-repeat the OS generates while a key stays down: the
+      // repeat loop already keeps the motor moving.
+      if (e.repeat || (e.key !== "Enter" && e.key !== " ")) return;
+      e.preventDefault();
+    } else {
+      // Only the primary button of the primary pointer moves the bed. Without
+      // this a right-click, a stylus barrel button or a secondary touch starts
+      // the bed moving, and pointerdown fires before any click the previous
+      // @click handler would have filtered out.
+      if (e.button !== 0 || !e.isPrimary) return;
+      // Keep receiving pointerup even if the finger slides off the button.
+      (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+      ownerPointerId = e.pointerId;
+    }
+    this._hold.start(m, dir, ownerPointerId, stopId);
+  }
+
+  // Screen readers, voice control and switch devices activate a native button
+  // by dispatching a click alone, with no pointer or key events, so the hold
+  // handlers never fire and the bed would not move at all. Such clicks report
+  // detail === 0; real pointer clicks report the click count, and keyboard
+  // activation is already preventDefault()ed in _startHold so it never gets
+  // here. One pulse is the right response: there is no hold to track.
+  private _activateWithoutPointer(
+    e: MouseEvent,
+    m: MotorEntity,
+    dir: "up" | "down",
+  ): void {
+    if (e.detail !== 0 || this._hold.heldKey !== null) return;
     if (m.cover) {
       this._cover(m.cover, dir === "up" ? "open_cover" : "close_cover");
-    } else {
-      const id = dir === "up" ? m.up : m.down;
-      if (id) this._press(id);
+      return;
     }
+    const id = dir === "up" ? m.up : m.down;
+    if (id) this._press(id);
+  }
+
+  private _endPointerHold(e: PointerEvent, m: MotorEntity): void {
+    // pointercancel carries no meaningful button, so only pointerup can be a
+    // non-primary release.
+    this._hold.endFromPointer(
+      m,
+      e.pointerId,
+      e.type !== "pointerup" || e.button === 0,
+    );
+  }
+
+  private _endKeyHold(e: KeyboardEvent, m: MotorEntity): void {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    this._hold.end(m);
+  }
+
+  private _endHold(m: MotorEntity): void {
+    this._hold.end(m);
   }
 
   private _motorStop(m: MotorEntity, stopId?: string): void {
-    if (m.cover) this._cover(m.cover, "stop_cover");
-    else if (stopId) this._press(stopId);
+    if (m.cover) {
+      this._hold.cancel(m);
+      this._cover(m.cover, "stop_cover");
+      return;
+    }
+    // A button-backed row has no stop of its own and falls through to the stop
+    // of the bed it belongs to, which halts whatever is moving on that bed. So
+    // it has to invalidate any active hold, not just this row's.
+    this._hold.stopAll(stopId);
   }
 
   // Toggle save mode for ONE section: entering it on a section cancels any other
@@ -1700,6 +1813,11 @@ export class AdjustableBedCard extends LitElement {
       align-items: center;
       --mdc-icon-size: 22px;
       transition: background 0.15s ease;
+      /* Press-and-hold has to survive a slightly unsteady finger. Pointer
+         capture and preventDefault() do not override the browser's touch
+         gesture arbitration, so without this a small vertical drag starts
+         scrolling the page, fires pointercancel and cuts the hold short. */
+      touch-action: none;
     }
     .cg-btn:not(:last-child) {
       border-right: 1px solid var(--divider-color);

@@ -36,6 +36,7 @@ from custom_components.adjustable_bed.const import (
     BED_TYPE_KAIDI,
     BED_TYPE_KEESON,
     BED_TYPE_LEGGETT_GEN2,
+    BED_TYPE_LEGGETT_OKIN,
     BED_TYPE_LEGGETT_PLATT,
     BED_TYPE_LEGGETT_WILINKE,
     BED_TYPE_LINAK,
@@ -60,6 +61,7 @@ from custom_components.adjustable_bed.const import (
     CONF_BACK_MAX_ANGLE,
     CONF_BED_TYPE,
     CONF_BLE_BOND_ESTABLISHED,
+    CONF_BLE_BOND_MARKER_UNRELIABLE,
     CONF_DISABLE_ANGLE_SENSING,
     CONF_DISABLE_DISCOVERY,
     CONF_HAS_MASSAGE,
@@ -75,6 +77,7 @@ from custom_components.adjustable_bed.const import (
     CONF_MOTOR_COUNT,
     CONF_MOTOR_PULSE_COUNT,
     CONF_MOTOR_PULSE_DELAY_MS,
+    CONF_MOTOR_PULSE_USER_SET,
     CONF_OCTO_PIN,
     CONF_PASSIVE_POSITION_RECONCILIATION,
     CONF_PREFERRED_ADAPTER,
@@ -254,6 +257,31 @@ class TestPairingPersistence:
 
         assert result["type"] is FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_BLE_BOND_ESTABLISHED] is True
+
+    @pytest.mark.parametrize(
+        "step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"]
+    )
+    async def test_gen2_pair_now_defers_the_bond_to_setup(
+        self, hass: HomeAssistant, step: str
+    ) -> None:
+        """Pair Now must not spend LP Comfort Connect's one connection (#385).
+
+        Pairing here would connect, bond and then disconnect, leaving
+        async_setup_entry with a box that refuses every reconnect until it is
+        power-cycled. Create the entry and let the coordinator's first
+        connection carry the bond instead.
+        """
+        flow = self._new_pairing_flow(hass)
+        flow._manual_data[CONF_BED_TYPE] = BED_TYPE_LEGGETT_GEN2
+
+        attempt_pairing = AsyncMock(return_value=True)
+        with patch.object(flow, "_attempt_pairing", new=attempt_pairing):
+            result = await getattr(flow, step)({"action": "pair_now"})
+
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        attempt_pairing.assert_not_awaited()
+        # No bond marker: the coordinator must still request the bond.
+        assert result["data"].get(CONF_BLE_BOND_ESTABLISHED) is not True
 
     async def test_bluetooth_skip_marks_existing_bond_as_established(
         self, hass: HomeAssistant
@@ -895,6 +923,10 @@ class TestBluetoothDiscoveryFlow:
         assert result["data"][CONF_BED_TYPE] == BED_TYPE_LINAK
         assert result["data"][CONF_MOTOR_COUNT] == 4
         assert result["data"][CONF_HAS_MASSAGE] is True
+        # Creating an entry is also a user choice of cadence, so the provenance
+        # marker must be set here and not only in the options flow: otherwise a
+        # protocol migration would treat a deliberate value as legacy data.
+        assert result["data"][CONF_MOTOR_PULSE_USER_SET] is True
         assert result["data"][CONF_DISABLE_ANGLE_SENSING] is False
 
     async def test_bluetooth_confirm_bed_type_dropdown_uses_display_names(
@@ -2247,6 +2279,54 @@ class TestUserFlow:
 class TestOptionsFlow:
     """Test options flow."""
 
+    async def test_options_flow_records_pulse_settings_as_user_owned(
+        self,
+        hass: HomeAssistant,
+        enable_custom_integrations,
+    ) -> None:
+        """Saving the form marks the cadence as the user's, so migrations skip it.
+
+        Issue #368: a Leggett Okin user who set (10, 100) had it reverted to the
+        protocol defaults on every connect, because the runtime migration matches
+        on exactly those values and had no way to tell them from legacy defaults.
+        """
+        del enable_custom_integrations
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Leggett Okin Bed",
+            data={
+                CONF_ADDRESS: "AA:BB:CC:DD:EE:97",
+                CONF_NAME: "Leggett Okin Bed",
+                CONF_BED_TYPE: BED_TYPE_LEGGETT_OKIN,
+                CONF_MOTOR_COUNT: 4,
+                CONF_MOTOR_PULSE_COUNT: 5,
+                CONF_MOTOR_PULSE_DELAY_MS: 200,
+                CONF_DISABLE_ANGLE_SENSING: True,
+            },
+            unique_id="AA:BB:CC:DD:EE:97",
+        )
+        entry.add_to_hass(hass)
+        await async_setup_component(hass, DOMAIN, {})
+        await hass.async_block_till_done()
+
+        assert CONF_MOTOR_PULSE_USER_SET not in entry.data
+
+        initial = await hass.config_entries.options.async_init(entry.entry_id)
+        saved = await hass.config_entries.options.async_configure(
+            initial["flow_id"],
+            user_input={
+                CONF_BED_TYPE: BED_TYPE_LEGGETT_OKIN,
+                CONF_MOTOR_COUNT: 4,
+                CONF_MOTOR_PULSE_COUNT: "10",
+                CONF_MOTOR_PULSE_DELAY_MS: "100",
+            },
+        )
+
+        assert saved["type"] == FlowResultType.CREATE_ENTRY
+        assert entry.data[CONF_MOTOR_PULSE_COUNT] == 10
+        assert entry.data[CONF_MOTOR_PULSE_DELAY_MS] == 100
+        assert entry.data[CONF_MOTOR_PULSE_USER_SET] is True
+
     async def test_options_flow_can_change_bed_type_and_rebuild_dependent_fields(
         self,
         hass: HomeAssistant,
@@ -2263,6 +2343,7 @@ class TestOptionsFlow:
                 CONF_BED_TYPE: BED_TYPE_OKIN_CST,
                 CONF_MOTOR_COUNT: 4,
                 CONF_BLE_BOND_ESTABLISHED: True,
+                CONF_BLE_BOND_MARKER_UNRELIABLE: True,
                 CONF_BACK_MAX_ANGLE: 68.0,
                 CONF_DISABLE_ANGLE_SENSING: False,
             },
@@ -2312,6 +2393,8 @@ class TestOptionsFlow:
         assert entry.data[CONF_PROTOCOL_VARIANT] == OCTO_VARIANT_STANDARD
         assert entry.data[CONF_OCTO_PIN] == "1234"
         assert CONF_BLE_BOND_ESTABLISHED not in entry.data
+        # Both pairing markers describe the old protocol's requirements.
+        assert CONF_BLE_BOND_MARKER_UNRELIABLE not in entry.data
         assert CONF_BACK_MAX_ANGLE not in entry.data
         assert entry.data[CONF_DISABLE_ANGLE_SENSING] is True
 
