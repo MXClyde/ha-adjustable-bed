@@ -703,6 +703,12 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
     # takes ownership, and the earlier one then leaves it alone.
     log_notice_token = object()
     owns_log_notice = False
+    # What the probe concluded, kept so the finished-bundle notice can repeat the
+    # guidance even when the capture itself reports something else (an empty file
+    # comes back as "empty", not "unavailable") or never read the log at all.
+    probe_reason: str | None = None
+    probe_error: str | None = None
+    read_logs = include_logs
     if include_logs:
         try:
             # O_NONBLOCK does not make regular-file I/O asynchronous, so a
@@ -714,11 +720,21 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
                 async_check_log_file(hass), _LOG_PROBE_TIMEOUT
             )
         except TimeoutError:
+            log_path = hass.config.path("home-assistant.log")
             _LOGGER.warning(
-                "Timed out checking whether %s is readable; capturing anyway",
-                hass.config.path("home-assistant.log"),
+                "Timed out checking whether %s is readable; capturing without logs",
+                log_path,
             )
-            log_check = None
+            # The path is wedged. Reading it again during the capture would
+            # strand a second shared worker on the same mount for no benefit,
+            # so skip the log read and say why.
+            read_logs = False
+            log_check = {
+                "available": False,
+                "reason": "unreadable",
+                "path": log_path,
+                "error": f"timed out after {_LOG_PROBE_TIMEOUT:g}s",
+            }
         if log_check is not None:
             if log_check["available"]:
                 # A previous run may have warned about missing logs. That warning is
@@ -726,11 +742,13 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
                 # that does contain logs.
                 async_dismiss(hass, log_notification_id)
             else:
+                probe_reason = log_check["reason"]
+                probe_error = log_check["error"]
                 _LOGGER.warning(
                     "Support bundle for %s will not include logs: %s (%s)",
                     address,
                     log_check["path"],
-                    log_check["reason"],
+                    probe_reason,
                 )
                 async_create(
                     hass,
@@ -753,7 +771,7 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
                 hass,
                 address=address,
                 capture_duration=capture_duration,
-                include_logs=include_logs,
+                include_logs=read_logs,
                 coordinator=coordinator,
                 entry=entry,
                 device_id=selected_device_id,
@@ -780,17 +798,23 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
         # A bundle without logs usually cannot explain why a command failed, and
         # the user only learns that after a maintainer asks for a second one. Say
         # it up front, at the moment they still have the bed in front of them.
-        logs_missing = include_logs and evidence.get("log_capture_status") == "unavailable"
+        # The probe's verdict counts too. An empty log file makes the capture
+        # report "empty" rather than "unavailable", and a timed-out probe skips
+        # the read entirely, so relying on the capture's status alone would drop
+        # the guidance and then dismiss the only notice that carried it.
+        logs_missing = include_logs and (
+            evidence.get("log_capture_status") == "unavailable" or probe_reason is not None
+        )
         logging_notice = ""
         if logs_missing:
-            log_error = evidence.get("log_capture_error")
+            log_error = evidence.get("log_capture_error") or probe_error
             _LOGGER.warning(
                 "Support bundle for %s was generated without logs: %s",
                 address,
                 log_error or "the Home Assistant log file could not be read",
             )
             logging_notice = "\n\n" + build_missing_log_notice(
-                evidence.get("log_capture_reason"), log_error
+                evidence.get("log_capture_reason") or probe_reason, log_error
             )
 
         async_create(
