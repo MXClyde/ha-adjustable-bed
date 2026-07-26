@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
 import stat
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -478,9 +480,22 @@ async def async_check_log_file(hass: HomeAssistant) -> dict[str, Any]:
     capture.
     """
     log_path = hass.config.path("home-assistant.log")
-    available, reason, error = await hass.async_add_executor_job(
-        _probe_log_file, log_path
+    # Deliberately not hass.async_add_executor_job: os.open on a wedged network
+    # or FUSE mount cannot be cancelled, so the caller's timeout frees the
+    # service but not the worker. A stranded *shared* worker would starve
+    # unrelated Home Assistant work, so give the probe a private single-thread
+    # executor and abandon it instead.
+    executor = ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="adjustable_bed_log_probe"
     )
+    try:
+        available, reason, error = await asyncio.wrap_future(
+            executor.submit(_probe_log_file, log_path)
+        )
+    finally:
+        # wait=False returns immediately; a stuck thread keeps this private
+        # executor alive but nothing else ever waits on it.
+        executor.shutdown(wait=False)
     return {
         "available": available,
         "reason": reason,

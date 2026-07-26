@@ -692,6 +692,11 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
     log_notification_id = (
         f"adjustable_bed_support_bundle_logs_{address.replace(':', '_').lower()}"
     )
+    # Only retract a notice this invocation actually raised. The id is
+    # address-stable on purpose, so a later run can clear a stale warning, but
+    # that also means an unrelated overlapping call (an include_logs: false one,
+    # say) must not dismiss somebody else's live warning.
+    owns_log_notice = False
     if include_logs:
         try:
             # O_NONBLOCK does not make regular-file I/O asynchronous, so a
@@ -731,6 +736,7 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
                     title="Adjustable Bed: this bundle will have no logs",
                     notification_id=log_notification_id,
                 )
+                owns_log_notice = True
 
     try:
         report = await asyncio.wait_for(
@@ -820,9 +826,9 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
         # pre-capture notice must not keep claiming that it is. A finally also
         # covers cancellation: CancelledError inherits from BaseException, so an
         # automation stopped mid-capture would skip an except Exception handler
-        # and strand the notice forever. Dismissing an id that was never created
-        # is a no-op.
-        async_dismiss(hass, log_notification_id)
+        # and strand the notice forever.
+        if owns_log_notice:
+            async_dismiss(hass, log_notification_id)
 
 async def async_register_services(hass: HomeAssistant) -> None:
     """Register the Adjustable Bed services (idempotent)."""
