@@ -1,0 +1,525 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/schemas/phase4-analysis-v1.12-2026-07-26.json",
+  "title": "Phase 4 APK protocol analysis",
+  "type": "object",
+  "required": [
+    "schema_revision",
+    "status",
+    "artifact",
+    "analyst",
+    "tool_coverage",
+    "application_stacks",
+    "variant_inventory",
+    "candidate_ledger",
+    "protocols",
+    "test_vectors",
+    "evidence",
+    "completion_gates",
+    "limitations",
+    "blockers",
+    "deferred_external_validation"
+  ],
+  "properties": {
+    "schema_revision": {
+      "const": "phase4-analysis-v1.12-2026-07-26"
+    },
+    "status": {
+      "enum": ["COMPLETE", "PARTIAL", "BLOCKED", "INPUT_MISMATCH"]
+    },
+    "artifact": {
+      "type": "object",
+      "required": [
+        "app_name",
+        "package_id",
+        "version_name",
+        "version_code",
+        "artifact_set_sha256",
+        "files",
+        "signer_certificate_sha256",
+        "source"
+      ],
+      "properties": {
+        "app_name": {"type": "string"},
+        "package_id": {"type": "string"},
+        "version_name": {"type": "string"},
+        "version_code": {"type": "string"},
+        "artifact_set_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["file", "size", "sha256"],
+            "properties": {
+              "file": {"type": "string"},
+              "size": {"type": "integer", "minimum": 1},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            },
+            "additionalProperties": true
+          }
+        },
+        "signer_certificate_sha256": {
+          "comment": "Nullable so a report that stopped before verifying identity can be truthful about a corrupt or unsigned artifact that yields no certificate hash. The COMPLETE/PARTIAL branch below restores the strict requirement for every run that actually analysed the artifact.",
+          "type": ["array", "null"],
+          "minItems": 1,
+          "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "source": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "analyst": {
+      "type": "object",
+      "required": ["identity", "prompt_revision", "started_at", "completed_at"],
+      "additionalProperties": true
+    },
+    "tool_coverage": {
+      "comment": "No minimum here, for the same reason as application_stacks: a run that stops before its first action has no tool invocation to report. The COMPLETE/PARTIAL branch below requires one.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["tool", "version", "purpose", "status"],
+        "comment": "Values, not just keys: an entry of nulls satisfied the non-empty coverage requirement and let the stack_coverage gate pass without recording a single usable tool run.",
+        "properties": {
+          "tool": {"type": "string", "minLength": 1},
+          "version": {"type": "string", "minLength": 1},
+          "purpose": {"type": "string", "minLength": 1},
+          "status": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": true
+      }
+    },
+    "application_stacks": {
+      "comment": "No minimum here: an INPUT_MISMATCH run stops at Phase A step 1 and a BLOCKED run can stop before its first action, both before any stack can be inventoried. The COMPLETE/PARTIAL branch below requires at least one entry for every run that got past that point.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["stack", "present", "coverage", "evidence"],
+        "additionalProperties": true
+      }
+    },
+    "variant_inventory": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "selector", "source", "disposition"],
+        "additionalProperties": true
+      }
+    },
+    "candidate_ledger": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "category", "source", "disposition", "evidence"],
+        "comment": "Phase C defines these dispositions for candidates in the first place, so the ledger is constrained to the same vocabulary as a protocol's reachability.",
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "category": {"type": "string", "minLength": 1},
+          "source": {"type": "string", "minLength": 1},
+          "disposition": {"$ref": "#/$defs/reachability"},
+          "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+        },
+        "additionalProperties": true
+      }
+    },
+    "protocols": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "reachability",
+          "selectors",
+          "discovery_rules",
+          "gatt",
+          "session_sequence",
+          "packet_format",
+          "commands",
+          "notifications",
+          "capabilities",
+          "model_mappings",
+          "timing",
+          "release_behavior",
+          "evidence"
+        ],
+        "comment": "Null is allowed throughout because the prompt requires an unknown to be reported as null with an explanation rather than omitted. What is rejected is a wrong shape, such as a scalar where the report promises a table, and a bare null with no stated reason: each nullable section below carries a required <field>_unknown_reason companion, so an exhaustively searched absence stays distinguishable from an unexamined gap.",
+        "allOf": [
+          {"if": {"properties": {"selectors": {"anyOf": [{"type": "null"}, {"type": "array", "maxItems": 0}]}}, "required": ["selectors"]}, "then": {"required": ["selectors_unknown_reason"]}},
+          {"if": {"properties": {"discovery_rules": {"anyOf": [{"type": "null"}, {"type": "object", "maxProperties": 0}]}}, "required": ["discovery_rules"]}, "then": {"required": ["discovery_rules_unknown_reason"]}},
+          {"if": {"properties": {"gatt": {"anyOf": [{"type": "null"}, {"type": "object", "maxProperties": 0}]}}, "required": ["gatt"]}, "then": {"required": ["gatt_unknown_reason"]}},
+          {"if": {"properties": {"session_sequence": {"anyOf": [{"type": "null"}, {"type": "array", "maxItems": 0}]}}, "required": ["session_sequence"]}, "then": {"required": ["session_sequence_unknown_reason"]}},
+          {"if": {"properties": {"packet_format": {"anyOf": [{"type": "null"}, {"type": "object", "maxProperties": 0}]}}, "required": ["packet_format"]}, "then": {"required": ["packet_format_unknown_reason"]}},
+          {"if": {"properties": {"commands": {"anyOf": [{"type": "null"}, {"type": "array", "maxItems": 0}]}}, "required": ["commands"]}, "then": {"required": ["commands_unknown_reason"]}},
+          {"if": {"properties": {"notifications": {"anyOf": [{"type": "null"}, {"type": "array", "maxItems": 0}]}}, "required": ["notifications"]}, "then": {"required": ["notifications_unknown_reason"]}},
+          {"if": {"properties": {"capabilities": {"anyOf": [{"type": "null"}, {"type": "object", "maxProperties": 0}]}}, "required": ["capabilities"]}, "then": {"required": ["capabilities_unknown_reason"]}},
+          {"if": {"properties": {"model_mappings": {"anyOf": [{"type": "null"}, {"type": "array", "maxItems": 0}]}}, "required": ["model_mappings"]}, "then": {"required": ["model_mappings_unknown_reason"]}},
+          {"if": {"properties": {"timing": {"anyOf": [{"type": "null"}, {"type": "object", "maxProperties": 0}]}}, "required": ["timing"]}, "then": {"required": ["timing_unknown_reason"]}},
+          {"if": {"properties": {"release_behavior": {"anyOf": [{"type": "null"}, {"type": "object", "maxProperties": 0}]}}, "required": ["release_behavior"]}, "then": {"required": ["release_behavior_unknown_reason"]}}
+        ],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "reachability": {"$ref": "#/$defs/reachability"},
+          "selectors": {"type": ["array", "null"]},
+          "discovery_rules": {"type": ["object", "null"]},
+          "gatt": {"type": ["object", "null"]},
+          "session_sequence": {"type": ["array", "null"]},
+          "packet_format": {"type": ["object", "null"]},
+          "commands": {
+            "comment": "Constraining only the outer array let [null] and rows missing their bytes, destination, timing or evidence validate, so a COMPLETE report could be frozen as reusable evidence while being unusable for implementation. Required fields mirror the command_rows_complete gate.",
+            "type": ["array", "null"],
+            "items": {
+              "type": "object",
+              "required": [
+                "action",
+                "bytes",
+                "characteristic",
+                "write_type",
+                "timing",
+                "release_behavior",
+                "evidence"
+              ],
+              "properties": {
+                "action": {"type": "string", "minLength": 1},
+                "bytes": {"type": "string", "minLength": 1},
+                "characteristic": {"type": "string", "minLength": 1},
+                "write_type": {"type": "string", "minLength": 1},
+                "timing": {"type": ["object", "string"], "minLength": 1, "minProperties": 1},
+                "release_behavior": {
+                  "comment": "Empty placeholders satisfied the required keys and let command_rows_complete pass for a command nobody could time or stop safely.",
+                  "type": ["object", "string"],
+                  "minLength": 1,
+                  "minProperties": 1
+                },
+                "evidence": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {"type": "string", "minLength": 1}
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "notifications": {"type": ["array", "null"]},
+          "capabilities": {"type": ["object", "null"]},
+          "model_mappings": {"type": ["array", "null"]},
+          "timing": {"type": ["object", "null"]},
+          "release_behavior": {"type": ["object", "null"]},
+          "evidence": {
+            "comment": "Non-empty, like candidate and command evidence. A protocol with populated discovery, GATT and timing claims but no artifact reference is exactly the unsupported report the evidence standard exists to prevent.",
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "selectors_unknown_reason": {"type": "string", "minLength": 1},
+          "discovery_rules_unknown_reason": {"type": "string", "minLength": 1},
+          "gatt_unknown_reason": {"type": "string", "minLength": 1},
+          "session_sequence_unknown_reason": {"type": "string", "minLength": 1},
+          "packet_format_unknown_reason": {"type": "string", "minLength": 1},
+          "commands_unknown_reason": {"type": "string", "minLength": 1},
+          "notifications_unknown_reason": {"type": "string", "minLength": 1},
+          "capabilities_unknown_reason": {"type": "string", "minLength": 1},
+          "model_mappings_unknown_reason": {"type": "string", "minLength": 1},
+          "timing_unknown_reason": {"type": "string", "minLength": 1},
+          "release_behavior_unknown_reason": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": true
+      }
+    },
+    "test_vectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "protocol", "action", "inputs", "expected_bytes", "evidence"],
+        "comment": "Shapes matter here as much as presence: without them a vector of nulls satisfies the reproducibility gate while supplying nothing to reproduce.",
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "protocol": {"type": "string", "minLength": 1},
+          "action": {"type": "string", "minLength": 1},
+          "inputs": {"type": ["object", "array", "null"]},
+          "expected_bytes": {"type": "string", "minLength": 1},
+          "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+        },
+        "additionalProperties": true
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "claim", "paths", "confidence"],
+        "comment": "Confidence is required here because this file, not the prose report, is what later matrix construction reads. Without it a VERIFIED claim and a TENTATIVE one are indistinguishable to every downstream consumer.",
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "claim": {"type": "string", "minLength": 1},
+          "paths": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "confidence": {"$ref": "#/$defs/confidence"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "completion_gates": {
+      "type": "array",
+      "comment": "minItems and maxItems both equal the gate count, so with the contains clauses below every gate appears exactly once and cannot be reported twice with conflicting results.",
+      "minItems": 17,
+      "maxItems": 17,
+      "items": {
+        "type": "object",
+        "required": ["gate", "result", "evidence"],
+        "properties": {
+          "gate": {"$ref": "#/$defs/gate_id"},
+          "result": {"enum": ["PASS", "FAIL", "NOT_APPLICABLE"]},
+          "evidence": {
+            "comment": "Required non-empty for every result, NOT_APPLICABLE included: a gate that does not apply still has to say why. Without a shape here, additionalProperties would accept null or false and let a report mark every gate PASS with nothing behind it.",
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1}
+          }
+        },
+        "additionalProperties": true
+      },
+      "allOf": [
+        {"contains": {"properties": {"gate": {"const": "identity_verified"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "stack_coverage"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "artifact_inventory"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "decompiler_warnings_resolved"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "search_passes_recorded"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "transport_callsites_dispositioned"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "protocol_candidates_dispositioned"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "control_actions_traced"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "command_rows_complete"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "test_vectors_reproducible"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "feature_domains_searched"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "second_pass_clean"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "variant_reconciliation"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "schema_validation"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "report_agreement"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "cleanroom_isolation"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "uncertainties_actionable"}}, "required": ["gate"]}}
+      ]
+    },
+    "limitations": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "blockers": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "deferred_external_validation": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "allOf": [
+    {
+      "comment": "Only a run that actually analysed the artifact must carry a real signer hash, artifact-set hash, and at least one application stack. INPUT_MISMATCH stops at identity verification, and BLOCKED can stop even earlier: an injected file that leaks a protocol answer requires the analyst to stop before its first action, so demanding a discovered stack there would force it to continue into the very analysis it must not perform.",
+      "if": {
+        "properties": {"status": {"enum": ["COMPLETE", "PARTIAL"]}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "artifact": {
+            "properties": {
+              "artifact_set_sha256": {"type": "string"},
+              "signer_certificate_sha256": {"type": "array", "minItems": 1}
+            }
+          },
+          "application_stacks": {"minItems": 1},
+          "tool_coverage": {"minItems": 1}
+        }
+      }
+    },
+    {
+      "comment": "INPUT_MISMATCH means one thing: identity verification failed. Without this, the status could be attached to a report whose identity gate passed, and no consumer could tell a real mismatch from an arbitrary label.",
+      "if": {
+        "properties": {"status": {"const": "INPUT_MISMATCH"}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "completion_gates": {
+            "contains": {
+              "type": "object",
+              "required": ["gate", "result"],
+              "properties": {
+                "gate": {"const": "identity_verified"},
+                "result": {"const": "FAIL"}
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "comment": "PARTIAL means a gate did not pass, so at least one must be FAIL, and what remains has to be written down somewhere a reader will find it. Without this a report with every gate PASS and nothing in blockers or limitations validated as PARTIAL, which says nothing at all.",
+      "if": {
+        "properties": {"status": {"const": "PARTIAL"}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "completion_gates": {
+            "contains": {
+              "type": "object",
+              "required": ["result"],
+              "properties": {"result": {"const": "FAIL"}}
+            }
+          }
+        },
+        "anyOf": [
+          {"properties": {"blockers": {"minItems": 1}}, "required": ["blockers"]},
+          {"properties": {"limitations": {"minItems": 1}}, "required": ["limitations"]}
+        ]
+      }
+    },
+    {
+      "comment": "A BLOCKED report exists to record the gap and the next step. One that lists no blocker preserves neither, and nobody can resume the analysis from it.",
+      "if": {
+        "properties": {"status": {"const": "BLOCKED"}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "blockers": {"minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "completion_gates": {
+            "comment": "A blocker with all 17 gates PASS contradicts itself and hides which condition actually stopped the run. Same requirement as PARTIAL.",
+            "contains": {
+              "type": "object",
+              "required": ["result"],
+              "properties": {"result": {"const": "FAIL"}}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"status": {"const": "COMPLETE"}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "blockers": {
+            "comment": "An unresolved blocker and a COMPLETE status are contradictory: a resolved historical constraint belongs in limitations.",
+            "maxItems": 0
+          },
+          "candidate_ledger": {
+            "comment": "Always required, whatever the outcome: an exhaustive analysis dispositioned candidates even when none of them turned out to be a protocol. Together with evidence this is what stops an empty shell validating as COMPLETE.",
+            "minItems": 1
+          },
+          "evidence": {"minItems": 1},
+          "completion_gates": {
+            "items": {
+              "allOf": [
+                {"properties": {"result": {"enum": ["PASS", "NOT_APPLICABLE"]}}},
+                {
+                  "if": {
+                    "properties": {"result": {"const": "NOT_APPLICABLE"}},
+                    "required": ["result"]
+                  },
+                  "then": {
+                    "properties": {"gate": {"$ref": "#/$defs/conditional_gate_id"}}
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "allOf": [
+          {
+            "comment": "A protocol the report calls reachable must arrive with its transport actually reconstructed. commands: null plus a reason is the right answer for a run that could not recover them, but that run is PARTIAL, not COMPLETE: a reachable protocol with no command table cannot be implemented from. Dead, third-party and unresolved entries are exempt, since having no commands is the finding there.",
+            "properties": {
+              "protocols": {
+                "items": {
+                  "if": {
+                    "properties": {
+                      "reachability": {"enum": ["REACHABLE", "CONDITIONALLY REACHABLE"]}
+                    },
+                    "required": ["reachability"]
+                  },
+                  "then": {
+                    "properties": {
+                      "commands": {"type": "array", "minItems": 1},
+                      "gatt": {"type": "object"},
+                      "packet_format": {"type": "object"}
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "comment": "A reconstructed protocol has to come with a reproducible vector. Keyed on reachability, not on the array being non-empty: an analysis whose protocols are all dead, third-party or unresolved has no transport bytes to build a vector from, and the rule above already excuses those from having commands. A proven absence is a legitimate COMPLETE outcome but has to say so in limitations, rather than invent a protocol or sit in the PARTIAL queue forever.",
+            "if": {
+              "properties": {
+                "protocols": {
+                  "contains": {
+                    "type": "object",
+                    "required": ["reachability"],
+                    "properties": {
+                      "reachability": {"enum": ["REACHABLE", "CONDITIONALLY REACHABLE"]}
+                    }
+                  }
+                }
+              },
+              "required": ["protocols"]
+            },
+            "then": {"properties": {"test_vectors": {"minItems": 1}}},
+            "else": {"properties": {"limitations": {"minItems": 1}}}
+          }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "confidence": {
+      "comment": "The confidence labels the analyst prompt defines under EVIDENCE AND CONFIDENCE STANDARD.",
+      "enum": [
+        "VERIFIED",
+        "CORROBORATED",
+        "INFERRED",
+        "TENTATIVE",
+        "NOT FOUND",
+        "BLOCKED"
+      ]
+    },
+    "reachability": {
+      "comment": "The five dispositions Phase C of the analyst prompt defines. Every other categorical field here is enum-constrained; leaving this one free-form would let casing and wording drift between runs and break the matrix these reports exist to build.",
+      "enum": [
+        "REACHABLE",
+        "CONDITIONALLY REACHABLE",
+        "DEAD/UNUSED",
+        "THIRD-PARTY/UNRELATED",
+        "UNRESOLVED"
+      ]
+    },
+    "gate_id": {
+      "enum": [
+        "identity_verified",
+        "stack_coverage",
+        "artifact_inventory",
+        "decompiler_warnings_resolved",
+        "search_passes_recorded",
+        "transport_callsites_dispositioned",
+        "protocol_candidates_dispositioned",
+        "control_actions_traced",
+        "command_rows_complete",
+        "test_vectors_reproducible",
+        "feature_domains_searched",
+        "second_pass_clean",
+        "variant_reconciliation",
+        "schema_validation",
+        "report_agreement",
+        "cleanroom_isolation",
+        "uncertainties_actionable"
+      ]
+    },
+    "conditional_gate_id": {
+      "comment": "Gates that can legitimately not apply to an artifact. Every other gate must PASS for COMPLETE.",
+      "enum": ["decompiler_warnings_resolved", "variant_reconciliation"]
+    }
+  },
+  "additionalProperties": true
+}
