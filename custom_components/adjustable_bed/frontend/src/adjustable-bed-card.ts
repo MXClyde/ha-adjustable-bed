@@ -719,10 +719,13 @@ export class AdjustableBedCard extends LitElement {
         ? () => this.hass?.callService("button", "press", { entity_id: buttonId })
         : null;
     if (!call) return;
-    // Awaiting each call before issuing the next is what keeps the motion
-    // smooth: it resolves once the bed has finished that pulse, so commands
-    // never queue up behind each other and the integration never has to cancel
-    // one mid-flight.
+    // Awaiting each call before issuing the next keeps commands from queueing
+    // up behind each other, so the integration never has to cancel one
+    // mid-flight. It does not make the motion continuous: each backend command
+    // is finite and ends with the protocol's release burst, so a hold is a
+    // train of pulses with a short stop between them. Making it continuous
+    // needs a hold-until-released primitive in the integration, which does not
+    // exist yet.
     while (generation === this._holdGeneration) {
       try {
         await call();
@@ -1032,6 +1035,11 @@ export class AdjustableBedCard extends LitElement {
       align-items: center;
       --mdc-icon-size: 22px;
       transition: background 0.15s ease;
+      /* Press-and-hold has to survive a slightly unsteady finger. Pointer
+         capture and preventDefault() do not override the browser's touch
+         gesture arbitration, so without this a small vertical drag starts
+         scrolling the page, fires pointercancel and cuts the hold short. */
+      touch-action: none;
     }
     .cg-btn:not(:last-child) {
       border-right: 1px solid var(--divider-color);

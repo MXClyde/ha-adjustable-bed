@@ -550,6 +550,11 @@ var Le=Object.defineProperty;var Ue=Object.getOwnPropertyDescriptor;var y=(o,s,e
       align-items: center;
       --mdc-icon-size: 22px;
       transition: background 0.15s ease;
+      /* Press-and-hold has to survive a slightly unsteady finger. Pointer
+         capture and preventDefault() do not override the browser's touch
+         gesture arbitration, so without this a small vertical drag starts
+         scrolling the page, fires pointercancel and cuts the hold short. */
+      touch-action: none;
     }
     .cg-btn:not(:last-child) {
       border-right: 1px solid var(--divider-color);
