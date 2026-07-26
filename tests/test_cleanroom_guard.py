@@ -17,7 +17,9 @@ Pure filesystem and regex work: no Home Assistant imports, no fixtures, sub-seco
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -88,6 +90,10 @@ _LABELLED_UUID = re.compile(
     re.IGNORECASE,
 )
 _HEX_BYTE = re.compile(r"0x[0-9a-fA-F]{2}\b")
+# Escaped byte literals, the form every controller in this repository writes its packets in. A
+# b"\x12\x34" pasted into an instruction file is the protocol, spelled exactly as the code spells
+# it, and neither the 0xNN nor the separated-pair detector sees it.
+_ESCAPED_BYTE = re.compile(r"\\x[0-9a-fA-F]{2}")
 # Packet vocabulary. "STOP command: 0x12" is a complete answer from a single byte, so one byte is
 # enough once the line says what the byte is for.
 _PACKET_CONTEXT = re.compile(
@@ -183,12 +189,12 @@ def _answer_key_violation(line: str) -> str | None:
     if _LABELLED_UUID.search(line):
         return "short UUID assigned to a GATT label"
     # A lone byte (e.g. a config default) is fine; a pair starts describing a packet.
-    if len(_HEX_BYTE.findall(line)) >= 2:
+    if len(_HEX_BYTE.findall(line)) >= 2 or len(_ESCAPED_BYTE.findall(line)) >= 2:
         return "multiple hex bytes"
     if _BYTE_SEQUENCE.search(line) or _BYTE_SEQUENCE_LOOSE.search(line):
         return "byte sequence"
     if _PACKET_CONTEXT.search(line) and (
-        _HEX_BYTE.search(line) or _BYTE_SEQUENCE_PAIR.search(line)
+        _HEX_BYTE.search(line) or _ESCAPED_BYTE.search(line) or _BYTE_SEQUENCE_PAIR.search(line)
     ):
         return "byte in packet context"
     # Prose is an answer too: "<model> stops by ending its held-command refresh" is exactly the
@@ -241,24 +247,27 @@ def _answer_key_violations(text: str) -> list[str]:
     return violations
 
 
-def _walk_repo() -> list[Path]:
-    """Yield every file in the repo, skipping vendored and worktree trees.
+def _find_injected_files() -> list[Path]:
+    """Return every auto-injected instruction file in the repo, outside the root.
 
-    Directory symlinks are recorded but never descended into. ``disassembly/`` is machine-local
-    and holds decompilation trees, so a symlink there could otherwise send this walk into a cycle
-    or out of the checkout entirely, where it would report an unrelated external file as an
-    in-repository offender.
+    Only matching paths are retained. ``disassembly/`` is machine-local and holds entire APK
+    decompilations, so collecting every file there just to find two names would cost far more time
+    and memory than this guard is worth, on exactly the machines that need it.
+
+    Directory symlinks are never descended into. A symlink under ``disassembly/`` could otherwise
+    send the walk into a cycle or out of the checkout, where it would report an unrelated external
+    file as an in-repository offender.
     """
     found: list[Path] = []
-    stack = [REPO_ROOT]
-    while stack:
-        current = stack.pop()
-        for child in current.iterdir():
-            if child.is_dir() and not child.is_symlink():
-                if child.name not in _PRUNED:
-                    stack.append(child)
-            else:
-                found.append(child)
+    for parent, dirnames, filenames in os.walk(REPO_ROOT):
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in _PRUNED and not os.path.islink(os.path.join(parent, name))
+        ]
+        if Path(parent) == REPO_ROOT:
+            continue
+        found.extend(Path(parent) / name for name in filenames if name in _INJECTED_FILENAMES)
     return found
 
 
@@ -271,11 +280,7 @@ def test_no_directory_scoped_instruction_file() -> None:
     ``disassembly/AGENTS.md``, which is injected by the same mechanism under the other name. They
     now live at ``disassembly/PROTOCOL_NOTES.md``, which no harness injects.
     """
-    offenders = [
-        str(path.relative_to(REPO_ROOT))
-        for path in _walk_repo()
-        if path.name in _INJECTED_FILENAMES and path.parent != REPO_ROOT
-    ]
+    offenders = [str(path.relative_to(REPO_ROOT)) for path in _find_injected_files()]
     assert not offenders, (
         f"{sorted(_INJECTED_FILENAMES)} are auto-injected into any agent working beneath them, "
         f"which contaminates a clean-room run. Rename to a name no harness injects: {offenders}"
@@ -313,6 +318,8 @@ def test_injected_instructions_carry_no_answer_key(relative_path: str) -> None:
         "prefix 0x12 then 0x34",
         "STOP command: 0x12",
         "the command is aa bb",
+        'STOP command: b"\\x12"',
+        'PACKET = b"\\x12\\x34"',
         "Service UUID: 1234",
         "characteristic = 0x1812",
         "Device-name pattern: BED_*",
@@ -532,22 +539,44 @@ def _project_key_shape(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 
-def _memory_indexes_for_checkout() -> list[Path]:
-    """Return every auto-memory index that a session working in this checkout could be given.
+def _checkout_paths() -> set[str]:
+    """This checkout plus every real git worktree of it.
 
-    Worktrees get their own project key, so a full-repository run from the main checkout also
-    covers the indexes belonging to worktrees beneath it.
+    Worktrees get their own project key, so a run from the main checkout should cover theirs too.
+    They are enumerated from git rather than matched by path prefix: an unrelated sibling directory
+    such as ``ha-adjustable-bed-old`` shares the prefix, and scanning its memories would fail this
+    suite over content that is never injected into agents for this checkout.
     """
+    paths = {str(REPO_ROOT)}
+    try:
+        listing = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except OSError, subprocess.SubprocessError:
+        return paths
+    if listing.returncode == 0:
+        paths.update(
+            line.removeprefix("worktree ").strip()
+            for line in listing.stdout.splitlines()
+            if line.startswith("worktree ")
+        )
+    return paths
+
+
+def _memory_indexes_for_checkout() -> list[Path]:
+    """Return every auto-memory index that a session working in this checkout could be given."""
     projects = Path.home() / ".claude" / "projects"
     if not projects.is_dir():
         return []
-    wanted = _project_key_shape(str(REPO_ROOT))
+    wanted = {_project_key_shape(path) for path in _checkout_paths()}
     found = []
     for directory in sorted(projects.iterdir()):
-        if not directory.is_dir():
-            continue
-        shape = _project_key_shape(directory.name)
-        if shape != wanted and not shape.startswith(f"{wanted}-"):
+        if not directory.is_dir() or _project_key_shape(directory.name) not in wanted:
             continue
         index = directory / "memory" / "MEMORY.md"
         if index.is_file():

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://local.invalid/schemas/phase4-analysis-v1.5-2026-07-26.json",
+  "$id": "https://local.invalid/schemas/phase4-analysis-v1.6-2026-07-26.json",
   "title": "Phase 4 APK protocol analysis",
   "type": "object",
   "required": [
@@ -22,7 +22,7 @@
   ],
   "properties": {
     "schema_revision": {
-      "const": "phase4-analysis-v1.5-2026-07-26"
+      "const": "phase4-analysis-v1.6-2026-07-26"
     },
     "status": {
       "enum": ["COMPLETE", "PARTIAL", "BLOCKED", "INPUT_MISMATCH"]
@@ -108,7 +108,10 @@
         "comment": "Phase C defines these dispositions for candidates in the first place, so the ledger is constrained to the same vocabulary as a protocol's reachability.",
         "properties": {
           "id": {"type": "string", "minLength": 1},
-          "disposition": {"$ref": "#/$defs/reachability"}
+          "category": {"type": "string", "minLength": 1},
+          "source": {"type": "string", "minLength": 1},
+          "disposition": {"$ref": "#/$defs/reachability"},
+          "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
         },
         "additionalProperties": true
       }
@@ -272,6 +275,18 @@
           },
           "application_stacks": {"minItems": 1},
           "tool_coverage": {"minItems": 1}
+        }
+      }
+    },
+    {
+      "comment": "A BLOCKED report exists to record the gap and the next step. One that lists no blocker preserves neither, and nobody can resume the analysis from it.",
+      "if": {
+        "properties": {"status": {"const": "BLOCKED"}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "blockers": {"minItems": 1, "items": {"type": "string", "minLength": 1}}
         }
       }
     },
