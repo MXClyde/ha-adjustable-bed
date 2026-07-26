@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://local.invalid/schemas/phase4-analysis-v1.1-2026-07-19.json",
+  "$id": "https://local.invalid/schemas/phase4-analysis-v1.2-2026-07-26.json",
   "title": "Phase 4 APK protocol analysis",
   "type": "object",
   "required": [
@@ -13,14 +13,16 @@
     "variant_inventory",
     "candidate_ledger",
     "protocols",
+    "test_vectors",
     "evidence",
     "completion_gates",
     "limitations",
+    "blockers",
     "deferred_external_validation"
   ],
   "properties": {
     "schema_revision": {
-      "const": "phase4-analysis-v1.1-2026-07-19"
+      "const": "phase4-analysis-v1.2-2026-07-26"
     },
     "status": {
       "enum": ["COMPLETE", "PARTIAL", "BLOCKED", "INPUT_MISMATCH"]
@@ -113,13 +115,26 @@
           "id",
           "reachability",
           "selectors",
+          "discovery_rules",
           "gatt",
+          "session_sequence",
           "packet_format",
           "commands",
+          "notifications",
+          "capabilities",
+          "model_mappings",
           "timing",
           "release_behavior",
           "evidence"
         ],
+        "additionalProperties": true
+      }
+    },
+    "test_vectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "protocol", "action", "inputs", "expected_bytes", "evidence"],
         "additionalProperties": true
       }
     },
@@ -133,15 +148,35 @@
     },
     "completion_gates": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 17,
       "items": {
         "type": "object",
         "required": ["gate", "result", "evidence"],
         "properties": {
+          "gate": {"$ref": "#/$defs/gate_id"},
           "result": {"enum": ["PASS", "FAIL", "NOT_APPLICABLE"]}
         },
         "additionalProperties": true
-      }
+      },
+      "allOf": [
+        {"contains": {"properties": {"gate": {"const": "identity_verified"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "stack_coverage"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "artifact_inventory"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "decompiler_warnings_resolved"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "search_passes_recorded"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "transport_callsites_dispositioned"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "protocol_candidates_dispositioned"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "control_actions_traced"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "command_rows_complete"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "test_vectors_reproducible"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "feature_domains_searched"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "second_pass_clean"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "variant_reconciliation"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "schema_validation"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "report_agreement"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "cleanroom_isolation"}}, "required": ["gate"]}},
+        {"contains": {"properties": {"gate": {"const": "uncertainties_actionable"}}, "required": ["gate"]}}
+      ]
     },
     "limitations": {
       "type": "array",
@@ -166,14 +201,50 @@
         "properties": {
           "completion_gates": {
             "items": {
-              "properties": {
-                "result": {"enum": ["PASS", "NOT_APPLICABLE"]}
-              }
+              "allOf": [
+                {"properties": {"result": {"enum": ["PASS", "NOT_APPLICABLE"]}}},
+                {
+                  "if": {
+                    "properties": {"result": {"const": "NOT_APPLICABLE"}},
+                    "required": ["result"]
+                  },
+                  "then": {
+                    "properties": {"gate": {"$ref": "#/$defs/conditional_gate_id"}}
+                  }
+                }
+              ]
             }
           }
         }
       }
     }
   ],
+  "$defs": {
+    "gate_id": {
+      "enum": [
+        "identity_verified",
+        "stack_coverage",
+        "artifact_inventory",
+        "decompiler_warnings_resolved",
+        "search_passes_recorded",
+        "transport_callsites_dispositioned",
+        "protocol_candidates_dispositioned",
+        "control_actions_traced",
+        "command_rows_complete",
+        "test_vectors_reproducible",
+        "feature_domains_searched",
+        "second_pass_clean",
+        "variant_reconciliation",
+        "schema_validation",
+        "report_agreement",
+        "cleanroom_isolation",
+        "uncertainties_actionable"
+      ]
+    },
+    "conditional_gate_id": {
+      "comment": "Gates that can legitimately not apply to an artifact. Every other gate must PASS for COMPLETE.",
+      "enum": ["decompiler_warnings_resolved", "variant_reconciliation"]
+    }
+  },
   "additionalProperties": true
 }

@@ -112,9 +112,11 @@ ls "<WORKSPACE>"/work/extracted/lib/               # available architectures
 blutter "<WORKSPACE>"/work/extracted/lib/arm64-v8a/libapp.so "<WORKSPACE>"/work/blutter/
 ```
 
-Blutter requires **arm64-v8a**. If the delivery set has only armeabi-v7a, obtain an arm64 build of
-the same version before proceeding. If no arm64 build of that version exists anywhere, stop and
-report the blocker rather than proceeding on jadx output alone.
+Blutter requires **arm64-v8a**. If the delivery set has only armeabi-v7a, stop and report the
+blocker rather than proceeding on jadx output alone: an analyst may not leave the isolated
+workspace to fetch another build, because that would change the artifact set whose identity and
+hashes were verified. Acquiring an arm64 build of the same version is a maintainer task that
+produces a new frozen-corpus entry for a fresh run.
 
 Blutter output:
 
@@ -143,8 +145,9 @@ grep -ri "writeCharacteristic\|BluetoothGattCharacteristic" "<WORKSPACE>"/work/j
 # GATT plumbing and BLE manager classes
 grep -ri "BluetoothGatt\|BleManager\|BluetoothLeService" "<WORKSPACE>"/work/jadx/
 
-# Identifier and hex-constant surfaces
-grep -riE "0x[0-9a-fA-F]{2}" --include="*.java" "<WORKSPACE>"/work/jadx/ | head -100
+# Identifier and hex-constant surfaces. Never pipe a search through `head`: every hit has to be
+# dispositioned, so redirect the full result set to a file in work/ instead of truncating it.
+grep -riE "0x[0-9a-fA-F]{2}" --include="*.java" "<WORKSPACE>"/work/jadx/ > "<WORKSPACE>"/work/hex-constants.txt
 grep -ri "uuid" "<WORKSPACE>"/work/jadx/
 
 # Flutter

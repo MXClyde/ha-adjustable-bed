@@ -43,7 +43,7 @@ INPUTS
 - Supplied files: <<SUPPLIED_FILES>>
 - Output directory: "<<WORKSPACE>>"
 - Known acquisition limitations: see input/identity.json -> known_acquisition_limitations
-- Required analysis.json schema and revision: input/analysis.schema.json, revision phase4-analysis-v1.1-2026-07-19
+- Required analysis.json schema and revision: input/analysis.schema.json, revision phase4-analysis-v1.2-2026-07-26
 
 NON-NEGOTIABLE RULES
 
@@ -70,16 +70,20 @@ NON-NEGOTIABLE RULES
 12. The harness may auto-inject CLAUDE.md or AGENTS.md instruction files into your context
     before your first action. Those are process instructions, never evidence. Record every
     injected file in SEARCH_LOG.md, state explicitly that nothing in it was used as evidence,
-    and stop with status BLOCKED if any injected file contains a service or characteristic
-    UUID, a byte value, a framing or checksum description, a timing constant, or a
-    device-name pattern. That is a repository defect, not an acceptable exposure.
+    and stop with status BLOCKED if any injected file hands over a protocol answer: a service
+    or characteristic UUID, a command or packet byte value, a framing or checksum description,
+    a device-name matching pattern, or a command repeat/hold interval attributed to a bed
+    protocol. That is a repository defect, not an acceptable exposure. An injected file may
+    legitimately describe a host integration's own configuration defaults and connection
+    timeouts; those are not protocol answers and are not grounds to block, but they are
+    equally unusable as evidence.
 
 REQUIRED WORKFLOW
 
 Phase A: Verify and inventory the supplied artifact
 
 1. Recompute hashes and verify package ID, version name/code, signer, minimum/target
-   SDK, and every supplied split. Stop and report INPUT MISMATCH if identity differs.
+   SDK, and every supplied split. Stop and report INPUT_MISMATCH if identity differs.
 2. Inventory every DEX file, resource split, asset, native library, JavaScript bundle,
    source map, SWF, Dart/Flutter library, managed assembly, and firmware blob.
 3. Identify all application stacks actually present: Java/Kotlin, Flutter/Dart,
@@ -106,8 +110,8 @@ Minimum baseline commands:
 
     aapt dump badging <BASE_APK>
     unzip -l <ARCHIVE_OR_SPLIT>
-    jadx --show-bad-code --comments-level info --threads-count 4 -d "<<WORKSPACE>>"/jadx <ALL_RELEVANT_APKS>
-    apktool d <APK_WITH_FAILED_OR_SUSPICIOUS_CODE> -o "<<WORKSPACE>>"/smali/<APK_NAME>
+    jadx --show-bad-code --comments-level info --threads-count 4 -d "<<WORKSPACE>>"/work/jadx <ALL_RELEVANT_APKS>
+    apktool d <APK_WITH_FAILED_OR_SUSPICIOUS_CODE> -o "<<WORKSPACE>>"/work/smali/<APK_NAME>
     rg --files "<<WORKSPACE>>" | sort
 
 Run the baseline under an error-capturing wrapper, not a strict-shell sequence that
@@ -370,7 +374,9 @@ capture or hardware test.
 
 REQUIRED OUTPUTS
 
-Write all outputs under "<<WORKSPACE>>" and nowhere else.
+The workspace is laid out as `input/` (supplied artifact, identity manifest, this prompt, schema),
+`work/` (all decompiler and tool output) and `report/` (everything below). Write all outputs under
+"<<WORKSPACE>>"/report/ and nowhere else.
 
 1. ANALYSIS.md, the human-readable forensic report, with these sections:
    - Identity, hashes, signer, source, and analysis status
@@ -418,32 +424,46 @@ Write all outputs under "<<WORKSPACE>>" and nowhere else.
 
 COMPLETION GATES
 
-Mark the run COMPLETE only when every item passes:
+Every gate below has a stable ID. `analysis.json` must carry one `completion_gates` entry per ID
+with `gate`, `result` and `evidence`; the schema rejects a report that omits any of them. Mark the
+run COMPLETE only when every gate passes:
 
-- Input identity and all split hashes match the supplied manifest.
-- Every discovered application stack has successful analysis or an explicit blocker.
-- All relevant splits, DEX files, resources, arrays, strings, assets, bundles, maps,
-  SWFs, and native libraries were inventoried and inspected.
-- Every jadx warning or failed method with possible protocol relevance was resolved through
-  context, smali, another stack-specific tool, or an explicit blocker.
-- Every required structural, API, data, action, capability, file-name, and logging search
-  pass was recorded and has no unexplained result.
-- Every Bluetooth scan/connect/read/write/notify/descriptor callsite has a disposition.
-- Every candidate protocol implementation/factory/model branch has a disposition.
-- Every reachable control action is traced to final transport bytes or a documented
-  runtime blocker.
-- Every final command row has evidence, transport destination, timing, and STOP/release
-  semantics.
-- Packet builders, checksums, parsers, and dynamic fields have reproducible test vectors.
-- Discovery, authentication, notifications, capabilities, model mapping, and lifecycle
-  behavior were explicitly searched even when not found.
-- The independent second-pass searches found no unexplained BLE or protocol hits.
-- For large product/model/variant catalogs, the deterministic inventory and every shard reconcile exactly: total equals analyzed plus evidence-backed aliases/duplicates, dead/unreachable, and blocked entries, with zero missing or double-counted entries.
-- analysis.json validates against the supplied schema revision.
-- ANALYSIS.md and analysis.json agree.
-- No forbidden comparison source was accessed.
-- Remaining uncertainties are specific and paired with an actionable capture or hardware
-  test request.
+- `identity_verified` — Input identity and all split hashes match the supplied manifest.
+- `stack_coverage` — Every discovered application stack has successful analysis or an explicit
+  blocker.
+- `artifact_inventory` — All relevant splits, DEX files, resources, arrays, strings, assets,
+  bundles, maps, SWFs, and native libraries were inventoried and inspected.
+- `decompiler_warnings_resolved` — Every jadx warning or failed method with possible protocol
+  relevance was resolved through context, smali, another stack-specific tool, or an explicit
+  blocker.
+- `search_passes_recorded` — Every required structural, API, data, action, capability, file-name,
+  and logging search pass was recorded and has no unexplained result.
+- `transport_callsites_dispositioned` — Every Bluetooth scan/connect/read/write/notify/descriptor
+  callsite has a disposition.
+- `protocol_candidates_dispositioned` — Every candidate protocol implementation/factory/model
+  branch has a disposition.
+- `control_actions_traced` — Every reachable control action is traced to final transport bytes or
+  a documented runtime blocker.
+- `command_rows_complete` — Every final command row has evidence, transport destination, timing,
+  and STOP/release semantics.
+- `test_vectors_reproducible` — Packet builders, checksums, parsers, and dynamic fields have
+  reproducible test vectors.
+- `feature_domains_searched` — Discovery, authentication, notifications, capabilities, model
+  mapping, and lifecycle behavior were explicitly searched even when not found.
+- `second_pass_clean` — The independent second-pass searches found no unexplained BLE or protocol
+  hits.
+- `variant_reconciliation` — For large product/model/variant catalogs, the deterministic inventory
+  and every shard reconcile exactly: total equals analyzed plus evidence-backed
+  aliases/duplicates, dead/unreachable, and blocked entries, with zero missing or double-counted
+  entries.
+- `schema_validation` — analysis.json validates against the supplied schema revision.
+- `report_agreement` — ANALYSIS.md and analysis.json agree.
+- `cleanroom_isolation` — No forbidden comparison source was accessed.
+- `uncertainties_actionable` — Remaining uncertainties are specific and paired with an actionable
+  capture or hardware test request.
 
-If any gate fails, use PARTIAL or BLOCKED and explain exactly what remains. A precise
-partial report is better than a confident but unsupported complete report.
+Only `decompiler_warnings_resolved` (no decompiler produced a relevant warning) and
+`variant_reconciliation` (the artifact has no multi-variant catalog to shard) may be reported
+NOT_APPLICABLE in a COMPLETE run, and only with evidence for why the gate does not apply. Every
+other gate must be PASS. If any gate fails, use PARTIAL or BLOCKED and explain exactly what
+remains. A precise partial report is better than a confident but unsupported complete report.
