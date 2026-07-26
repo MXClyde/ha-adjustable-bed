@@ -72,6 +72,17 @@ CONF_RICHMAT_REMOTE: Final = "richmat_remote"
 CONF_JENSEN_PIN: Final = "jensen_pin"
 CONF_CB24_BED_SELECTION: Final = "cb24_bed_selection"
 CONF_BLE_BOND_ESTABLISHED: Final = "ble_bond_established"
+# Latched once a connection that skipped pair=True on the strength of
+# CONF_BLE_BOND_ESTABLISHED was proven unbonded by the auth-gated probe. Some
+# stacks (notably ESPHome proxies) do not carry a bond across connections, so
+# trusting the marker there costs a guaranteed-failed attempt on every connect.
+CONF_BLE_BOND_MARKER_UNRELIABLE: Final = "ble_bond_marker_unreliable"
+# Provenance for the motor pulse settings: True once the user has saved them from
+# the options flow. Legacy config flows persisted generated defaults into entry
+# data, so the mere presence of the pulse keys proves nothing, and a protocol
+# migration could not tell a generated (10, 100) from a deliberate one. It kept
+# reverting the user's choice on every connect (issue #368).
+CONF_MOTOR_PULSE_USER_SET: Final = "motor_pulse_user_set"
 CONF_BACK_MAX_ANGLE: Final = "back_max_angle"
 CONF_LEGS_MAX_ANGLE: Final = "legs_max_angle"
 CONF_KAIDI_ROOM_ID: Final = "kaidi_room_id"
@@ -2094,6 +2105,11 @@ CONNECTION_PROFILES: Final = {
 DEFAULT_MOTOR_PULSE_COUNT: Final = 10  # Default for most beds
 DEFAULT_MOTOR_PULSE_DELAY_MS: Final = 100  # Default for most beds
 
+# Leggett Okin cadence, split out because the coordinator has to recognise the
+# value an earlier release wrote into existing entries in order to correct it.
+LEGGETT_OKIN_PULSE_DEFAULTS: Final = (10, 100)
+LEGGETT_OKIN_SUPERSEDED_PULSE_DEFAULTS: Final = (5, 200)
+
 # Per-bed-type motor pulse defaults based on app disassembly analysis
 # Target: ~1.0 second total motor movement duration (repeat_count = 1000ms / delay_ms)
 BED_MOTOR_PULSE_DEFAULTS: Final = {
@@ -2139,9 +2155,15 @@ BED_MOTOR_PULSE_DEFAULTS: Final = {
     # Leggett WiLinke: 110ms delay → 10 repeats = 1.1s total
     # Source: RICHMAT_MASTER_ANALYSIS.md - MLRM devices use 110ms timing
     BED_TYPE_LEGGETT_WILINKE: (10, 110),
-    # Leggett Okin: LP Control repeats held actuator commands every 200ms.
-    # Source: com.leggett.android.universal 2.9.0 (OkinControlBoxInterface)
-    BED_TYPE_LEGGETT_OKIN: (5, 200),
+    # Leggett Okin: the Prodigy CE app's single output thread writes the held
+    # keycode every 100ms (OutputThread.runNormal, Thread.sleep(100L)), and
+    # every one-shot burst in that app is 10 frames. Source: clean-room analysis
+    # of com.leggett.prodigy4 1.2.0, §11.
+    # LP Control (com.leggett.android.universal 2.9.0) uses 200ms for the same
+    # hardware family, which is where the previous (5, 200) came from. Both are
+    # official apps; 100ms is the safer of the two, because a shorter refresh
+    # cannot fall outside a keep-alive window that a longer one satisfies.
+    BED_TYPE_LEGGETT_OKIN: LEGGETT_OKIN_PULSE_DEFAULTS,
     # OCTO: 350ms delay → 3 repeats = 1.05s total
     # Source: de.octoactuators.octosmartcontrolapp ANALYSIS.md
     BED_TYPE_OCTO: (3, 350),

@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from bleak.exc import BleakError
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -29,6 +30,7 @@ from custom_components.adjustable_bed.const import (
     CONF_PROTOCOL_VARIANT,
     DOMAIN,
     LEGGETT_GEN2_WRITE_CHAR_UUID,
+    LEGGETT_OKIN_PULSE_DEFAULTS,
     LEGGETT_VARIANT_GEN2,
     LEGGETT_VARIANT_MLRM,
     LEGGETT_VARIANT_OKIN,
@@ -128,24 +130,242 @@ class TestLeggettOkinController:
         # Command 0x1 in big-endian
         assert command[2:] == bytes([0x00, 0x00, 0x00, 0x01])
 
-    async def test_motor_uses_configured_lp_control_cadence(self):
-        """Motor repeats use the APK-derived 200ms default through coordinator settings."""
+    async def test_massage_off_is_not_advertised(self):
+        """Massage power is a toggle, so no massage-off button should be offered.
+
+        The capability is detected by checking whether the subclass overrides
+        massage_off, so overriding it just to raise NotImplementedError created a
+        button that could only ever fail (issue #368).
+        """
+        controller = LeggettOkinController(MagicMock())
+
+        assert controller.supports_massage_off_control is False
+
+    async def test_motor_streams_then_sends_four_release_frames(self):
+        """Held keycodes stream at the configured cadence, then release with four zeros.
+
+        The app's output thread writes the held keycode every 100ms and emits
+        exactly four keycode-0 frames on release (MaxZeroCount = 3). There is no
+        distinct stop opcode; the release frame is an ordinary frame carrying 0.
+        """
         coordinator = MagicMock()
-        coordinator.motor_pulse_count = 5
-        coordinator.motor_pulse_delay_ms = 200
+        coordinator.motor_pulse_count = 10
+        coordinator.motor_pulse_delay_ms = 100
         controller = LeggettOkinController(coordinator)
         controller.write_command = AsyncMock()
 
         await controller.move_head_up()
 
-        move_call, stop_call = controller.write_command.await_args_list
+        move_call, release_call = controller.write_command.await_args_list
         assert move_call.args == (bytes.fromhex("040200000001"),)
         assert move_call.kwargs == {
-            "repeat_count": 5,
-            "repeat_delay_ms": 200,
+            "repeat_count": 10,
+            "repeat_delay_ms": 100,
         }
-        assert stop_call.args == (bytes.fromhex("040200000000"),)
-        assert stop_call.kwargs["cancel_event"].is_set() is False
+        assert release_call.args == (bytes.fromhex("040200000000"),)
+        assert release_call.kwargs["repeat_count"] == 4
+        assert release_call.kwargs["cancel_event"].is_set() is False
+
+    @pytest.mark.parametrize(
+        ("slot", "keycode"),
+        [(1, "00001000"), (2, "00002000"), (3, "00004000"), (4, "00008000")],
+    )
+    async def test_memory_recall_ladder_and_burst(self, slot: int, keycode: str):
+        """Recall is a 10-frame burst of the slot bit with no terminator.
+
+        The ladder previously started at 0x2000 and ran to 0x10000, so every slot
+        recalled its neighbour and "memory 4" actually sent the store-arm keycode
+        (issue #368). Recall is also autonomous: appending a release frame could
+        cancel the move the box just started.
+        """
+        controller = LeggettOkinController(MagicMock())
+        controller.write_command = AsyncMock()
+
+        await controller.preset_memory(slot)
+
+        controller.write_command.assert_awaited_once()
+        call = controller.write_command.await_args
+        assert call.args == (bytes.fromhex(f"0402{keycode}"),)
+        assert call.kwargs == {"repeat_count": 10, "repeat_delay_ms": 100}
+
+    async def test_store_keycode_is_never_a_recall(self):
+        """0x10000 arms an overwrite and must not appear in the recall ladder."""
+        assert LeggettOkinCommands.MEMORY_STORE == 0x10000
+        assert LeggettOkinCommands.MEMORY_STORE not in {
+            LeggettOkinCommands.PRESET_MEMORY_1,
+            LeggettOkinCommands.PRESET_MEMORY_2,
+            LeggettOkinCommands.PRESET_MEMORY_3,
+            LeggettOkinCommands.PRESET_MEMORY_4,
+            LeggettOkinCommands.PRESET_ZERO_G,
+            LeggettOkinCommands.PRESET_ANTI_SNORE,
+        }
+
+    async def test_program_memory_is_a_two_stage_hold(self):
+        """Programming arms with the store keycode, releases, then holds the slot."""
+        controller = LeggettOkinController(MagicMock())
+        controller.write_command = AsyncMock()
+
+        await controller.program_memory(2)
+
+        arm, arm_release, slot, slot_release = controller.write_command.await_args_list
+        # ~5s of the store keycode...
+        assert arm.args == (bytes.fromhex("040200010000"),)
+        assert arm.kwargs == {"repeat_count": 50, "repeat_delay_ms": 100}
+        assert arm_release.args == (bytes.fromhex("040200000000"),)
+        # ...a release, then ~2s of the slot keycode, then a release.
+        assert slot.args == (bytes.fromhex("040200002000"),)
+        assert slot.kwargs == {"repeat_count": 20, "repeat_delay_ms": 100}
+        assert slot_release.args == (bytes.fromhex("040200000000"),)
+
+    async def test_stop_all_propagates_write_failures(self):
+        """An explicit stop must not report success when it never reached the bed.
+
+        The release burst is this protocol's only stop, and the shared helper
+        logs and swallows BleakError for cleanup callers. stop_all opts out, or
+        async_stop_command would log "Stop command sent" while the bed kept
+        moving.
+        """
+        controller = LeggettOkinController(MagicMock())
+        controller.write_command = AsyncMock(side_effect=BleakError("write failed"))
+
+        with pytest.raises(BleakError):
+            await controller.stop_all()
+
+    async def test_cleanup_release_failures_do_not_mask_the_real_error(self):
+        """A failed release burst during cleanup stays logged, not raised.
+
+        The two writes raise distinct errors so the assertion actually proves
+        which one propagated: with a shared message it would pass even if the
+        cleanup failure replaced the movement failure.
+        """
+        controller = LeggettOkinController(MagicMock())
+        controller.write_command = AsyncMock(
+            side_effect=[BleakError("movement failed"), BleakError("release failed")]
+        )
+
+        with pytest.raises(BleakError, match="movement failed"):
+            await controller.move_head_up()
+
+        assert controller.write_command.await_count == 2
+
+    async def test_preset_flat_floors_an_unsafe_pulse_delay(self):
+        """Flat is a fixed-duration hold, so the cadence has a floor.
+
+        The setup and options flows accept any integer. 0 would divide by zero,
+        a negative would collapse the hold to one frame, and a small positive
+        like 1ms would expand the 30s hold into 30,000 sequential writes and
+        saturate the link. All three floor to the proven cadence.
+        """
+        for stored_delay in (0, -50, 1):
+            coordinator = MagicMock()
+            coordinator.motor_pulse_count = 10
+            coordinator.motor_pulse_delay_ms = stored_delay
+            controller = LeggettOkinController(coordinator)
+            controller.write_command = AsyncMock()
+
+            await controller.preset_flat()
+
+            flat_call = controller.write_command.await_args_list[0]
+            assert flat_call.args == (bytes.fromhex("040208000000"),)
+            assert flat_call.kwargs["repeat_delay_ms"] == LEGGETT_OKIN_PULSE_DEFAULTS[1]
+            assert flat_call.kwargs["repeat_count"] == 300
+
+    async def test_program_memory_aborts_when_the_stage_release_fails(self):
+        """The arm-to-slot release is a stage boundary, not best-effort cleanup.
+
+        Without those zero frames the control box never leaves the arm stage, so
+        continuing to the slot hold would run an invalid programming sequence
+        while the service still reported success.
+        """
+        controller = LeggettOkinController(MagicMock())
+        # Stage 1 (arm hold) succeeds; the release burst that ends it fails.
+        controller.write_command = AsyncMock(
+            side_effect=[None, BleakError("release failed"), None]
+        )
+
+        with pytest.raises(BleakError, match="release failed"):
+            await controller.program_memory(2)
+
+        # The slot keycode must never have been sent.
+        sent = [call.args[0] for call in controller.write_command.await_args_list]
+        assert bytes.fromhex("040200002000") not in sent
+
+    async def test_light_and_massage_taps_end_with_a_release_burst(self):
+        """Lights and massage are held keycodes, so a tap must release the key.
+
+        Sending the frame alone can leave the key asserted, and the receiver may
+        then not recognise the next press of the same control.
+        """
+        controller = LeggettOkinController(MagicMock())
+        controller.write_command = AsyncMock()
+
+        await controller.lights_toggle()
+
+        press, release = controller.write_command.await_args_list
+        assert press.args == (bytes.fromhex("040200020000"),)
+        assert release.args == (bytes.fromhex("040200000000"),)
+        assert release.kwargs["repeat_count"] == 4
+
+        controller.write_command.reset_mock()
+        await controller.massage_toggle()
+
+        press, release = controller.write_command.await_args_list
+        assert press.args == (bytes.fromhex("040200000100"),)
+        assert release.args == (bytes.fromhex("040200000000"),)
+
+    async def test_program_memory_surfaces_a_failed_final_release(self):
+        """On the success path the closing release is the operation, not cleanup.
+
+        If it fails the slot keycode may still be asserted, so the save must not
+        report success.
+        """
+        controller = LeggettOkinController(MagicMock())
+        # arm hold, arm release, slot hold all succeed; the final release fails.
+        controller.write_command = AsyncMock(
+            side_effect=[None, None, None, BleakError("final release failed")]
+        )
+
+        with pytest.raises(BleakError, match="final release failed"):
+            await controller.program_memory(2)
+
+    @pytest.mark.parametrize(
+        ("action", "primary_frame"),
+        [
+            ("move_head_up", "040200000001"),
+            ("preset_flat", "040208000000"),
+            ("lights_toggle", "040200020000"),
+            ("massage_toggle", "040200000100"),
+        ],
+    )
+    async def test_release_failure_surfaces_after_a_successful_command(
+        self, action: str, primary_frame: str
+    ):
+        """A lost release after a successful command must not report success.
+
+        The release burst is this protocol's stop, so losing it can leave the
+        bed moving or a keycode asserted. Every command family that ends in one
+        has to surface that, not just log it.
+        """
+        coordinator = MagicMock()
+        coordinator.motor_pulse_count = 10
+        coordinator.motor_pulse_delay_ms = 100
+        controller = LeggettOkinController(coordinator)
+        controller.write_command = AsyncMock(
+            side_effect=[None, BleakError("release failed")]
+        )
+
+        with pytest.raises(BleakError, match="release failed"):
+            await getattr(controller, action)()
+
+        first = controller.write_command.await_args_list[0]
+        assert first.args == (bytes.fromhex(primary_frame),)
+
+    async def test_massage_timer_step_is_not_exposed(self):
+        """0x200 is a constant the app never builds or writes, so it is not a command."""
+        controller = LeggettOkinController(MagicMock())
+
+        assert not hasattr(LeggettOkinCommands, "MASSAGE_TIMER_STEP")
+        assert not hasattr(controller, "massage_timer_step")
 
 
 class TestLeggettGen2CommandFormat:

@@ -68,6 +68,7 @@ from .const import (
     CONF_BACK_MAX_ANGLE,
     CONF_BED_TYPE,
     CONF_BLE_BOND_ESTABLISHED,
+    CONF_BLE_BOND_MARKER_UNRELIABLE,
     CONF_CONNECTION_PROFILE,
     CONF_DISABLE_ANGLE_SENSING,
     CONF_DISABLE_DISCOVERY,
@@ -81,6 +82,7 @@ from .const import (
     CONF_MOTOR_COUNT,
     CONF_MOTOR_PULSE_COUNT,
     CONF_MOTOR_PULSE_DELAY_MS,
+    CONF_MOTOR_PULSE_USER_SET,
     CONF_OCTO_PIN,
     CONF_PASSIVE_POSITION_RECONCILIATION,
     CONF_POSITION_MODE,
@@ -892,6 +894,9 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_PREFERRED_ADAPTER: preferred_adapter,
                     CONF_MOTOR_PULSE_COUNT: motor_pulse_count,
                     CONF_MOTOR_PULSE_DELAY_MS: motor_pulse_delay_ms,
+                    # The user saw and submitted these, so a protocol
+                    # migration must not treat them as generated defaults.
+                    CONF_MOTOR_PULSE_USER_SET: True,
                     CONF_DISCONNECT_AFTER_COMMAND: user_input.get(
                         CONF_DISCONNECT_AFTER_COMMAND, DEFAULT_DISCONNECT_AFTER_COMMAND
                     ),
@@ -1591,6 +1596,9 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_PREFERRED_ADAPTER: preferred_adapter,
                     CONF_MOTOR_PULSE_COUNT: motor_pulse_count,
                     CONF_MOTOR_PULSE_DELAY_MS: motor_pulse_delay_ms,
+                    # The user saw and submitted these, so a protocol
+                    # migration must not treat them as generated defaults.
+                    CONF_MOTOR_PULSE_USER_SET: True,
                     CONF_DISCONNECT_AFTER_COMMAND: user_input.get(
                         CONF_DISCONNECT_AFTER_COMMAND, DEFAULT_DISCONNECT_AFTER_COMMAND
                     ),
@@ -1832,6 +1840,9 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
                         CONF_PREFERRED_ADAPTER: preferred_adapter,
                         CONF_MOTOR_PULSE_COUNT: motor_pulse_count,
                         CONF_MOTOR_PULSE_DELAY_MS: motor_pulse_delay_ms,
+                        # The user saw and submitted these, so a protocol
+                        # migration must not treat them as generated defaults.
+                        CONF_MOTOR_PULSE_USER_SET: True,
                         CONF_DISCONNECT_AFTER_COMMAND: user_input.get(
                             CONF_DISCONNECT_AFTER_COMMAND, DEFAULT_DISCONNECT_AFTER_COMMAND
                         ),
@@ -3074,9 +3085,16 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                 bed_type,
                 requested_variant,
             ):
-                # The marker describes the old protocol's authentication
-                # requirements and must not suppress pairing for the new one.
+                # These markers describe the old protocol's authentication
+                # requirements and must not steer pairing for the new one.
                 new_data.pop(CONF_BLE_BOND_ESTABLISHED, None)
+                new_data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
+            # Record that the stored cadence is the user's choice rather than a
+            # value the flow generated, so protocol migrations leave it alone.
+            # The pulse fields are always present in this form, so saving it at
+            # all means the user saw and accepted the values.
+            if CONF_MOTOR_PULSE_COUNT in user_input or CONF_MOTOR_PULSE_DELAY_MS in user_input:
+                new_data[CONF_MOTOR_PULSE_USER_SET] = True
             self._remove_irrelevant_bed_settings(new_data, bed_type)
             self.hass.config_entries.async_update_entry(
                 self.config_entry,

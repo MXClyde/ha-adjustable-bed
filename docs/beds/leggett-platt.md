@@ -218,12 +218,12 @@ Unknown product ids fall back to a fully-featured profile.
 **Note:** Requires BLE pairing
 **Write characteristic:** `62741525-52f9-8864-b1ab-3b3a8d65950b`
 
-Uses same 32-bit command values as Keeson - see [Keeson commands](keeson.md#commands-32-bit-values).
-
-LP Control 2.9.0 repeats an actuator command every 200 ms while the button is
-held, then stops by cancelling that timer. The integration uses the same
-default cadence for a finite Home Assistant motor pulse and sends an explicit
-zero command afterward as a safety stop.
+The motor and massage keycodes overlap with Keeson's, but the preset ladder,
+repeat behaviour and release semantics do **not** - see
+[Leggett & Platt Okin](leggett-okin.md) for the protocol as it was actually
+recovered from the vendor apps, including the memory ladder, the two-stage
+memory store, and the second (checksummed) frame format used by older control
+boxes.
 
 ### Motor Commands
 
@@ -250,7 +250,6 @@ Multiple motors can be moved simultaneously by OR-ing their command values toget
 | Foot Massage Up | `0x00000400` | Increase foot massage intensity |
 | Foot Massage Down | `0x01000000` | Decrease foot massage intensity |
 | Massage Step | `0x00000100` | Cycle through massage modes |
-| Massage Timer Step | `0x00000200` | Cycle through massage timer options |
 | Massage Wave Step | `0x10000000` | Cycle through massage wave patterns |
 
 ## MlRM Variant (WiLinke)
