@@ -204,13 +204,41 @@ def _answer_key_violation(line: str) -> str | None:
     return None
 
 
+# A line that opens a new Markdown block: list item, heading, quote, table row, fence, or a blank
+# separator. Anything else continues the sentence above it.
+_NEW_BLOCK = re.compile(r"^\s*(?:[-*+>#|]|\d+[.)]|```|~~~|$)")
+
+
+def _is_continuation(line: str) -> bool:
+    """Whether ``line`` continues the sentence on the line before it."""
+    return not _NEW_BLOCK.match(line)
+
+
 def _answer_key_violations(text: str) -> list[str]:
-    """Report every offending line as ``<line number>: <reason> -> <excerpt>``."""
-    return [
-        f"{number}: {reason} -> {line.strip()[:90]}"
-        for number, line in enumerate(text.splitlines(), start=1)
-        if (reason := _answer_key_violation(line))
-    ]
+    """Report every offending line as ``<line number>: <reason> -> <excerpt>``.
+
+    Adjacent lines are also tested joined, because Markdown wrapping routinely separates a value
+    from the context that gives it meaning: "STOP command:" ending one line and the byte beginning
+    the next would otherwise satisfy neither half of the predicate while handing over the answer
+    just as plainly.
+    """
+    lines = text.splitlines()
+    violations: list[str] = []
+    for index, line in enumerate(lines):
+        reason = _answer_key_violation(line)
+        if reason is None and index + 1 < len(lines):
+            following = lines[index + 1]
+            # Only worth joining when the next line continues this one and is clean on its own.
+            # A line that opens a new block is unrelated prose, and joining two neighbouring list
+            # items invents context that no reader ever sees; a line that already fails reports
+            # itself on the next iteration.
+            if _is_continuation(following) and _answer_key_violation(following) is None:
+                joined = _answer_key_violation(f"{line} {following}")
+                if joined:
+                    reason = f"{joined} across a line break"
+        if reason:
+            violations.append(f"{index + 1}: {reason} -> {line.strip()[:90]}")
+    return violations
 
 
 def _walk_repo() -> list[Path]:
@@ -330,6 +358,26 @@ def test_ordinary_prose_is_not_flagged(line: str) -> None:
     assert _answer_key_violation(line) is None
 
 
+def test_wrapped_prose_cannot_hide_an_answer_key() -> None:
+    """A value split from its context by a line break is still an answer key.
+
+    Markdown wrapping puts "STOP command:" at the end of one line and the byte at the start of the
+    next, and neither half trips the predicate alone.
+    """
+    assert _answer_key_violations("The STOP command:\n`0x12` is sent on release.\n")
+
+
+def test_neighbouring_list_items_are_not_joined() -> None:
+    """Two adjacent bullets are separate statements, not one wrapped sentence.
+
+    Joining them would invent context no reader ever sees: a model code in one entry and an
+    unrelated word like "handshake" in the next would read as a protocol description.
+    """
+    assert not _answer_key_violations(
+        "- [a](a.md) — RIO 5.0 has no tilt motor\n- [b](b.md) — lenient init handshake\n"
+    )
+
+
 def test_no_analyst_visible_doc_points_at_the_comparison_notes() -> None:
     """Nothing may send a reader to the machine-local protocol notes.
 
@@ -341,8 +389,11 @@ def test_no_analyst_visible_doc_points_at_the_comparison_notes() -> None:
     ``CLAUDE.md`` is gitignored: a "see disassembly/PROTOCOL_NOTES.md" line there would reach every
     analyst while being invisible to review and to every other check here.
     """
+    # Every deliberately supplied document, the JSON schema included: it is copied into each
+    # analyst workspace, and a "see disassembly/PROTOCOL_NOTES.md" line in one of its descriptions
+    # would carry no protocol value of its own and so pass the answer-key scan untouched.
     candidates = [
-        *(REPO_ROOT / name for name in sorted(_INJECTED_FILENAMES)),
+        *(REPO_ROOT / name for name in _ANALYST_VISIBLE_DOCS),
         *(REPO_ROOT / "docs").rglob("*.md"),
     ]
     offenders = [
@@ -355,6 +406,20 @@ def test_no_analyst_visible_doc_points_at_the_comparison_notes() -> None:
     assert not offenders, (
         "disassembly/PROTOCOL_NOTES.md is untracked and is comparison material; point readers at "
         f"docs/apk-analysis/TOOLING.md instead: {offenders}"
+    )
+
+
+def test_reachability_enum_matches_prompt() -> None:
+    """The reachability vocabulary must be exactly the dispositions Phase C defines.
+
+    The analyst reads only the prompt, so a value the schema accepts but the prompt never names
+    (or the reverse) shows up as a rejected report rather than as a documentation bug.
+    """
+    schema_values = set(_load_schema()["$defs"]["reachability"]["enum"])
+    prompt = _load_prompt()
+    missing = sorted(value for value in schema_values if value not in prompt)
+    assert not missing, (
+        f"analysis.schema.json accepts reachability values the analyst prompt never states: {missing}"
     )
 
 
@@ -453,23 +518,47 @@ def test_schema_gate_ids_match_prompt() -> None:
 # The per-project auto-memory index is injected into every subagent regardless of working
 # directory, so it is an analyst-visible document even though it lives outside the repo. Detail
 # belongs in the linked per-topic files, which are not injected.
-def _memory_index_for_checkout() -> Path:
-    """Locate this checkout's auto-memory index.
+def _project_key_shape(text: str) -> str:
+    """Reduce a path or a project-directory name to a form both spellings agree on.
 
-    Claude derives the project key from the checkout's absolute path, so hard-coding one
-    maintainer's path would silently skip this test on every other checkout, including CI images
-    and worktrees, exactly where an unnoticed index could be carrying answers.
+    Claude derives the project key by substituting characters of the absolute path, but exactly
+    which characters has changed across releases: at minimum ``/`` and spaces, in some versions
+    every non-alphanumeric. Reproducing one specific rule would silently mislocate the index on any
+    checkout containing a dot or underscore, and a missing file skips this test rather than failing
+    it, so the miss would be invisible. Comparing both sides in this reduced form sidesteps the
+    question entirely. Paths long enough to be truncated and hashed are not handled; those simply
+    do not match and skip, as before.
     """
-    project_key = str(REPO_ROOT).replace("/", "-").replace(" ", "-")
-    return Path.home() / ".claude" / "projects" / project_key / "memory" / "MEMORY.md"
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 
-_MEMORY_INDEX = _memory_index_for_checkout()
+def _memory_indexes_for_checkout() -> list[Path]:
+    """Return every auto-memory index that a session working in this checkout could be given.
+
+    Worktrees get their own project key, so a full-repository run from the main checkout also
+    covers the indexes belonging to worktrees beneath it.
+    """
+    projects = Path.home() / ".claude" / "projects"
+    if not projects.is_dir():
+        return []
+    wanted = _project_key_shape(str(REPO_ROOT))
+    found = []
+    for directory in sorted(projects.iterdir()):
+        if not directory.is_dir():
+            continue
+        shape = _project_key_shape(directory.name)
+        if shape != wanted and not shape.startswith(f"{wanted}-"):
+            continue
+        index = directory / "memory" / "MEMORY.md"
+        if index.is_file():
+            found.append(index)
+    return found
 
 
-@pytest.mark.skipif(
-    not _MEMORY_INDEX.is_file(), reason="auto-memory index is machine-local; absent in CI"
-)
+_MEMORY_INDEXES = _memory_indexes_for_checkout()
+
+
+@pytest.mark.skipif(not _MEMORY_INDEXES, reason="auto-memory index is machine-local; absent in CI")
 def test_auto_memory_index_carries_no_answer_key() -> None:
     """The injected memory index must not summarise protocols in bytes.
 
@@ -477,7 +566,11 @@ def test_auto_memory_index_carries_no_answer_key() -> None:
     bytes and characteristic identifiers. A clean-room analyst following the prompt's injected-file
     rule would have to report BLOCKED on every run until it is clean.
     """
-    violations = _answer_key_violations(_MEMORY_INDEX.read_text(encoding="utf-8"))
+    violations = [
+        f"{index}:{violation}"
+        for index in _MEMORY_INDEXES
+        for violation in _answer_key_violations(index.read_text(encoding="utf-8"))
+    ]
 
     assert not violations, (
         "The auto-memory index is injected into every agent, including clean-room analysts. "
