@@ -73,6 +73,10 @@ TIMED_MOVE_MOTOR_OPTIONS = (
 
 # Default capture duration for diagnostics (seconds)
 DEFAULT_CAPTURE_DURATION = 120
+
+# Bound for the best-effort pre-capture log probe. Generous for a local stat,
+# short enough that a stalled mount cannot delay the capture noticeably.
+_LOG_PROBE_TIMEOUT = 5.0
 MIN_CAPTURE_DURATION = 10
 MAX_CAPTURE_DURATION = 300
 
@@ -689,29 +693,44 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
         f"adjustable_bed_support_bundle_logs_{address.replace(':', '_').lower()}"
     )
     if include_logs:
-        log_check = await async_check_log_file(hass)
-        if log_check["available"]:
-            # A previous run may have warned about missing logs. That warning is
-            # device-stable and would otherwise sit there contradicting a bundle
-            # that does contain logs.
-            async_dismiss(hass, log_notification_id)
-        else:
+        try:
+            # O_NONBLOCK does not make regular-file I/O asynchronous, so a
+            # stalled network or FUSE mount can still block the open. This probe
+            # runs before the capture's own timeout, so bound it here or the
+            # service could hang without ever starting or reporting. The
+            # executor thread stays blocked either way, but the service does not.
+            log_check = await asyncio.wait_for(
+                async_check_log_file(hass), _LOG_PROBE_TIMEOUT
+            )
+        except TimeoutError:
             _LOGGER.warning(
-                "Support bundle for %s will not include logs: %s (%s)",
-                address,
-                log_check["path"],
-                log_check["reason"],
+                "Timed out checking whether %s is readable; capturing anyway",
+                hass.config.path("home-assistant.log"),
             )
-            async_create(
-                hass,
-                build_missing_log_notice(
-                    log_check["reason"], log_check["error"], future=True
+            log_check = None
+        if log_check is not None:
+            if log_check["available"]:
+                # A previous run may have warned about missing logs. That warning is
+                # device-stable and would otherwise sit there contradicting a bundle
+                # that does contain logs.
+                async_dismiss(hass, log_notification_id)
+            else:
+                _LOGGER.warning(
+                    "Support bundle for %s will not include logs: %s (%s)",
+                    address,
+                    log_check["path"],
+                    log_check["reason"],
                 )
-                + "\n\nThe capture is running anyway, so you will still get a "
-                "bundle with Bluetooth diagnostics.",
-                title="Adjustable Bed: this bundle will have no logs",
-                notification_id=log_notification_id,
-            )
+                async_create(
+                    hass,
+                    build_missing_log_notice(
+                        log_check["reason"], log_check["error"], future=True
+                    )
+                    + "\n\nThe capture is running anyway, so you will still get a "
+                    "bundle with Bluetooth diagnostics.",
+                    title="Adjustable Bed: this bundle will have no logs",
+                    notification_id=log_notification_id,
+                )
 
     try:
         report = await asyncio.wait_for(
@@ -747,9 +766,12 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
         # the user only learns that after a maintainer asks for a second one. Say
         # it up front, at the moment they still have the bed in front of them.
         logs_missing = include_logs and evidence.get("log_capture_status") == "unavailable"
-        if not logs_missing:
-            # Logs became available during the capture, so retract any warning.
-            async_dismiss(hass, log_notification_id)
+        # The capture has finished either way, so the pre-capture notice ("the
+        # capture is running anyway") has served its purpose. The Ready
+        # notification below carries the same guidance for a log-less bundle,
+        # so leaving the old one up would only duplicate it and misdescribe the
+        # state.
+        async_dismiss(hass, log_notification_id)
         logging_notice = ""
         if logs_missing:
             log_error = evidence.get("log_capture_error")

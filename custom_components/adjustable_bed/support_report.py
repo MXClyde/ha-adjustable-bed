@@ -321,16 +321,35 @@ class _NotARegularFile(OSError):
     """The log path exists but is a FIFO, device, or similar."""
 
 
+def _open_regular_file(log_path: str) -> int:
+    """Open ``log_path`` read-only and return a validated file descriptor.
+
+    Raises ``_NotARegularFile`` for a FIFO or device and ``OSError`` for
+    anything else; the caller owns the descriptor on success.
+
+    This is the one copy of the hang-prevention rule, because two copies of
+    safety-critical logic drift. ``O_NONBLOCK`` stops a FIFO open from waiting
+    for a writer, and ``fstat`` describes the object actually opened, so the
+    type check cannot be raced by a path swapped after a bare ``stat``.
+    """
+    fd = os.open(log_path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise _NotARegularFile(f"{log_path} is not a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _tail_text(log_path: str, max_bytes: int) -> str:
     """Read up to the last ``max_bytes`` of a UTF-8 log file as text.
 
     Refuses anything that is not a regular file: opening a FIFO blocks until a
     writer appears, which would hang the capture in its executor thread.
     """
-    fd = os.open(log_path, os.O_RDONLY | os.O_NONBLOCK)
+    fd = _open_regular_file(log_path)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise _NotARegularFile(f"{log_path} is not a regular file")
         handle = os.fdopen(fd, "rb")
     except BaseException:
         os.close(fd)
@@ -421,23 +440,16 @@ def _probe_log_file(log_path: str) -> tuple[bool, str | None, str | None]:
     block, so the hazard is settled before anything is opened.
     """
     try:
-        # O_NONBLOCK makes opening a FIFO return immediately instead of waiting
-        # for a writer, and fstat then describes the object actually opened.
-        # Statting the path first and opening it afterwards would leave a window
-        # where the path could be swapped for a FIFO in between.
-        handle = os.open(log_path, os.O_RDONLY | os.O_NONBLOCK)
+        fd = _open_regular_file(log_path)
     except FileNotFoundError as err:
         return False, "missing", str(err)
+    except _NotARegularFile as err:
+        return False, "not_a_file", str(err)
     except OSError as err:
+        # Covers fstat as well as open: every failure has to degrade into a
+        # reason, because the caller probes outside its own error handling.
         return False, "unreadable", str(err)
-
-    try:
-        info = os.fstat(handle)
-    finally:
-        os.close(handle)
-
-    if not stat.S_ISREG(info.st_mode):
-        return False, "not_a_file", f"{log_path} is not a regular file"
+    os.close(fd)
     return True, None, None
 
 

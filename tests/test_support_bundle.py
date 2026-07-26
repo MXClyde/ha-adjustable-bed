@@ -1808,3 +1808,129 @@ class TestSupportBundleLogProbeSafety:
             await handle_generate_support_bundle(call)
 
         assert "adjustable_bed_support_bundle_logs_aa_bb_cc_dd_ee_ff" in dismissed
+
+
+    async def test_a_slow_probe_does_not_block_the_capture(self, hass):
+        """A stalled mount must not hang the service before it even starts."""
+        import asyncio as _asyncio
+        from unittest.mock import MagicMock, patch
+
+        from homeassistant.core import ServiceCall
+
+        from custom_components.adjustable_bed.services import (
+            handle_generate_support_bundle,
+        )
+
+        captured = False
+
+        async def _never_returns(_hass):
+            await _asyncio.sleep(3600)
+
+        async def _generate(*args, **kwargs):
+            nonlocal captured
+            captured = True
+            return {"notifications": [], "evidence": {"warnings": []}}
+
+        call = ServiceCall(
+            hass,
+            DOMAIN,
+            "generate_support_bundle",
+            {"target_address": "AA:BB:CC:DD:EE:FF", "capture_duration": 5},
+        )
+        with (
+            patch(
+                "custom_components.adjustable_bed.services._LOG_PROBE_TIMEOUT", 0.01
+            ),
+            patch(
+                "custom_components.adjustable_bed.support_report.async_check_log_file",
+                _never_returns,
+            ),
+            patch(
+                "custom_components.adjustable_bed.support_bundle.generate_support_bundle",
+                _generate,
+            ),
+            patch(
+                "custom_components.adjustable_bed.support_bundle.save_support_bundle",
+                MagicMock(return_value="/config/bundle.json"),
+            ),
+            patch(
+                "custom_components.adjustable_bed.download.register_download",
+                MagicMock(return_value="/api/download/bundle.json"),
+            ),
+            patch(
+                "homeassistant.components.persistent_notification.async_create",
+                lambda *a, **k: None,
+            ),
+            patch(
+                "homeassistant.components.persistent_notification.async_dismiss",
+                lambda *a, **k: None,
+            ),
+        ):
+            await handle_generate_support_bundle(call)
+
+        assert captured is True
+
+    async def test_completed_logless_bundle_retracts_the_pre_capture_notice(
+        self, hass
+    ):
+        """The Ready notification repeats the guidance, so the old one must go."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from homeassistant.core import ServiceCall
+
+        from custom_components.adjustable_bed.services import (
+            handle_generate_support_bundle,
+        )
+
+        dismissed: list[str] = []
+        report = {
+            "notifications": [],
+            "evidence": {
+                "log_capture_status": "unavailable",
+                "log_capture_reason": "missing",
+                "log_capture_error": "[Errno 2] No such file or directory",
+                "warnings": [],
+            },
+        }
+        call = ServiceCall(
+            hass,
+            DOMAIN,
+            "generate_support_bundle",
+            {"target_address": "AA:BB:CC:DD:EE:FF", "capture_duration": 5},
+        )
+        with (
+            patch(
+                "custom_components.adjustable_bed.support_report.async_check_log_file",
+                AsyncMock(
+                    return_value={
+                        "available": False,
+                        "reason": "missing",
+                        "path": "/config/home-assistant.log",
+                        "error": "[Errno 2] No such file or directory",
+                    }
+                ),
+            ),
+            patch(
+                "custom_components.adjustable_bed.support_bundle.generate_support_bundle",
+                AsyncMock(return_value=report),
+            ),
+            patch(
+                "custom_components.adjustable_bed.support_bundle.save_support_bundle",
+                MagicMock(return_value="/config/bundle.json"),
+            ),
+            patch(
+                "custom_components.adjustable_bed.download.register_download",
+                MagicMock(return_value="/api/download/bundle.json"),
+            ),
+            patch(
+                "homeassistant.components.persistent_notification.async_create",
+                lambda *a, **k: None,
+            ),
+            patch(
+                "homeassistant.components.persistent_notification.async_dismiss",
+                lambda _hass, nid: dismissed.append(nid),
+            ),
+        ):
+            await handle_generate_support_bundle(call)
+
+        assert "adjustable_bed_support_bundle_logs_aa_bb_cc_dd_ee_ff" in dismissed
