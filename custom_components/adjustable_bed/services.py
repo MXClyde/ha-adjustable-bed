@@ -610,7 +610,10 @@ async def handle_timed_move(call: ServiceCall) -> None:
 async def handle_generate_support_bundle(call: ServiceCall) -> None:
     """Handle generate_support_bundle service call."""
     hass = call.hass
-    from homeassistant.components.persistent_notification import async_create
+    from homeassistant.components.persistent_notification import (
+        async_create,
+        async_dismiss,
+    )
 
     from .download import register_download
     from .support_bundle import generate_support_bundle, save_support_bundle
@@ -682,9 +685,17 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
     # bundle without logs is missing the evidence that matters most for
     # connection problems, so warn while the user can still fix it and re-run
     # rather than only telling them afterwards (issue #385).
+    log_notification_id = (
+        f"adjustable_bed_support_bundle_logs_{address.replace(':', '_').lower()}"
+    )
     if include_logs:
         log_check = await async_check_log_file(hass)
-        if not log_check["available"]:
+        if log_check["available"]:
+            # A previous run may have warned about missing logs. That warning is
+            # device-stable and would otherwise sit there contradicting a bundle
+            # that does contain logs.
+            async_dismiss(hass, log_notification_id)
+        else:
             _LOGGER.warning(
                 "Support bundle for %s will not include logs: %s (%s)",
                 address,
@@ -699,10 +710,7 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
                 + "\n\nThe capture is running anyway, so you will still get a "
                 "bundle with Bluetooth diagnostics.",
                 title="Adjustable Bed: this bundle will have no logs",
-                notification_id=(
-                    "adjustable_bed_support_bundle_logs_"
-                    f"{address.replace(':', '_').lower()}"
-                ),
+                notification_id=log_notification_id,
             )
 
     try:
@@ -739,6 +747,9 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
         # the user only learns that after a maintainer asks for a second one. Say
         # it up front, at the moment they still have the bed in front of them.
         logs_missing = include_logs and evidence.get("log_capture_status") == "unavailable"
+        if not logs_missing:
+            # Logs became available during the capture, so retract any warning.
+            async_dismiss(hass, log_notification_id)
         logging_notice = ""
         if logs_missing:
             log_error = evidence.get("log_capture_error")

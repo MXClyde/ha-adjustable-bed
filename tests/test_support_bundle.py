@@ -1655,3 +1655,103 @@ class TestSupportBundlePreCaptureLogWarning:
         )
 
         assert not [t for t, _ in events if "will have no logs" in t]
+
+
+class TestSupportBundleLogProbeSafety:
+    """The pre-capture probe must never block or leave a stale warning."""
+
+    def test_probe_refuses_a_fifo_without_opening_it(self, tmp_path):
+        """A FIFO would block open() forever, hanging the executor thread."""
+        import os
+
+        from custom_components.adjustable_bed.support_report import _probe_log_file
+
+        fifo = tmp_path / "home-assistant.log"
+        os.mkfifo(fifo)
+        # No writer exists, so a probe that opens this would never return.
+        available, reason, error = _probe_log_file(str(fifo))
+
+        assert available is False
+        assert reason == "not_a_file"
+        assert "not a regular file" in error
+
+    def test_tail_refuses_a_fifo_too(self, tmp_path):
+        """The capture's own reader has the same hazard."""
+        import os
+
+        from custom_components.adjustable_bed.support_report import _read_log_file
+
+        fifo = tmp_path / "home-assistant.log"
+        os.mkfifo(fifo)
+        entries = _read_log_file(str(fifo))
+
+        # Treated like a missing file: the remedy is a downloadable log, not a
+        # permissions fix.
+        assert entries[0]["log_read_reason"] == "missing"
+
+    def test_probe_accepts_a_regular_file(self, tmp_path):
+        """A healthy install still reports available."""
+        from custom_components.adjustable_bed.support_report import _probe_log_file
+
+        path = tmp_path / "home-assistant.log"
+        path.write_text("2026-07-26 00:00:00.000 INFO (MainThread) [x] hi\n")
+
+        assert _probe_log_file(str(path)) == (True, None, None)
+
+    async def test_available_logs_dismiss_a_stale_warning(self, hass):
+        """A recovered install must not keep showing the old warning."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from homeassistant.core import ServiceCall
+
+        from custom_components.adjustable_bed.services import (
+            handle_generate_support_bundle,
+        )
+
+        dismissed: list[str] = []
+        report = {
+            "notifications": [],
+            "evidence": {"log_capture_status": "available", "warnings": []},
+        }
+        call = ServiceCall(
+            hass,
+            DOMAIN,
+            "generate_support_bundle",
+            {"target_address": "AA:BB:CC:DD:EE:FF", "capture_duration": 5},
+        )
+        with (
+            patch(
+                "custom_components.adjustable_bed.support_report.async_check_log_file",
+                AsyncMock(
+                    return_value={
+                        "available": True,
+                        "reason": None,
+                        "path": "/config/home-assistant.log",
+                        "error": None,
+                    }
+                ),
+            ),
+            patch(
+                "custom_components.adjustable_bed.support_bundle.generate_support_bundle",
+                AsyncMock(return_value=report),
+            ),
+            patch(
+                "custom_components.adjustable_bed.support_bundle.save_support_bundle",
+                MagicMock(return_value="/config/bundle.json"),
+            ),
+            patch(
+                "custom_components.adjustable_bed.download.register_download",
+                MagicMock(return_value="/api/download/bundle.json"),
+            ),
+            patch(
+                "homeassistant.components.persistent_notification.async_create",
+                lambda *a, **k: None,
+            ),
+            patch(
+                "homeassistant.components.persistent_notification.async_dismiss",
+                lambda _hass, nid: dismissed.append(nid),
+            ),
+        ):
+            await handle_generate_support_bundle(call)
+
+        assert "adjustable_bed_support_bundle_logs_aa_bb_cc_dd_ee_ff" in dismissed

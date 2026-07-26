@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import stat
 import sys
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -315,8 +317,18 @@ def _is_relevant_log_name(name: str) -> bool:
     return any(fragment in lowered for fragment in _RELEVANT_LOG_NAMES)
 
 
+class _NotARegularFile(OSError):
+    """The log path exists but is a FIFO, device, or similar."""
+
+
 def _tail_text(log_path: str, max_bytes: int) -> str:
-    """Read up to the last ``max_bytes`` of a UTF-8 log file as text."""
+    """Read up to the last ``max_bytes`` of a UTF-8 log file as text.
+
+    Refuses anything that is not a regular file: opening a FIFO blocks until a
+    writer appears, which would hang the capture in its executor thread.
+    """
+    if not stat.S_ISREG(os.stat(log_path).st_mode):  # noqa: PTH116 - HA config path
+        raise _NotARegularFile(f"{log_path} is not a regular file")
     with open(log_path, "rb") as handle:  # noqa: PTH123 - plain path from HA config
         handle.seek(0, 2)
         size = handle.tell()
@@ -345,7 +357,9 @@ def _read_log_file(log_path: str) -> list[dict[str, str]]:
         # A missing file and an unreadable one need different remedies, so keep
         # the distinction (and the original error) instead of always blaming
         # disabled logging.
-        missing = isinstance(err, FileNotFoundError)
+        # A FIFO (a container logging to stdout) needs the same remedy as a
+        # missing file: a real log to download, not a permissions fix.
+        missing = isinstance(err, FileNotFoundError | _NotARegularFile)
         hint = (
             "File logging may be disabled; enable it and reproduce the issue to "
             "capture logs."
@@ -391,14 +405,28 @@ def _read_log_file(log_path: str) -> list[dict[str, str]]:
 def _probe_log_file(log_path: str) -> tuple[bool, str | None, str | None]:
     """Return ``(available, reason, error)`` for the Home Assistant log file.
 
-    Runs in an executor (blocking file I/O). ``reason`` is ``"missing"`` or
-    ``"unreadable"`` when the file cannot be used.
+    Runs in an executor (blocking file I/O). ``reason`` is ``"missing"``,
+    ``"not_a_file"`` or ``"unreadable"`` when the file cannot be used.
+
+    ``os.stat`` comes first and the file is never read. If the path is a FIFO or
+    a device - which is exactly what a container redirecting its logs to stdout
+    can leave behind - then ``open()`` alone blocks until a writer appears, and
+    a read would also consume a byte of somebody else's stream. Statting cannot
+    block, so the hazard is settled before anything is opened.
     """
     try:
-        with open(log_path, "rb") as handle:  # noqa: PTH123 - plain path from HA config
-            handle.read(1)
+        info = os.stat(log_path)  # noqa: PTH116 - plain path from HA config
     except FileNotFoundError as err:
         return False, "missing", str(err)
+    except OSError as err:
+        return False, "unreadable", str(err)
+
+    if not stat.S_ISREG(info.st_mode):
+        return False, "not_a_file", f"{log_path} is not a regular file"
+
+    try:
+        with open(log_path, "rb"):  # noqa: PTH123 - plain path from HA config
+            pass
     except OSError as err:
         return False, "unreadable", str(err)
     return True, None, None
