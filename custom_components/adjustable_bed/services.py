@@ -77,6 +77,9 @@ DEFAULT_CAPTURE_DURATION = 120
 # Bound for the best-effort pre-capture log probe. Generous for a local stat,
 # short enough that a stalled mount cannot delay the capture noticeably.
 _LOG_PROBE_TIMEOUT = 5.0
+
+# hass.data key: notification id -> token of the invocation that raised it.
+_LOG_NOTICE_OWNERS = f"{DOMAIN}_log_notice_owners"
 MIN_CAPTURE_DURATION = 10
 MAX_CAPTURE_DURATION = 300
 
@@ -692,10 +695,13 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
     log_notification_id = (
         f"adjustable_bed_support_bundle_logs_{address.replace(':', '_').lower()}"
     )
-    # Only retract a notice this invocation actually raised. The id is
-    # address-stable on purpose, so a later run can clear a stale warning, but
-    # that also means an unrelated overlapping call (an include_logs: false one,
-    # say) must not dismiss somebody else's live warning.
+    # Only retract a notice this invocation still owns. The id is
+    # address-stable on purpose, so a later run can clear a stale warning left
+    # by an earlier one; per-invocation ids would lose that. The cost is that
+    # overlapping captures share the id, so record who raised it last and let
+    # only that invocation retract it. A later capture that re-raises the notice
+    # takes ownership, and the earlier one then leaves it alone.
+    log_notice_token = object()
     owns_log_notice = False
     if include_logs:
         try:
@@ -735,6 +741,9 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
                     "bundle with Bluetooth diagnostics.",
                     title="Adjustable Bed: this bundle will have no logs",
                     notification_id=log_notification_id,
+                )
+                hass.data.setdefault(_LOG_NOTICE_OWNERS, {})[log_notification_id] = (
+                    log_notice_token
                 )
                 owns_log_notice = True
 
@@ -827,7 +836,9 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
         # covers cancellation: CancelledError inherits from BaseException, so an
         # automation stopped mid-capture would skip an except Exception handler
         # and strand the notice forever.
-        if owns_log_notice:
+        owners = hass.data.get(_LOG_NOTICE_OWNERS, {})
+        if owns_log_notice and owners.get(log_notification_id) is log_notice_token:
+            owners.pop(log_notification_id, None)
             async_dismiss(hass, log_notification_id)
 
 async def async_register_services(hass: HomeAssistant) -> None:

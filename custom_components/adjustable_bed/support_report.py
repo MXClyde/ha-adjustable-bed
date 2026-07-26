@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
 import stat
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -480,22 +478,19 @@ async def async_check_log_file(hass: HomeAssistant) -> dict[str, Any]:
     capture.
     """
     log_path = hass.config.path("home-assistant.log")
-    # Deliberately not hass.async_add_executor_job: os.open on a wedged network
-    # or FUSE mount cannot be cancelled, so the caller's timeout frees the
-    # service but not the worker. A stranded *shared* worker would starve
-    # unrelated Home Assistant work, so give the probe a private single-thread
-    # executor and abandon it instead.
-    executor = ThreadPoolExecutor(
-        max_workers=1, thread_name_prefix="adjustable_bed_log_probe"
+    # Uses Home Assistant's shared executor, deliberately.
+    #
+    # os.open on a wedged network or FUSE mount cannot be cancelled, so no
+    # arrangement here can free the worker; the only question is which pool it
+    # is stranded in. _get_recent_logs() already performs this same open on this
+    # same executor a few seconds later during the capture, so the probe adds no
+    # hazard that the capture did not already carry. A private executor would
+    # instead leave a thread that concurrent.futures joins at interpreter
+    # shutdown, which can block a clean Home Assistant restart: strictly worse.
+    # The caller's timeout is what keeps the *service* responsive.
+    available, reason, error = await hass.async_add_executor_job(
+        _probe_log_file, log_path
     )
-    try:
-        available, reason, error = await asyncio.wrap_future(
-            executor.submit(_probe_log_file, log_path)
-        )
-    finally:
-        # wait=False returns immediately; a stuck thread keeps this private
-        # executor alive but nothing else ever waits on it.
-        executor.shutdown(wait=False)
     return {
         "available": available,
         "reason": reason,

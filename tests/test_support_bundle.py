@@ -2051,28 +2051,75 @@ class TestSupportBundleLogProbeSafety:
         # It never raised a notice, so it owns nothing to retract.
         assert dismissed == []
 
-    async def test_probe_uses_a_private_executor(self, hass, tmp_path):
-        """A wedged probe must not strand a shared Home Assistant worker."""
-        from unittest.mock import patch
+    async def test_only_the_current_owner_retracts_the_notice(self, hass):
+        """The first call to finish must not clear a newer capture's warning."""
+        from unittest.mock import AsyncMock, MagicMock, patch
 
-        from custom_components.adjustable_bed.support_report import (
-            async_check_log_file,
+        from homeassistant.core import ServiceCall
+
+        from custom_components.adjustable_bed.services import (
+            _LOG_NOTICE_OWNERS,
+            handle_generate_support_bundle,
         )
 
-        shared_used = False
+        notice_id = "adjustable_bed_support_bundle_logs_aa_bb_cc_dd_ee_ff"
+        dismissed: list[str] = []
+        report = {
+            "notifications": [],
+            "evidence": {
+                "log_capture_status": "unavailable",
+                "log_capture_reason": "missing",
+                "log_capture_error": "boom",
+                "warnings": [],
+            },
+        }
 
-        def _fail_if_shared(*args, **kwargs):
-            nonlocal shared_used
-            shared_used = True
-            raise AssertionError("probe must not use the shared executor")
+        async def _generate(*args, **kwargs):
+            # A concurrent capture re-raises the notice and takes ownership
+            # while this one is still running.
+            hass.data.setdefault(_LOG_NOTICE_OWNERS, {})[notice_id] = object()
+            return report
 
-        path = tmp_path / "home-assistant.log"
-        path.write_text("hello")
+        call = ServiceCall(
+            hass,
+            DOMAIN,
+            "generate_support_bundle",
+            {"target_address": "AA:BB:CC:DD:EE:FF", "capture_duration": 5},
+        )
         with (
-            patch.object(hass.config, "path", return_value=str(path)),
-            patch.object(hass, "async_add_executor_job", _fail_if_shared),
+            patch(
+                "custom_components.adjustable_bed.support_report.async_check_log_file",
+                AsyncMock(
+                    return_value={
+                        "available": False,
+                        "reason": "missing",
+                        "path": "/config/home-assistant.log",
+                        "error": "boom",
+                    }
+                ),
+            ),
+            patch(
+                "custom_components.adjustable_bed.support_bundle.generate_support_bundle",
+                _generate,
+            ),
+            patch(
+                "custom_components.adjustable_bed.support_bundle.save_support_bundle",
+                MagicMock(return_value="/config/bundle.json"),
+            ),
+            patch(
+                "custom_components.adjustable_bed.download.register_download",
+                MagicMock(return_value="/api/download/bundle.json"),
+            ),
+            patch(
+                "homeassistant.components.persistent_notification.async_create",
+                lambda *a, **k: None,
+            ),
+            patch(
+                "homeassistant.components.persistent_notification.async_dismiss",
+                lambda _hass, nid: dismissed.append(nid),
+            ),
         ):
-            check = await async_check_log_file(hass)
+            await handle_generate_support_bundle(call)
 
-        assert shared_used is False
-        assert check["available"] is True
+        # Ownership moved on, so this invocation must leave the notice up.
+        assert dismissed == []
