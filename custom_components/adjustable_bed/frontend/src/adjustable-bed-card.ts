@@ -53,6 +53,11 @@ export class AdjustableBedCard extends LitElement {
   // disconnectedCallback still has to stop it, and by then the MotorEntity the
   // hold started with may no longer be the object the card would rebuild.
   private _heldCover: string | null = null;
+  // The pointer that owns the hold. pointerdown ignores secondary pointers, so
+  // pointer-end events from any other pointer must be ignored too: a second
+  // touch on the same control would otherwise cancel the primary hold and stop
+  // the motor early.
+  private _heldPointerId: number | null = null;
   private _holdGeneration = 0;
 
   public static async getConfigElement(): Promise<HTMLElement> {
@@ -84,6 +89,7 @@ export class AdjustableBedCard extends LitElement {
     const cover = this._heldCover;
     this._heldMotorKey = null;
     this._heldCover = null;
+    this._heldPointerId = null;
     this._holdGeneration++;
     if (cover) this._cover(cover, "stop_cover");
   }
@@ -274,8 +280,8 @@ export class AdjustableBedCard extends LitElement {
             class="cg-btn"
             aria-label=${localize(this.hass, "action.up")}
             @pointerdown=${(e: PointerEvent) => this._startHold(e, m, "up")}
-            @pointerup=${() => this._endHold(m)}
-            @pointercancel=${() => this._endHold(m)}
+            @pointerup=${(e: PointerEvent) => this._endPointerHold(e, m)}
+            @pointercancel=${(e: PointerEvent) => this._endPointerHold(e, m)}
             @keydown=${(e: KeyboardEvent) => this._startHold(e, m, "up")}
             @keyup=${(e: KeyboardEvent) => this._endKeyHold(e, m)}
             @blur=${() => this._endHold(m)}
@@ -296,8 +302,8 @@ export class AdjustableBedCard extends LitElement {
             class="cg-btn"
             aria-label=${localize(this.hass, "action.down")}
             @pointerdown=${(e: PointerEvent) => this._startHold(e, m, "down")}
-            @pointerup=${() => this._endHold(m)}
-            @pointercancel=${() => this._endHold(m)}
+            @pointerup=${(e: PointerEvent) => this._endPointerHold(e, m)}
+            @pointercancel=${(e: PointerEvent) => this._endPointerHold(e, m)}
             @keydown=${(e: KeyboardEvent) => this._startHold(e, m, "down")}
             @keyup=${(e: KeyboardEvent) => this._endKeyHold(e, m)}
             @blur=${() => this._endHold(m)}
@@ -666,6 +672,7 @@ export class AdjustableBedCard extends LitElement {
     m: MotorEntity,
     dir: "up" | "down",
   ): void {
+    let ownerPointerId: number | null = null;
     if (e instanceof KeyboardEvent) {
       // Ignore the auto-repeat the OS generates while a key stays down: the
       // repeat loop below already keeps the motor moving.
@@ -680,11 +687,13 @@ export class AdjustableBedCard extends LitElement {
       // Keep receiving pointerup even if the finger slides off the button.
       (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
       e.preventDefault();
+      ownerPointerId = e.pointerId;
     }
     if (this._heldMotorKey !== null) return;
 
     this._heldMotorKey = m.key;
     this._heldCover = m.cover ?? null;
+    this._heldPointerId = ownerPointerId;
     void this._pulseWhileHeld(m, dir, ++this._holdGeneration);
   }
 
@@ -749,6 +758,14 @@ export class AdjustableBedCard extends LitElement {
     if (id) this._press(id);
   }
 
+  // pointerup / pointercancel. Only the pointer that started the hold may end
+  // it, and a non-primary button release must not.
+  private _endPointerHold(e: PointerEvent, m: MotorEntity): void {
+    if (this._heldPointerId !== null && e.pointerId !== this._heldPointerId) return;
+    if (e.type === "pointerup" && e.button !== 0) return;
+    this._endHold(m);
+  }
+
   private _endKeyHold(e: KeyboardEvent, m: MotorEntity): void {
     if (e.key !== "Enter" && e.key !== " ") return;
     this._endHold(m);
@@ -762,6 +779,7 @@ export class AdjustableBedCard extends LitElement {
     if (!m || this._heldMotorKey !== m.key) return false;
     this._heldMotorKey = null;
     this._heldCover = null;
+    this._heldPointerId = null;
     this._holdGeneration++;
     return true;
   }
@@ -780,6 +798,7 @@ export class AdjustableBedCard extends LitElement {
   private _stopAll(): void {
     this._heldMotorKey = null;
     this._heldCover = null;
+    this._heldPointerId = null;
     this._holdGeneration++;
     if (this._bed?.stop) this._press(this._bed.stop);
   }

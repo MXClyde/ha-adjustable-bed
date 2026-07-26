@@ -328,6 +328,38 @@ class TestLeggettOkinController:
         with pytest.raises(BleakError, match="final release failed"):
             await controller.program_memory(2)
 
+    @pytest.mark.parametrize(
+        ("action", "primary_frame"),
+        [
+            ("move_head_up", "040200000001"),
+            ("preset_flat", "040208000000"),
+            ("lights_toggle", "040200020000"),
+            ("massage_toggle", "040200000100"),
+        ],
+    )
+    async def test_release_failure_surfaces_after_a_successful_command(
+        self, action: str, primary_frame: str
+    ):
+        """A lost release after a successful command must not report success.
+
+        The release burst is this protocol's stop, so losing it can leave the
+        bed moving or a keycode asserted. Every command family that ends in one
+        has to surface that, not just log it.
+        """
+        coordinator = MagicMock()
+        coordinator.motor_pulse_count = 10
+        coordinator.motor_pulse_delay_ms = 100
+        controller = LeggettOkinController(coordinator)
+        controller.write_command = AsyncMock(
+            side_effect=[None, BleakError("release failed")]
+        )
+
+        with pytest.raises(BleakError, match="release failed"):
+            await getattr(controller, action)()
+
+        first = controller.write_command.await_args_list[0]
+        assert first.args == (bytes.fromhex(primary_frame),)
+
     async def test_massage_timer_step_is_not_exposed(self):
         """0x200 is a constant the app never builds or writes, so it is not a command."""
         controller = LeggettOkinController(MagicMock())

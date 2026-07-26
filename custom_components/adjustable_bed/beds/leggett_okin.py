@@ -222,6 +222,7 @@ class LeggettOkinController(BedController):
             self._motor_state[motor] = direction
         command = self._get_move_command()
 
+        completed = False
         try:
             if command:
                 pulse_count, pulse_delay_ms = self.motor_pulse_settings()
@@ -230,9 +231,14 @@ class LeggettOkinController(BedController):
                     repeat_count=pulse_count,
                     repeat_delay_ms=pulse_delay_ms,
                 )
+            completed = True
         finally:
             self._motor_state = {}
-            await self._send_release_frames("motor movement")
+            # The release burst is this protocol's stop. If the movement itself
+            # succeeded, losing the release can leave the bed running, so it has
+            # to surface. If we are already unwinding it is cleanup and must not
+            # mask the original error.
+            await self._send_release_frames("motor movement", raise_on_error=completed)
 
     async def _send_release_frames(self, context: str, *, raise_on_error: bool = False) -> None:
         """Send the release burst that ends a held keycode.
@@ -372,14 +378,16 @@ class LeggettOkinController(BedController):
         _, pulse_delay_ms = self.motor_pulse_settings()
         pulse_delay_ms = max(pulse_delay_ms, LEGGETT_OKIN_PULSE_DEFAULTS[1])
         repeat_count = max(1, round(FLAT_HOLD_S * 1000 / pulse_delay_ms))
+        completed = False
         try:
             await self.write_command(
                 self._build_command(LeggettOkinCommands.PRESET_FLAT),
                 repeat_count=repeat_count,
                 repeat_delay_ms=pulse_delay_ms,
             )
+            completed = True
         finally:
-            await self._send_release_frames("preset_flat")
+            await self._send_release_frames("preset_flat", raise_on_error=completed)
 
     async def preset_memory(self, memory_num: int) -> None:
         """Go to memory preset."""
@@ -444,10 +452,12 @@ class LeggettOkinController(BedController):
         frame alone can leave the key asserted, so the next press of the same
         control may not register.
         """
+        completed = False
         try:
             await self.write_command(self._build_command(command))
+            completed = True
         finally:
-            await self._send_release_frames(context)
+            await self._send_release_frames(context, raise_on_error=completed)
 
     # Light methods
     async def lights_toggle(self) -> None:
