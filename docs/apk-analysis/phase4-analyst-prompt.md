@@ -49,7 +49,7 @@ INPUTS
 - Supplied files: <<SUPPLIED_FILES>>
 - Output directory: "<<WORKSPACE>>"
 - Known acquisition limitations: see input/identity.json -> known_acquisition_limitations
-- Required analysis.json schema and revision: input/analysis.schema.json, revision phase4-analysis-v1.6-2026-07-26
+- Required analysis.json schema and revision: input/analysis.schema.json, revision phase4-analysis-v1.7-2026-07-26
 
 NON-NEGOTIABLE RULES
 
@@ -286,6 +286,12 @@ integration protocol. For every protocol and variant, extract:
    final bytes or reproducible formula, dynamic fields, target characteristic, write
    type, preconditions, repeat count, interval, press/hold/release behavior, STOP
    behavior, response/notification, and exact evidence references.
+
+   In analysis.json each entry of a protocol's `commands` array carries at least
+   `action`, `bytes` (the final bytes or the formula that produces them),
+   `characteristic`, `write_type`, `timing`, `release_behavior` and a non-empty
+   `evidence` list. The schema rejects a row missing any of them, because a row without
+   its destination or release semantics cannot be implemented from later.
 
 5. Notifications and state parsing
    - subscription order and all notification/indication message types

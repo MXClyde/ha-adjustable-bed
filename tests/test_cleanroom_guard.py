@@ -85,7 +85,7 @@ _SHORT_UUID = re.compile(
 # short UUID counts there. It cannot count on mere GATT vocabulary, because a bare four-digit run
 # is indistinguishable from an issue reference in prose like "the service broke in #1188".
 _LABELLED_UUID = re.compile(
-    r"\b(?:uuid|service|characteristic|descriptor)s?\b[^\n:=]{0,20}[:=]\s*"
+    r"\b(?:uuid|service|characteristic|descriptor)s?\b[^\n:=]{0,20}(?:[:=]|\s+(?:is|are))\s*"
     r"(?:0x)?[0-9a-fA-F]{4}(?:[0-9a-fA-F]{4})?\b",
     re.IGNORECASE,
 )
@@ -94,6 +94,11 @@ _HEX_BYTE = re.compile(r"0x[0-9a-fA-F]{2}\b")
 # b"\x12\x34" pasted into an instruction file is the protocol, spelled exactly as the code spells
 # it, and neither the 0xNN nor the separated-pair detector sees it.
 _ESCAPED_BYTE = re.compile(r"\\x[0-9a-fA-F]{2}")
+# A bare byte, as in "STOP command: AA", which carries no 0x or \x marker. At least one uppercase
+# A-F is required: without it "10" in a config table row like "Command repeat count | 10" reads as
+# a byte, and lowercase would match ordinary words such as "be" and "ad". Only counted alongside
+# packet vocabulary, never on its own.
+_BARE_BYTE = re.compile(r"\b(?=[0-9A-F]{2}\b)[0-9A-F]*[A-F][0-9A-F]*\b")
 # Packet vocabulary. "STOP command: 0x12" is a complete answer from a single byte, so one byte is
 # enough once the line says what the byte is for.
 _PACKET_CONTEXT = re.compile(
@@ -194,7 +199,10 @@ def _answer_key_violation(line: str) -> str | None:
     if _BYTE_SEQUENCE.search(line) or _BYTE_SEQUENCE_LOOSE.search(line):
         return "byte sequence"
     if _PACKET_CONTEXT.search(line) and (
-        _HEX_BYTE.search(line) or _ESCAPED_BYTE.search(line) or _BYTE_SEQUENCE_PAIR.search(line)
+        _HEX_BYTE.search(line)
+        or _ESCAPED_BYTE.search(line)
+        or _BYTE_SEQUENCE_PAIR.search(line)
+        or _BARE_BYTE.search(line)
     ):
         return "byte in packet context"
     # Prose is an answer too: "<model> stops by ending its held-command refresh" is exactly the
@@ -320,6 +328,8 @@ def test_injected_instructions_carry_no_answer_key(relative_path: str) -> None:
         "the command is aa bb",
         'STOP command: b"\\x12"',
         'PACKET = b"\\x12\\x34"',
+        "STOP command: AA",
+        "Service UUID is 1800",
         "Service UUID: 1234",
         "characteristic = 0x1812",
         "Device-name pattern: BED_*",
@@ -351,6 +361,8 @@ def test_answer_key_forms_are_detected(line: str) -> None:
         "File-name patterns worth opening directly: `*Ble*`, `*Bluetooth*`",
         "- exact local-name rules, prefixes, suffixes, regexes, and exclusions",
         "- checksum/CRC algorithm with covered byte range, initial value, polynomial",
+        "| `motor_pulse_count` | Command repeat count | 10 |",
+        "the service is to be added",
         "which are frequently the exact methods doing bit manipulation and checksums",
         "Write reproducer code for every packet builder, checksum/CRC, and parser",
     ],
@@ -416,17 +428,31 @@ def test_no_analyst_visible_doc_points_at_the_comparison_notes() -> None:
     )
 
 
+# Phase C's disposition sentence: "For each candidate, mark it REACHABLE, ... or UNRESOLVED."
+_PROMPT_DISPOSITIONS = re.compile(r"mark it ([A-Z][^.]*?)\.", re.DOTALL)
+
+
 def test_reachability_enum_matches_prompt() -> None:
     """The reachability vocabulary must be exactly the dispositions Phase C defines.
 
-    The analyst reads only the prompt, so a value the schema accepts but the prompt never names
-    (or the reverse) shows up as a rejected report rather than as a documentation bug.
+    Compared in both directions on purpose. Checking only that each schema value appears somewhere
+    in the prompt would stay green when the prompt gains a sixth disposition, and the first sign of
+    that would be an analyst following the prompt and having its report rejected by the schema.
     """
     schema_values = set(_load_schema()["$defs"]["reachability"]["enum"])
-    prompt = _load_prompt()
-    missing = sorted(value for value in schema_values if value not in prompt)
-    assert not missing, (
-        f"analysis.schema.json accepts reachability values the analyst prompt never states: {missing}"
+
+    match = _PROMPT_DISPOSITIONS.search(_load_prompt())
+    assert match, "The analyst prompt no longer states the candidate dispositions"
+    prompt_values = {
+        value.strip()
+        for value in re.split(r",|\bor\b", " ".join(match.group(1).split()))
+        if value.strip()
+    }
+
+    assert prompt_values == schema_values, (
+        "The analyst prompt and analysis.schema.json disagree on the reachability vocabulary. "
+        f"Prompt only: {sorted(prompt_values - schema_values)}. "
+        f"Schema only: {sorted(schema_values - prompt_values)}."
     )
 
 
