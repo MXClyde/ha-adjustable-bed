@@ -64,7 +64,7 @@ export class MotorHold {
     // is finite and ends with the protocol's release burst, so a hold is a
     // train of pulses with a short stop between them. Making it continuous
     // needs a hold-until-released primitive in the integration, which does not
-    // exist yet.
+    // exist yet: see issue #483.
     while (generation === this._generation) {
       try {
         const pending = this.actions.pulse(motor, dir);
