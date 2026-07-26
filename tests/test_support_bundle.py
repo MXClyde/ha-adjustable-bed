@@ -1689,6 +1689,18 @@ class TestSupportBundleLogProbeSafety:
         # permissions fix.
         assert entries[0]["log_read_reason"] == "missing"
 
+    def test_probe_rejects_an_empty_log_file(self, tmp_path):
+        """A left-over empty file is readable but will never yield evidence."""
+        from custom_components.adjustable_bed.support_report import _probe_log_file
+
+        path = tmp_path / "home-assistant.log"
+        path.touch()
+        available, reason, error = _probe_log_file(str(path))
+
+        assert available is False
+        assert reason == "empty_file"
+        assert "is empty" in error
+
     def test_probe_accepts_a_regular_file(self, tmp_path):
         """A healthy install still reports available."""
         from custom_components.adjustable_bed.support_report import _probe_log_file

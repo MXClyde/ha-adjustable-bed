@@ -449,7 +449,22 @@ def _probe_log_file(log_path: str) -> tuple[bool, str | None, str | None]:
         # Covers fstat as well as open: every failure has to degrade into a
         # reason, because the caller probes outside its own error handling.
         return False, "unreadable", str(err)
-    os.close(fd)
+
+    try:
+        size = os.fstat(fd).st_size
+    except OSError as err:
+        return False, "unreadable", str(err)
+    finally:
+        os.close(fd)
+
+    if size == 0:
+        # A left-over empty file while the running instance logs to stdout is
+        # readable but will never yield evidence, so readability alone is not
+        # proof that logs will be captured. Home Assistant writes its startup
+        # banner immediately, so an empty file means nothing is writing here.
+        # Deliberately no mtime "liveness" check: a quiet instance can go a long
+        # time without a record, and a threshold would misreport it.
+        return False, "empty_file", f"{log_path} is empty"
     return True, None, None
 
 
