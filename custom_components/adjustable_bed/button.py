@@ -698,7 +698,14 @@ def _should_add_button(
             return False
 
     if description.is_program_button and controller is not None:
-        if not controller.supports_memory_programming:
+        # Per-slot, not controller-wide: a bed can report some slots as locked
+        # (Octo CAP_MEMINFO), and offering Save on those is a button the
+        # hardware refuses.
+        slot = description.memory_slot
+        if slot is not None:
+            if not controller.is_memory_slot_programmable(slot):
+                return False
+        elif not controller.supports_memory_programming:
             return False
 
     return True
@@ -725,6 +732,26 @@ def _async_remove_stale_button_entities(
             registry.async_remove(entity_id)
 
 
+def _discovered_memory_slot_name(
+    coordinator: AdjustableBedCoordinator,
+    description: AdjustableBedButtonEntityDescription,
+) -> str | None:
+    """Return the bed-reported name for a memory button, if there is one."""
+    slot = description.memory_slot
+    controller = coordinator.controller
+    if slot is None or controller is None:
+        return None
+
+    names = controller.memory_slot_names
+    if slot > len(names):
+        return None
+
+    name = names[slot - 1]
+    if not name:
+        return None
+    return f"Save {name}" if description.is_program_button else name
+
+
 class AdjustableBedButton(AdjustableBedEntity, ButtonEntity):
     """Button entity for Adjustable Bed."""
 
@@ -743,6 +770,14 @@ class AdjustableBedButton(AdjustableBedEntity, ButtonEntity):
             description.translation_key or description.key
         )
 
+        # Beds that name their memory slots (Octo CAP_MEMINFO reports e.g.
+        # Zero-G or Anti-Snore) are far more useful with that name than with
+        # "Memory 3". Setting _attr_name overrides the translated name; the
+        # translation still applies whenever the bed reports nothing.
+        slot_name = _discovered_memory_slot_name(coordinator, description)
+        if slot_name is not None:
+            self._attr_name = slot_name
+
     async def async_press(self) -> None:
         """Handle button press."""
         _LOGGER.info(
@@ -755,7 +790,7 @@ class AdjustableBedButton(AdjustableBedEntity, ButtonEntity):
         if self.entity_description.is_coordinator_action:
             try:
                 if self.entity_description.key == "disconnect":
-                    await self._coordinator.async_disconnect()
+                    await self._coordinator.async_disconnect(serialize_with_commands=True)
                     _LOGGER.info("Disconnected from bed - physical remote should now work")
                 elif self.entity_description.key == "connect":
                     if not await self._coordinator.async_ensure_connected():

@@ -23,6 +23,7 @@ from .const import (
     BED_TYPE_BEDTECH,
     BED_TYPE_DIAGNOSTIC,
     BED_TYPE_KAIDI,
+    BED_TYPE_OCTO,
     BED_TYPE_RICHMAT,
     BED_TYPE_VIBRADORM,
     BEDTECH_MANUFACTURER_ID,
@@ -39,6 +40,7 @@ from .const import (
     CONF_KAIDI_TARGET_VADDR,
     CONF_KAIDI_VARIANT_SOURCE,
     CONF_MOTOR_COUNT,
+    CONF_OCTO_PIN,
     CONF_PAIR_CHILDREN,
     CONF_PAIR_CONNECTION_MODE,
     CONF_PAIR_ID,
@@ -49,6 +51,7 @@ from .const import (
     CONF_RICHMAT_REMOTE,
     CONF_SIDE,
     DOMAIN,
+    OCTO_VARIANT_STAR2,
     PAIR_CONNECTION_MODE_SEQUENTIAL,
     PAIR_MODE_SINGLE_ADDRESS,
     PAIR_SIDES,
@@ -103,6 +106,7 @@ from .services import (
 )
 from .unsupported import (
     async_clear_unsupported_device_issues,
+    clear_octo_pin_required_issue,
     create_pairing_required_issue,
 )
 
@@ -1037,6 +1041,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await _async_maybe_reclassify_bedtech_qrrm_entry(hass, entry)
     _maybe_cache_kaidi_metadata(hass, entry)
+    _async_clear_stale_octo_pin_issue(hass, entry)
 
     _LOGGER.info(
         "Setting up Adjustable Bed integration for %s (address: %s, type: %s, motors: %s, massage: %s)",
@@ -1203,10 +1208,41 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Refresh the pairing suggestion after a config entry is removed."""
+    """Clean up Repairs issues that would otherwise outlive the entry."""
+    address = entry.data.get(CONF_ADDRESS)
+    if address:
+        clear_octo_pin_required_issue(hass, address)
     hass.loop.call_soon(async_refresh_combine_beds_issue, hass)
+
+
+def _async_clear_stale_octo_pin_issue(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Drop the Octo PIN repair when the configuration already resolves it.
+
+    Runs on every setup, so saving a PIN (which reloads the entry) clears the
+    issue even when the bed is unreachable and the connect path never runs.
+    """
+    address = entry.data.get(CONF_ADDRESS)
+    if not address:
+        return
+    # Star2 has no PIN mechanism at all, and OctoStar2Controller has no
+    # pin_locked_without_pin, so the connect path could never clear a stale
+    # issue left behind by a variant switch.
+    is_standard_octo = entry.data.get(CONF_BED_TYPE) == BED_TYPE_OCTO and entry.data.get(
+        CONF_PROTOCOL_VARIANT
+    ) != OCTO_VARIANT_STAR2
+    if not is_standard_octo or entry.data.get(CONF_OCTO_PIN):
+        clear_octo_pin_required_issue(hass, address)
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Handle options updates."""
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if coordinator is not None and coordinator.consume_internal_entry_update(entry):
+        # The coordinator recorded its own BLE bond marker. Reloading for that
+        # would disconnect the bed, which is fatal for a bed that only grants
+        # one connection per pairing window (issue #385).
+        _LOGGER.debug(
+            "Skipping reload for %s: internal bond-marker update", entry.entry_id
+        )
+        return
     await hass.config_entries.async_reload(entry.entry_id)

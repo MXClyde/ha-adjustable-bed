@@ -72,6 +72,17 @@ CONF_RICHMAT_REMOTE: Final = "richmat_remote"
 CONF_JENSEN_PIN: Final = "jensen_pin"
 CONF_CB24_BED_SELECTION: Final = "cb24_bed_selection"
 CONF_BLE_BOND_ESTABLISHED: Final = "ble_bond_established"
+# Latched once a connection that skipped pair=True on the strength of
+# CONF_BLE_BOND_ESTABLISHED was proven unbonded by the auth-gated probe. Some
+# stacks (notably ESPHome proxies) do not carry a bond across connections, so
+# trusting the marker there costs a guaranteed-failed attempt on every connect.
+CONF_BLE_BOND_MARKER_UNRELIABLE: Final = "ble_bond_marker_unreliable"
+# Provenance for the motor pulse settings: True once the user has saved them from
+# the options flow. Legacy config flows persisted generated defaults into entry
+# data, so the mere presence of the pulse keys proves nothing, and a protocol
+# migration could not tell a generated (10, 100) from a deliberate one. It kept
+# reverting the user's choice on every connect (issue #368).
+CONF_MOTOR_PULSE_USER_SET: Final = "motor_pulse_user_set"
 CONF_BACK_MAX_ANGLE: Final = "back_max_angle"
 CONF_LEGS_MAX_ANGLE: Final = "legs_max_angle"
 CONF_KAIDI_ROOM_ID: Final = "kaidi_room_id"
@@ -893,7 +904,22 @@ RICHMAT_NAME_PATTERNS: Final = ("qrrm", "sleep function", "x1rm", "dhn-")
 ERGOMOTION_NAME_PATTERNS: Final = ("ergomotion", "ergo", "serta-i")
 
 # Octo name patterns
-# Source: blenames.json from de.octoactuators.octosmartcontrolapp APK
+# Source: the official OCTO device table, verified 2026-07-25 against both the
+# bundled assets/www/data/blenames.json in de.octoactuators.octosmartcontrolapp
+# 1.03.01 (versionCode 10301) and the live endpoint the app refreshes it from,
+# https://octo-customer.com/getble/act= . Both returned byte-identical JSON, so
+# this list is complete and current: 14 entries, 13 of them visible.
+#
+# Two deliberate differences from that table:
+# - OCTOHDev ("OCTO hidden device", visible=0) is omitted. It is OCTO's own
+#   hidden development device, and the app suppresses it in the scanner.
+# - da1458x is ours only. It is the default name of the Dialog Semiconductor
+#   SoC used in some receivers, reported by users rather than listed by OCTO.
+#
+# Note the app matches these names with `===` on the full advertised name and
+# uses the table only to pretty-print the pairing list; it discovers devices by
+# the FFE0 service UUID. We match by prefix instead, because we need the name to
+# disambiguate FFE0 from the other protocol families that share it.
 # These are the official BLE device name prefixes for Octo controllers:
 # - RTV: Lift 1M
 # - RC2: Receiver II
@@ -2069,6 +2095,34 @@ def connection_gated_by_bond(bed_type: str, protocol_variant: str | None = None)
     return bed_type == BED_TYPE_LEGGETT_PLATT and protocol_variant == LEGGETT_VARIANT_GEN2
 
 
+def grants_one_connection_per_pairing_window(
+    bed_type: str, protocol_variant: str | None = None
+) -> bool:
+    """Return True when a live link must never be spent or thrown away.
+
+    LP Comfort Connect (Leggett & Platt Gen2) grants roughly one usable BLE
+    connection per bed power cycle: issue #385's support bundles record exactly
+    one completed connection followed by an unbroken run of connect timeouts
+    (3.3.0: ``connect_completed_total: 1`` at 39s after startup, then 41
+    consecutive failures, every one of them this bed) until the box is
+    unplugged again.
+
+    Two consequences follow for every code path that touches such a box:
+
+    1. Never open a throwaway connection. A probe or a standalone pairing
+       connect that disconnects in ``finally`` consumes the only connection the
+       coordinator was going to get.
+    2. Never trade a working link for a cleaner state. Reconnecting to "do it
+       properly" strands the bed until the user power-cycles it.
+
+    LP Control matches this: it connects once with ``autoConnect=true``, fires
+    ``createBond()`` after service discovery, never observes the result (the app
+    has no ``ACTION_BOND_STATE_CHANGED`` receiver and no bond retry anywhere),
+    and continues the session on that same link bonded or not.
+    """
+    return connection_gated_by_bond(bed_type, protocol_variant)
+
+
 # Bed types that support angle sensing (position feedback)
 BEDS_WITH_ANGLE_SENSING: Final = frozenset(
     {
@@ -2196,6 +2250,11 @@ CONNECTION_PROFILES: Final = {
 DEFAULT_MOTOR_PULSE_COUNT: Final = 10  # Default for most beds
 DEFAULT_MOTOR_PULSE_DELAY_MS: Final = 100  # Default for most beds
 
+# Leggett Okin cadence, split out because the coordinator has to recognise the
+# value an earlier release wrote into existing entries in order to correct it.
+LEGGETT_OKIN_PULSE_DEFAULTS: Final = (10, 100)
+LEGGETT_OKIN_SUPERSEDED_PULSE_DEFAULTS: Final = (5, 200)
+
 # Per-bed-type motor pulse defaults based on app disassembly analysis
 # Target: ~1.0 second total motor movement duration (repeat_count = 1000ms / delay_ms)
 BED_MOTOR_PULSE_DEFAULTS: Final = {
@@ -2241,9 +2300,15 @@ BED_MOTOR_PULSE_DEFAULTS: Final = {
     # Leggett WiLinke: 110ms delay → 10 repeats = 1.1s total
     # Source: RICHMAT_MASTER_ANALYSIS.md - MLRM devices use 110ms timing
     BED_TYPE_LEGGETT_WILINKE: (10, 110),
-    # Leggett Okin: LP Control repeats held actuator commands every 200ms.
-    # Source: com.leggett.android.universal 2.9.0 (OkinControlBoxInterface)
-    BED_TYPE_LEGGETT_OKIN: (5, 200),
+    # Leggett Okin: the Prodigy CE app's single output thread writes the held
+    # keycode every 100ms (OutputThread.runNormal, Thread.sleep(100L)), and
+    # every one-shot burst in that app is 10 frames. Source: clean-room analysis
+    # of com.leggett.prodigy4 1.2.0, §11.
+    # LP Control (com.leggett.android.universal 2.9.0) uses 200ms for the same
+    # hardware family, which is where the previous (5, 200) came from. Both are
+    # official apps; 100ms is the safer of the two, because a shorter refresh
+    # cannot fall outside a keep-alive window that a longer one satisfies.
+    BED_TYPE_LEGGETT_OKIN: LEGGETT_OKIN_PULSE_DEFAULTS,
     # OCTO: 350ms delay → 3 repeats = 1.05s total
     # Source: de.octoactuators.octosmartcontrolapp ANALYSIS.md
     BED_TYPE_OCTO: (3, 350),

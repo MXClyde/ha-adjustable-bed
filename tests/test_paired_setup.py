@@ -1743,12 +1743,72 @@ class TestSideServiceRouting:
         coordinator.async_execute_controller_command.assert_awaited()
 
         # save_preset shares the same no-connect preflight (it validates
-        # supports_memory_programming). Octo can't program memory, so it raises —
-        # but the validation still reads from the offline controller, never
-        # connecting either side, and never dispatches a command.
+        # supports_memory_programming). This snapshot reports four slots, so the
+        # validation passes and the command fans out - still read entirely from
+        # the offline controller, without connecting either side.
         for child in children.values():
             child.async_ensure_connected.reset_mock()
         coordinator.async_execute_controller_command.reset_mock()
+        await hass.services.async_call(
+            DOMAIN,
+            "save_preset",
+            {"device_id": [parent.id], "side": "both", "preset": 1},
+            blocking=True,
+        )
+        for child in children.values():
+            child.async_ensure_connected.assert_not_awaited()
+        coordinator.async_execute_controller_command.assert_awaited()
+
+    async def test_preset_preflight_rejects_from_snapshot_without_connecting(
+        self, hass: HomeAssistant
+    ):
+        """A side whose snapshot reports no memory is rejected from that snapshot
+        alone: the preflight must never connect a side just to find out (#390)."""
+        from unittest.mock import AsyncMock
+
+        from custom_components.adjustable_bed import (
+            _async_ensure_paired_device_registry,
+            async_register_services,
+        )
+        from custom_components.adjustable_bed.paired_coordinator import (
+            PairedBedCoordinator,
+        )
+
+        snap = {
+            "has_pin": False,
+            "pin_locked": False,
+            "has_lights": True,
+            "has_rgbwi": False,
+            "rgbwi_value_type": None,
+            "memory_count": 0,  # this receiver has no memory slots at all
+            "discovered_motor_count": 2,
+            "has_synchro": False,
+        }
+        data = _paired_entry_data()
+        data[CONF_BED_TYPE] = BED_TYPE_OCTO
+        for child in data[CONF_PAIR_CHILDREN]:
+            child[CONF_BED_TYPE] = BED_TYPE_OCTO
+            child["capabilities"] = {"octo": snap}
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            data=data,
+            unique_id="pair_octo_nomem",
+            entry_id="pair_octo_nomem",
+            version=4,
+        )
+        entry.add_to_hass(hass)
+        children = _build_paired_children(hass, entry)
+        for child in children.values():
+            await child.async_prime_offline_controller()
+            child.async_ensure_connected = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        coordinator = PairedBedCoordinator(hass, entry, children)
+        coordinator.async_execute_controller_command = AsyncMock()  # type: ignore[method-assign]
+        hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+        _async_ensure_paired_device_registry(hass, entry, coordinator)
+        await async_register_services(hass)
+
+        parent = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, PAIR_ID)})
+        assert parent is not None
         with pytest.raises(ServiceValidationError):
             await hass.services.async_call(
                 DOMAIN,

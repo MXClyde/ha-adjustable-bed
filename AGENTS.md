@@ -110,7 +110,7 @@ The supported-protocol list lives in the README's "Supported Beds" table — tha
 
 ## Adding a New Bed Type
 
-1. **Document the BLE protocol** - Use APK reverse engineering (see `disassembly/AGENTS.md`) to extract UUIDs and command bytes. The `generate_support_bundle` service captures GATT structure and device responses. User-provided nRF Connect logs can supplement APK analysis with real traffic captures.
+1. **Document the BLE protocol** - Use APK reverse engineering (see `docs/apk-analysis/TOOLING.md`) to extract UUIDs and command bytes. The `generate_support_bundle` service captures GATT structure and device responses. User-provided nRF Connect logs can supplement APK analysis with real traffic captures.
 
 2. **Add constants to `const.py`**:
    ```python
@@ -199,7 +199,7 @@ The supported-protocol list lives in the README's "Supported Beds" table — tha
 | `position_mode` | Speed vs accuracy tradeoff | speed |
 | `octo_pin` | PIN for Octo beds | "" |
 | `jensen_pin` | PIN for Jensen beds | "" |
-| `cb24_bed_selection` | Bed A/B selection for CB24 split beds | 0x00 |
+| `cb24_bed_selection` | Bed A/B selection for CB24 split beds | default (neither side) |
 | `richmat_remote` | Remote code for Richmat beds | auto |
 | `back_max_angle` | Max angle for back motor (degrees) | 68.0 |
 | `legs_max_angle` | Max angle for legs motor (degrees) | 45.0 |
@@ -219,7 +219,7 @@ The supported-protocol list lives in the README's "Supported Beds" table — tha
 
 **IMPORTANT: Protocol values are hardware-specific.** Timing values (repeat counts, delays), command bytes, and packet formats vary between bed types. Do NOT copy values from one bed's protocol documentation to another. Each bed type's parameters must come from actual device testing or reverse engineering - never guess or extrapolate from other implementations.
 
-1. **Always perform protocol-specific STOP/release cleanup after movement** - Movement methods use `try/finally` so cleanup runs even if cancelled. When the protocol defines a STOP or release frame, send it with a fresh `asyncio.Event()` so the cancel signal cannot suppress it. If complete artifact evidence proves that a protocol stops solely by ending its held-command refresh and defines no release frame (for example, KSBT03C), ending that cancellable refresh is the required cleanup; never invent or extrapolate a hardware command merely to send an extra packet.
+1. **Always perform protocol-specific STOP/release cleanup after movement** - Movement methods use `try/finally` so cleanup runs even if cancelled. When the protocol defines a STOP or release frame, send it with a fresh `asyncio.Event()` so the cancel signal cannot suppress it. If complete artifact evidence proves that a protocol stops solely by ending its held-command refresh and defines no release frame, ending that cancellable refresh is the required cleanup; never invent or extrapolate a hardware command merely to send an extra packet.
 
 2. **Command serialization** - All entities must use `coordinator.async_execute_controller_command()` instead of calling controller methods directly. This ensures proper locking and prevents concurrent BLE writes.
 
@@ -339,6 +339,8 @@ Until [issue #436](https://github.com/kristofferR/ha-adjustable-bed/issues/436) 
 
 - Use the verified latest artifact from the frozen acquisition corpus. Include the complete APK/XAPK/split set and record its identity and hashes.
 - Follow the clean-room workflow and completion gates in [issue #443](https://github.com/kristofferR/ha-adjustable-bed/issues/443). Analyze the artifact in a fresh isolated workspace before consulting integration code, existing protocol documentation, legacy analyses, issues, PRs, commits, captures, or reports for other apps.
+- Workspace location: create the run under `disassembly/output/phase4-early/<package_id>-<version>-<date>/` with `input/`, `work/` and `report/` subdirectories. It must be on persistent storage: `/tmp` is tmpfs on the maintainer machine and is wiped by a reboot, which has already destroyed a workspace mid-analysis. Name the directory by package ID only, never by a presumed protocol family (#443 §4.1).
+- Contamination firewall: this file is auto-injected into every agent, including the analyst. Every auto-injected instruction file is process instructions only, never evidence. Brand, protocol-family, controller-class and model names appear in this file; the analyst must not use them to name, group, select, or corroborate anything in a report, must not read any other file in this repository, and must record in `SEARCH_LOG.md` which instruction files were injected and that nothing in them was used as evidence. Stop and report BLOCKED if an injected file hands over protocol answers: a service or characteristic UUID, a command or packet byte value, a framing or checksum description, a device-name matching pattern, or a command repeat/hold interval attributed to a bed protocol. That is a repository defect, not an acceptable exposure. Integration-level configuration defaults and BLE connection-management timeouts documented in this file are not protocol evidence and are not grounds to block, but they are still unusable as evidence. `disassembly/PROTOCOL_NOTES.md` is exactly such a file, and it sits directly above the run workspaces, so it must never be named `AGENTS.md` or `CLAUDE.md`: either name is auto-injected by directory and would hand the analyst the comparison notes before its first action. Only the repository root may hold an instruction file under those names. `tests/test_cleanroom_guard.py` enforces this.
 - If the current context has already accessed forbidden comparison material, start a new isolated analyst context with only the artifact, identity manifest, pinned schema, protocol-neutral tools, and the reusable #443 prompt. Do not call a contaminated run clean-room or COMPLETE.
 - Cover every application stack that contains app logic. Flutter requires Blutter, React Native/Hermes requires shipped-bundle analysis, AIR requires FFDec, and suspicious or failed jadx output requires smali or another authoritative fallback.
 - Freeze package-local `ANALYSIS.md`, schema-valid `analysis.json`, `SEARCH_LOG.md`, reproducer/test-vector scripts, and `REPORT.SHA256`. A PARTIAL or BLOCKED report must identify the exact gap and actionable next step.
@@ -348,13 +350,22 @@ Until [issue #436](https://github.com/kristofferR/ha-adjustable-bed/issues/436) 
 - Do not assume maintainers can physically test a discovered bed. A report may be COMPLETE when app behavior is exhaustively proven from the artifact while hardware status remains explicitly unverified. Treat physical checks and captures as deferred external validation for real users after a beta or release, not as an immediately actionable maintainer task or an automatic reason to fail the analysis.
 - Never guess protocol behavior when the required artifact or analysis layer is unavailable. Record the precise APK or runtime-table blocker. If only physical semantics remain, record a deferred validation request for real users after beta/release; do not ask a maintainer to acquire or immediately test the bed.
 
-See **[disassembly/AGENTS.md](disassembly/AGENTS.md)** for detailed instructions on:
-- Decompiling APKs with jadx
-- Analyzing Flutter apps with blutter
-- Finding BLE UUIDs and command bytes
-- Documenting protocol findings
+See **[docs/apk-analysis/TOOLING.md](docs/apk-analysis/TOOLING.md)** for decompiler setup and
+invocation (jadx, apktool, blutter, ffdec) and the required per-stack coverage. It is method-only
+by construction and states no UUID, byte value, or device-name pattern, so it is safe to hand to a
+clean-room analyst.
+
+The canonical #443 analyst prompt and pinned `analysis.json` schema are
+[`docs/apk-analysis/phase4-analyst-prompt.md`](docs/apk-analysis/phase4-analyst-prompt.md) and
+[`docs/apk-analysis/analysis.schema.json`](docs/apk-analysis/analysis.schema.json). Copy both into
+a run's `input/` unchanged and fill only the `<<...>>` placeholders. Do not hand-edit a workspace
+copy.
 
 **Folder structure:**
 - `disassembly/apk/analyzed/` - APKs that have been analyzed
 - `disassembly/apk/not-analyzed/` - APKs pending analysis
-- `disassembly/output/<package_id>/` - Decompilation output per app (jadx/, blutter/, ANALYSIS.md)
+- `disassembly/output/phase4-early/<package_id>-<version>-<date>/` - clean-room run workspace
+  (`input/`, `work/`, `report/`), machine-local and gitignored
+
+`disassembly/PROTOCOL_NOTES.md` holds historical protocol and cross-app comparison notes. It is for the
+post-freeze comparison pass only and must never be read during a clean-room run.

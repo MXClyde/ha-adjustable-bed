@@ -309,15 +309,23 @@ _SIMPLE_CONTROLLERS: Final[dict[str, _ControllerSpec]] = {
 }
 
 
-def _create_from_registry(
+async def _create_from_registry(
     coordinator: AdjustableBedCoordinator, bed_type: str
 ) -> BedController | None:
-    """Instantiate ``bed_type`` from the registry, or None if it needs a custom branch."""
+    """Instantiate ``bed_type`` from the registry, or None if it needs a custom branch.
+
+    The registry deliberately imports controller modules lazily so startup does not
+    pay for every unused protocol. That import touches the filesystem, so it must
+    run in the import executor rather than the event loop; doing it inline made HA
+    log a "blocking call to import_module inside the event loop" warning (issue #368).
+    """
     spec = _SIMPLE_CONTROLLERS.get(bed_type)
     if spec is None:
         return None
 
-    module = import_module(f".beds.{spec.module}", __package__)
+    module = await coordinator.hass.async_add_import_executor_job(
+        import_module, f".beds.{spec.module}", __package__
+    )
     controller_cls: type[BedController] = getattr(module, spec.class_name)
     _LOGGER.debug(
         "Using %s for bed type %s%s",
@@ -896,7 +904,7 @@ async def create_controller(
         _LOGGER.debug("Using SBI controller with variant: %s", variant)
         return SBIController(coordinator, variant=variant)
 
-    controller = _create_from_registry(coordinator, bed_type)
+    controller = await _create_from_registry(coordinator, bed_type)
     if controller is not None:
         return controller
 

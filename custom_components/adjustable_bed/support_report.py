@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import stat
 import sys
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -230,6 +232,12 @@ def _get_controller_info(coordinator: AdjustableBedCoordinator) -> dict[str, Any
         if char_uuid is not None:
             info["char_uuid"] = char_uuid
 
+        # Whatever the connect-time protocol handshake resolved to (capabilities,
+        # authentication state, ...). Empty for controllers with no handshake.
+        protocol_state = controller.protocol_diagnostics
+        if protocol_state:
+            info["protocol_state"] = protocol_state
+
     return info
 
 
@@ -309,9 +317,57 @@ def _is_relevant_log_name(name: str) -> bool:
     return any(fragment in lowered for fragment in _RELEVANT_LOG_NAMES)
 
 
+class _NotARegularFile(OSError):
+    """The log path exists but is a FIFO, device, or similar."""
+
+
+def _open_regular_file(log_path: str) -> int:
+    """Open ``log_path`` read-only and return a validated file descriptor.
+
+    Raises ``_NotARegularFile`` for a FIFO or device and ``OSError`` for
+    anything else; the caller owns the descriptor on success.
+
+    This is the one copy of the hang-prevention rule, because two copies of
+    safety-critical logic drift. ``O_NONBLOCK`` stops a FIFO open from waiting
+    for a writer, and ``fstat`` describes the object actually opened, so the
+    type check cannot be raced by a path swapped after a bare ``stat``.
+    """
+    # Check before opening as well as after. O_NONBLOCK keeps *us* from waiting
+    # on a FIFO, but opening its read end can release a writer that was blocked
+    # waiting for a reader, and closing again immediately can then hand that
+    # writer EPIPE - disrupting the very log stream this is inspecting. Refuse
+    # special files without touching them.
+    # stat, not lstat: a symlink pointing at a real log file is a legitimate
+    # setup and must be followed, while a symlink to a FIFO resolves to the FIFO
+    # and is refused on its own merits.
+    if not stat.S_ISREG(os.stat(log_path).st_mode):  # noqa: PTH116 - HA config path
+        raise _NotARegularFile(f"{log_path} is not a regular file")
+
+    fd = os.open(log_path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        # Re-check on the descriptor: the pre-check above races with anything
+        # that could swap the path between the two calls.
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise _NotARegularFile(f"{log_path} is not a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _tail_text(log_path: str, max_bytes: int) -> str:
-    """Read up to the last ``max_bytes`` of a UTF-8 log file as text."""
-    with open(log_path, "rb") as handle:  # noqa: PTH123 - plain path from HA config
+    """Read up to the last ``max_bytes`` of a UTF-8 log file as text.
+
+    Refuses anything that is not a regular file: opening a FIFO blocks until a
+    writer appears, which would hang the capture in its executor thread.
+    """
+    fd = _open_regular_file(log_path)
+    try:
+        handle = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+    with handle:
         handle.seek(0, 2)
         size = handle.tell()
         start = max(0, size - max_bytes)
@@ -336,15 +392,27 @@ def _read_log_file(log_path: str) -> list[dict[str, str]]:
         raw = _tail_text(log_path, _LOG_TAIL_BYTES)
     except OSError as err:
         _LOGGER.debug("Could not read %s: %s", log_path, err)
+        # A missing file and an unreadable one need different remedies, so keep
+        # the distinction (and the original error) instead of always blaming
+        # disabled logging.
+        # A FIFO (a container logging to stdout) needs the same remedy as a
+        # missing file: a real log to download, not a permissions fix.
+        missing = isinstance(err, FileNotFoundError | _NotARegularFile)
+        hint = (
+            "File logging may be disabled; enable it and reproduce the issue to "
+            "capture logs."
+            if missing
+            else "The log file exists but could not be read; check its permissions "
+            "and the configured log path."
+        )
         return [
             {
                 "timestamp": datetime.now(UTC).isoformat(),
                 "level": "INFO",
                 "name": DOMAIN,
-                "message": (
-                    f"Could not read {log_path}: {err}. File logging may be "
-                    "disabled; enable it and reproduce the issue to capture logs."
-                ),
+                "message": f"Could not read {log_path}: {err}. {hint}",
+                "log_read_error": str(err),
+                "log_read_reason": "missing" if missing else "unreadable",
             }
         ]
 
@@ -370,3 +438,109 @@ def _read_log_file(log_path: str) -> list[dict[str, str]]:
             current["message"] += "\n" + redact_pins_only({"msg": line})["msg"]
 
     return logs[-MAX_LOG_ENTRIES:]
+
+
+def _probe_log_file(log_path: str) -> tuple[bool, str | None, str | None]:
+    """Return ``(available, reason, error)`` for the Home Assistant log file.
+
+    Runs in an executor (blocking file I/O). ``reason`` is ``"missing"``,
+    ``"not_a_file"`` or ``"unreadable"`` when the file cannot be used.
+
+    ``os.stat`` comes first and the file is never read. If the path is a FIFO or
+    a device - which is exactly what a container redirecting its logs to stdout
+    can leave behind - then ``open()`` alone blocks until a writer appears, and
+    a read would also consume a byte of somebody else's stream. Statting cannot
+    block, so the hazard is settled before anything is opened.
+    """
+    try:
+        fd = _open_regular_file(log_path)
+    except FileNotFoundError as err:
+        return False, "missing", str(err)
+    except _NotARegularFile as err:
+        return False, "not_a_file", str(err)
+    except OSError as err:
+        # Covers fstat as well as open: every failure has to degrade into a
+        # reason, because the caller probes outside its own error handling.
+        return False, "unreadable", str(err)
+
+    try:
+        size = os.fstat(fd).st_size
+    except OSError as err:
+        return False, "unreadable", str(err)
+    finally:
+        os.close(fd)
+
+    if size == 0:
+        # A left-over empty file while the running instance logs to stdout is
+        # readable but will never yield evidence, so readability alone is not
+        # proof that logs will be captured. Home Assistant writes its startup
+        # banner immediately, so an empty file means nothing is writing here.
+        # Deliberately no mtime "liveness" check: a quiet instance can go a long
+        # time without a record, and a threshold would misreport it.
+        return False, "empty_file", f"{log_path} is empty"
+    return True, None, None
+
+
+async def async_check_log_file(hass: HomeAssistant) -> dict[str, Any]:
+    """Check up front whether a support bundle will be able to include logs.
+
+    The capture itself takes minutes, and a bundle without logs is missing the
+    single most useful evidence for connection problems (issue #385: every
+    bundle in that report had ``log_capture_status: "unavailable"``). Probing
+    first lets the caller tell the user *before* they wait for a useless
+    capture.
+    """
+    log_path = hass.config.path("home-assistant.log")
+    # Uses Home Assistant's shared executor, deliberately.
+    #
+    # os.open on a wedged network or FUSE mount cannot be cancelled, so no
+    # arrangement here can free the worker; the only question is which pool it
+    # is stranded in. _get_recent_logs() already performs this same open on this
+    # same executor a few seconds later during the capture, so the probe adds no
+    # hazard that the capture did not already carry. A private executor would
+    # instead leave a thread that concurrent.futures joins at interpreter
+    # shutdown, which can block a clean Home Assistant restart: strictly worse.
+    # The caller's timeout is what keeps the *service* responsive.
+    available, reason, error = await hass.async_add_executor_job(
+        _probe_log_file, log_path
+    )
+    return {
+        "available": available,
+        "reason": reason,
+        "path": log_path,
+        "error": error,
+    }
+
+
+def build_missing_log_notice(
+    reason: str | None, error: str | None, *, future: bool = False
+) -> str:
+    """Explain a bundle that has (or will have) no logs, and how to fix it.
+
+    Shared by the pre-capture warning and the finished-bundle notification so
+    both give the same remedy. Note what is deliberately absent: telling the
+    user to configure `logger:`. That only sets levels; it does not create a
+    file handler, so it cannot help an install that logs to stdout.
+    """
+    headline = (
+        "⚠️ **This bundle will contain no logs.**"
+        if future
+        else "⚠️ **This bundle contains no logs.**"
+    )
+    if reason == "unreadable":
+        return (
+            f"{headline} The Home Assistant log file could not be read "
+            f"(`{error}`), so the reason a command failed is usually not "
+            "recoverable from it. Check the file's permissions and the "
+            "configured log path, then run this service again."
+        )
+    return (
+        f"{headline} Home Assistant is not writing a `home-assistant.log` file "
+        "(common on container installs that log to stdout), so the reason a "
+        "command failed is usually not recoverable from it.\n\n"
+        "Use **Settings → Devices & services → Adjustable Bed → ⋮ → "
+        "Enable debug logging** instead, reproduce the problem, then "
+        "**Disable debug logging** to download the captured log and attach it "
+        "alongside this bundle. The full log is also available under "
+        "**Settings → System → Logs → Load full logs**."
+    )
