@@ -62,7 +62,10 @@ from custom_components.adjustable_bed.const import (
     OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID,
     RICHMAT_REMOTE_AUTO,
 )
-from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+from custom_components.adjustable_bed.coordinator import (
+    BOND_LATCH_RETEST_AFTER,
+    AdjustableBedCoordinator,
+)
 
 from .conftest import TEST_ADDRESS, TEST_NAME, make_controller_mock
 
@@ -2092,6 +2095,86 @@ class TestBondMarkerReliability:
         assert coordinator._attempt_used_pairing is False
 
         await coordinator.async_disconnect()
+
+    async def test_latch_is_retested_after_repeated_paired_successes(
+        self,
+        hass: HomeAssistant,
+    ):
+        """A pairing-capable backend must not stay latched forever.
+
+        While latched every attempt pairs, so the "bond survived an unpaired
+        connect" release can only fire where pairing itself failed. Without a
+        periodic retest, a bed moved to an adapter that now keeps bonds would be
+        re-paired on every reconnect for good.
+        """
+        coordinator = self._make_bonded_coordinator(
+            hass,
+            **{CONF_BLE_BOND_MARKER_UNRELIABLE: True, CONF_BLE_BOND_ESTABLISHED: False},
+        )
+        client = MagicMock()
+        client.is_connected = True
+        client.read_gatt_char = AsyncMock(return_value=b"CU170")
+        coordinator._client = client
+        coordinator._attempt_used_pairing = True
+
+        with patch(
+            "custom_components.adjustable_bed.coordinator.delete_pairing_required_issue",
+            new_callable=AsyncMock,
+        ):
+            for _ in range(BOND_LATCH_RETEST_AFTER - 1):
+                assert await coordinator._async_verify_bonded() is True
+                assert coordinator._ble_bond_marker_unreliable is True
+
+            # The last one drops the latch so the next connect tries unpaired.
+            assert await coordinator._async_verify_bonded() is True
+
+        assert coordinator._ble_bond_marker_unreliable is False
+        assert coordinator._ble_bond_established is True
+        assert coordinator._latched_pairing_successes == 0
+
+    async def test_stale_os_reported_bond_latches_like_a_stale_marker(
+        self,
+        hass: HomeAssistant,
+    ):
+        """Skipping pairing on a stale OS bond must latch, or retries never pair.
+
+        The backend can report a bond that the bed no longer honours. That skip
+        is the same unfounded trust as a stale cached marker, so an auth failure
+        after it has to latch; otherwise every retry believes the same stale
+        report and the bed never actually pairs.
+        """
+        coordinator = self._make_bonded_coordinator(
+            hass, **{CONF_BLE_BOND_ESTABLISHED: False}
+        )
+        device = MagicMock()
+        device.details = {}
+        pairing_details: dict[str, Any] = {}
+
+        with patch.object(
+            coordinator, "_device_reports_existing_bond", return_value=True
+        ):
+            _, use_pairing, _ = coordinator._prepare_pairing_attempt(device, pairing_details)
+
+        assert use_pairing is False
+        assert pairing_details["decision"] == "existing_os_bond_detected"
+        assert coordinator._attempt_trusted_bond_marker is True
+
+        with patch(
+            "custom_components.adjustable_bed.coordinator.create_pairing_required_issue",
+            new_callable=AsyncMock,
+        ):
+            await coordinator._async_handle_ble_authentication_error(
+                BleakError("handle=26 error=5 description=Insufficient authentication")
+            )
+
+        assert coordinator._ble_bond_marker_unreliable is True
+
+        # The stale OS report can no longer suppress pairing on the retry.
+        with patch.object(
+            coordinator, "_device_reports_existing_bond", return_value=True
+        ):
+            _, use_pairing, _ = coordinator._prepare_pairing_attempt(device, {})
+        assert use_pairing is True
 
     async def test_latch_holds_while_only_paired_connections_succeed(
         self,

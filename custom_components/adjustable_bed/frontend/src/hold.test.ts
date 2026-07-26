@@ -238,15 +238,27 @@ test("abandoning mid-hold stops a cover that would keep running", async () => {
   expect(rec.pulses.length).toBe(1);
 });
 
-test("abandoning a button-backed hold does not stop the bed", async () => {
+test("abandoning a button-backed hold stops the bed", async () => {
   const rec = recorder();
   const hold = new MotorHold(rec.actions);
 
   hold.start(buttonMotor, "up", 1);
   await tick();
+  // Navigating away leaves the pulse in flight; without a stop the bed keeps
+  // moving for the rest of it with the control no longer on screen.
   hold.abandon();
   rec.release();
   await tick();
+
+  expect(rec.bedStops).toBe(1);
+  expect(rec.stoppedCovers).toEqual([]);
+});
+
+test("abandoning with no hold active touches nothing", async () => {
+  const rec = recorder();
+  const hold = new MotorHold(rec.actions);
+
+  hold.abandon();
 
   expect(rec.bedStops).toBe(0);
   expect(rec.stoppedCovers).toEqual([]);

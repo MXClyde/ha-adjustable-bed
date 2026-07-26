@@ -126,12 +126,17 @@ export class MotorHold {
   }
 
   // The card left the DOM mid-hold, so no pointer release will ever arrive.
-  // Stops the loop, and stops a cover that would otherwise keep running with
-  // nothing left to stop it.
+  // Stops the loop and the bed: a cover would otherwise keep running with
+  // nothing left to stop it, and the pulse already in flight on a button-backed
+  // motor keeps moving the bed for the rest of its duration, which is a second
+  // or more and longer still with customised pulse settings.
   abandon(): void {
     const cover = this._cover;
+    const wasHolding = this._key !== null;
     this._reset();
+    if (!wasHolding) return;
     if (cover) this.actions.stopCover(cover);
+    else this.actions.stopBed();
   }
 
   private _reset(): void {

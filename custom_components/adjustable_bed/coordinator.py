@@ -179,6 +179,12 @@ _INITIAL_POSITION_READ_MAX_ATTEMPTS = 6
 _PASSIVE_POSITION_RECONCILIATION_IDLE_MARGIN = 15.0
 
 MAX_COMMAND_TRACE_ENTRIES = 100
+
+# How many successful paired connections to make while the always-pair latch is
+# set before dropping it to re-test whether the bond persists again. Small
+# enough that a bed moved to a bond-keeping adapter recovers quickly, large
+# enough that a bed which genuinely loses bonds wastes an attempt only rarely.
+BOND_LATCH_RETEST_AFTER = 10
 MAX_CONNECTION_ATTEMPT_DETAILS = 25
 
 # Backwards-compatible private alias; the implementation now lives in ble_auth
@@ -362,6 +368,9 @@ class AdjustableBedCoordinator:
         # that verifies on an attempt that did NOT pair proves the bond survives
         # on this stack, which is what releases the latch below.
         self._attempt_used_pairing: bool = False
+        # Consecutive successful paired connections made while the latch is set.
+        # Runtime only: a reload re-tests anyway.
+        self._latched_pairing_successes: int = 0
 
         # Connection history tracking for diagnostics (issue #168)
         self._connection_attempt_count: int = 0
@@ -1161,15 +1170,36 @@ class AdjustableBedCoordinator:
             return True
 
         # Read succeeded → the encrypted link works → we are bonded.
-        release_latch = self._ble_bond_marker_unreliable and not self._attempt_used_pairing
-        if release_latch:
-            # The bond survived to a connection that never asked to pair, so
-            # whatever made the marker unreliable no longer applies (a different
-            # adapter, a firmware change, a proxy that now persists bonds). Let
-            # the marker work again rather than requesting pairing forever.
-            self._log_bond_marker_reliable_again()
+        release_latch = False
+        if self._ble_bond_marker_unreliable:
+            if not self._attempt_used_pairing:
+                # The bond survived to a connection that never asked to pair, so
+                # whatever made the marker unreliable no longer applies (a
+                # different adapter, a firmware change, a proxy that now
+                # persists bonds). Trust the marker again.
+                release_latch = True
+                self._log_bond_marker_reliable_again()
+            else:
+                # While latched every attempt pairs, so the check above can only
+                # fire on a backend where pairing itself failed and fell back to
+                # an unpaired connect. Without this a pairing-capable backend
+                # would re-pair on every reconnect forever, including on stacks
+                # this code already knows can fail when re-pairing atop an
+                # existing bond. Periodically drop the latch to re-test: the
+                # cost of being wrong is one failed attempt per retest, not one
+                # per connect.
+                self._latched_pairing_successes += 1
+                if self._latched_pairing_successes >= BOND_LATCH_RETEST_AFTER:
+                    release_latch = True
+                    _LOGGER.info(
+                        "Re-testing the cached bond marker for %s after %d paired "
+                        "connections; the next attempt will try without pairing",
+                        self._address,
+                        self._latched_pairing_successes,
+                    )
         self._skip_pair_next_attempt = False
         if release_latch:
+            self._latched_pairing_successes = 0
             self._persist_bond_flags(established=True, unreliable=False)
         else:
             self._mark_ble_bond_established()
@@ -1595,8 +1625,15 @@ class AdjustableBedCoordinator:
                 "ordering": pairing_ordering,
             }
         )
+        # Both of these skip pairing because something claimed we are already
+        # bonded. If the probe then fails, that claim was wrong and must latch:
+        # a stale OS-reported bond would otherwise be believed again on every
+        # retry, so a pairing-required bed could exhaust all attempts without
+        # ever actually pairing.
         self._attempt_trusted_bond_marker = (
-            bed_requires_pairing and not use_pairing and pairing_decision == "bond_marker_present"
+            bed_requires_pairing
+            and not use_pairing
+            and pairing_decision in ("bond_marker_present", "existing_os_bond_detected")
         )
         self._attempt_used_pairing = use_pairing
         # Consume the transient skip flag: it only suppresses pairing for the
