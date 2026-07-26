@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://local.invalid/schemas/phase4-analysis-v1.9-2026-07-26.json",
+  "$id": "https://local.invalid/schemas/phase4-analysis-v1.10-2026-07-26.json",
   "title": "Phase 4 APK protocol analysis",
   "type": "object",
   "required": [
@@ -22,7 +22,7 @@
   ],
   "properties": {
     "schema_revision": {
-      "const": "phase4-analysis-v1.9-2026-07-26"
+      "const": "phase4-analysis-v1.10-2026-07-26"
     },
     "status": {
       "enum": ["COMPLETE", "PARTIAL", "BLOCKED", "INPUT_MISMATCH"]
@@ -334,6 +334,28 @@
       }
     },
     {
+      "comment": "PARTIAL means a gate did not pass, so at least one must be FAIL, and what remains has to be written down somewhere a reader will find it. Without this a report with every gate PASS and nothing in blockers or limitations validated as PARTIAL, which says nothing at all.",
+      "if": {
+        "properties": {"status": {"const": "PARTIAL"}},
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "completion_gates": {
+            "contains": {
+              "type": "object",
+              "required": ["result"],
+              "properties": {"result": {"const": "FAIL"}}
+            }
+          }
+        },
+        "anyOf": [
+          {"properties": {"blockers": {"minItems": 1}}, "required": ["blockers"]},
+          {"properties": {"limitations": {"minItems": 1}}, "required": ["limitations"]}
+        ]
+      }
+    },
+    {
       "comment": "A BLOCKED report exists to record the gap and the next step. One that lists no blocker preserves neither, and nobody can resume the analysis from it.",
       "if": {
         "properties": {"status": {"const": "BLOCKED"}},
@@ -356,10 +378,10 @@
             "comment": "An unresolved blocker and a COMPLETE status are contradictory: a resolved historical constraint belongs in limitations.",
             "maxItems": 0
           },
-          "variant_inventory": {"minItems": 1},
-          "candidate_ledger": {"minItems": 1},
-          "protocols": {"minItems": 1},
-          "test_vectors": {"minItems": 1},
+          "candidate_ledger": {
+            "comment": "Always required, whatever the outcome: an exhaustive analysis dispositioned candidates even when none of them turned out to be a protocol. Together with evidence this is what stops an empty shell validating as COMPLETE.",
+            "minItems": 1
+          },
           "evidence": {"minItems": 1},
           "completion_gates": {
             "items": {
@@ -377,7 +399,18 @@
               ]
             }
           }
-        }
+        },
+        "allOf": [
+          {
+            "comment": "A recovered protocol has to come with a reproducible vector. A proven absence does not, but it does have to say so in limitations: an exhaustive negative result is a legitimate COMPLETE outcome, and forcing it to invent a protocol or sit in the PARTIAL queue forever would be worse.",
+            "if": {
+              "properties": {"protocols": {"minItems": 1}},
+              "required": ["protocols"]
+            },
+            "then": {"properties": {"test_vectors": {"minItems": 1}}},
+            "else": {"properties": {"limitations": {"minItems": 1}}}
+          }
+        ]
       }
     }
   ],

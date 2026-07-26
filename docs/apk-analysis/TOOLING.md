@@ -109,7 +109,7 @@ unzip <APK> -d "<WORKSPACE>"/work/extracted/
 ls "<WORKSPACE>"/work/extracted/lib/*/libapp.so   # present => Flutter
 ls "<WORKSPACE>"/work/extracted/lib/               # available architectures
 
-blutter "<WORKSPACE>"/work/extracted/lib/arm64-v8a/libapp.so "<WORKSPACE>"/work/blutter/
+blutter "<WORKSPACE>"/work/extracted/lib/arm64-v8a "<WORKSPACE>"/work/blutter/
 ```
 
 Blutter requires **arm64-v8a**. If the delivery set has only armeabi-v7a, stop and report the
@@ -185,8 +185,12 @@ suspicious, and the way to read resources that jadx skipped.
 
 Flutter/Dart decompiler. Mandatory for Flutter apps, arm64-v8a only.
 
-Note: the wrapper changes directory internally, so always pass **absolute, quoted** paths.
-Relative paths fail with a misleading "cannot find libapp file".
+Its input is the **architecture directory** holding `libapp.so`, not the library file itself:
+upstream is `python3 blutter.py <lib/arm64-v8a> <output_dir>`.
+
+Note: the wrapper changes directory internally, so always pass **absolute, quoted** paths. A
+relative path, or one pointing at the library instead of its directory, fails with the same
+misleading "cannot find libapp file".
 
 ### aapt / aapt2
 

@@ -168,6 +168,15 @@ _NAME_LITERAL = re.compile(
     r"[\"'`](?![^\"'`]*\.[A-Za-z]{2,4}[\"'`])[A-Za-z0-9_.*^$\[\]|-]{2,}[\"'`]"
     r"|\b[A-Z0-9_]{3,}\s*\*"
 )
+# "Local name is SLEEP-1": an unquoted literal assigned to name wording. Quotes are a convention,
+# not a requirement, and the value is just as complete an answer without them.
+# The wording is matched case-insensitively; the literal is not, because an uppercase start is
+# what separates a device name from the next ordinary word ("device name is set by the app").
+_ASSIGNED_NAME = re.compile(
+    r"(?i:\b(?:device[- ]names?|local[- ]names?|advertised names?|name prefix(?:es)?|BLE names?)\b"
+    r"\s*(?:[:=]|\s+(?:is|are|starts? with|begins? with))\s*)"
+    r"[\"'`]?[A-Z][A-Za-z0-9]*[0-9_.*^$-][A-Za-z0-9_.*^$-]*"
+)
 
 # Timing: only a repeat/hold cadence counts. The integration's own connection backoff and idle
 # timeouts are documented in AGENTS.md and are explicitly not protocol evidence, so "30-50ms
@@ -198,6 +207,14 @@ _ASSERTED_ALGORITHM = re.compile(
 _ASSERTED_FRAMING = re.compile(
     r"\b(?:frames?|packets?|payloads?|messages?)\s+(?:is|are)\s+(?:\w+\s+){0,2}"
     r"(?:terminated|prefixed|framed|delimited|wrapped|padded|escaped|preceded|followed)\b",
+    re.IGNORECASE,
+)
+# The label form, "Checksum: CRC-16/MODBUS". No copula, no model code, and a complete answer. The
+# value has to name something concrete: "Checksum: see below" or a bare "Checksum:" heading is not
+# a disclosure, and the prompt asks for these sections by name throughout.
+_LABELLED_ALGORITHM = re.compile(
+    r"\b(?:checksum|crc|framing|preamble|terminator|delimiter)\s*[:=]\s*"
+    r"(?:CRC-?\d|XOR|MODBUS|CCITT|Fletcher|Adler|LRC|sum\b|two's|0x|\\x)",
     re.IGNORECASE,
 )
 
@@ -233,11 +250,15 @@ def _answer_key_violation(line: str) -> str | None:
     # STOP/release behaviour the analyst is required to recover from the artifact.
     if _MODEL_CODE.search(line) and _BEHAVIOUR_CONTEXT.search(line):
         return "model-specific protocol behaviour in prose"
-    if _NAME_CONTEXT.search(line) and _NAME_LITERAL.search(line):
+    if (_NAME_CONTEXT.search(line) and _NAME_LITERAL.search(line)) or _ASSIGNED_NAME.search(line):
         return "device-name matching pattern"
     if _REPEAT_CONTEXT.search(line) and _TIMING_VALUE.search(line):
         return "command repeat/hold timing"
-    if _ASSERTED_ALGORITHM.search(line) or _ASSERTED_FRAMING.search(line):
+    if (
+        _ASSERTED_ALGORITHM.search(line)
+        or _ASSERTED_FRAMING.search(line)
+        or _LABELLED_ALGORITHM.search(line)
+    ):
         return "asserted framing or checksum description"
     return None
 
@@ -383,6 +404,8 @@ def test_injected_instructions_carry_no_answer_key(relative_path: str) -> None:
         "packet bytes: [5, 2, 170]",
         "STOP command is 18",
         "the opcode is 255",
+        "Local name is SLEEP-1",
+        "Checksum: CRC-16/MODBUS",
         "Service UUID: 1234",
         "characteristic = 0x1812",
         "Device-name pattern: BED_*",
