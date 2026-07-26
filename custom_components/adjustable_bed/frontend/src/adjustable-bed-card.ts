@@ -789,10 +789,16 @@ export class AdjustableBedCard extends LitElement {
 
   private _endHold(m: MotorEntity): void {
     if (!this._cancelHold(m)) return;
-    // Only cover-backed motors need an explicit stop. A button-backed motor
-    // ends its own burst, and the controllers already send the protocol's STOP
-    // frame when it finishes, so an extra stop-all here would only add churn.
-    if (m.cover) this._cover(m.cover, "stop_cover");
+    if (m.cover) {
+      this._cover(m.cover, "stop_cover");
+      return;
+    }
+    // Cancelling the loop does not touch the press already in flight, and each
+    // press is a finite pulse of a second or more, so without this the bed
+    // keeps moving well after the control is released. The bed-wide stop
+    // cancels the running command, which is also what makes a short tap move
+    // the bed briefly rather than for a full pulse.
+    if (this._bed?.stop) this._press(this._bed.stop);
   }
 
   // Global stop. Cancelling the hold first matters: otherwise the in-flight
