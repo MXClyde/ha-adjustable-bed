@@ -49,7 +49,7 @@ INPUTS
 - Supplied files: <<SUPPLIED_FILES>>
 - Output directory: "<<WORKSPACE>>"
 - Known acquisition limitations: see input/identity.json -> known_acquisition_limitations
-- Required analysis.json schema and revision: input/analysis.schema.json, revision phase4-analysis-v1.11-2026-07-26
+- Required analysis.json schema and revision: input/analysis.schema.json, revision phase4-analysis-v1.12-2026-07-26
 
 NON-NEGOTIABLE RULES
 

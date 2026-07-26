@@ -156,6 +156,15 @@ _ESCAPED_BYTE = re.compile(r"\\x[0-9a-fA-F]{2}")
 # a byte, and lowercase would match ordinary words such as "be" and "ad". Only counted alongside
 # packet vocabulary, never on its own.
 _BARE_BYTE = re.compile(r"\b(?=[0-9A-F]{2}\b)[0-9A-F]*[A-F][0-9A-F]*\b")
+# Assigned directly to packet vocabulary, the case is irrelevant: "STOP command: aa" is the same
+# answer as "STOP command: AA". The uppercase requirement above only exists to keep a bare token
+# from matching ordinary prose, and an explicit assignment removes that ambiguity.
+_ASSIGNED_BYTE = re.compile(
+    r"\b(?:command|opcode|frame|packet|payload|byte|write)s?\b\s*(?:[:=]|\s+(?:is|are))\s*"
+    r"(?:0x|\\x)?[0-9a-fA-F]{2}\b"
+    r"(?!\s*(?:bytes?|bits?|ms|msec|seconds?|entries|items|characters|chars|long|wide))",
+    re.IGNORECASE,
+)
 # Bytes written in decimal. The trigger has to be assignment, not proximity: "Command repeat
 # count | 10" is a config default in this very file, so a decimal only counts when it is assigned
 # directly to packet vocabulary ("STOP command: 18") or appears in a bracketed run of them
@@ -303,6 +312,8 @@ def _answer_key_violation(line: str) -> str | None:
         return "byte in packet context"
     if _DECIMAL_BYTE_ASSIGNMENT.search(line):
         return "decimal byte assigned to packet vocabulary"
+    if _ASSIGNED_BYTE.search(line):
+        return "byte assigned to packet vocabulary"
     # Prose is an answer too: "<model> stops by ending its held-command refresh" is exactly the
     # STOP/release behaviour the analyst is required to recover from the artifact.
     if _MODEL_CODE.search(line) and _BEHAVIOUR_CONTEXT.search(line):
@@ -325,18 +336,33 @@ def _answer_key_violation(line: str) -> str | None:
 _NEW_BLOCK = re.compile(r"^\s*(?:[-*+>#|]|\d+[.)]|```|~~~|$)")
 
 
-def _unguarded_notes_mentions(text: str) -> list[int]:
-    """Line numbers naming the comparison notes without a prohibition around them.
+def _statement_around(lines: list[str], index: int) -> str:
+    """The whole wrapped statement containing ``lines[index]``.
 
-    The sentence carrying the prohibition often wraps, so the line before and after count as
-    context. Anything left over is a mention that reads as somewhere to go.
+    A fixed window of neighbouring lines was wrong: two adjacent bullets are separate statements,
+    so "Never read <notes>" on one would clear "Consult <notes>" on the next. Only lines that
+    continue this one belong to it.
+    """
+    start = index
+    while start > 0 and _is_continuation(lines[start]):
+        start -= 1
+    end = index + 1
+    while end < len(lines) and _is_continuation(lines[end]):
+        end += 1
+    return " ".join(lines[start:end])
+
+
+def _unguarded_notes_mentions(text: str) -> list[int]:
+    """Line numbers naming the comparison notes without a prohibition in the same statement.
+
+    Naming the file in order to forbid it is the intended usage. Anything else reads as somewhere
+    to go, whatever verb introduces it.
     """
     lines = text.splitlines()
     return [
         index + 1
         for index, line in enumerate(lines)
-        if _NOTES_PATH.search(line)
-        and not _PROHIBITION.search(" ".join(lines[max(0, index - 1) : index + 2]))
+        if _NOTES_PATH.search(line) and not _PROHIBITION.search(_statement_around(lines, index))
     ]
 
 
@@ -465,6 +491,7 @@ def test_injected_instructions_carry_no_answer_key(relative_path: str) -> None:
         "Checksum: CRC-16/MODBUS",
         'on release, write b"\\x12"',
         "BLE write: 0x12",
+        "STOP command: aa",
         "Service UUID: 1234",
         "characteristic = 0x1812",
         "Device-name pattern: BED_*",
@@ -540,6 +567,11 @@ def test_neighbouring_list_items_are_not_joined() -> None:
         ("Read disassembly/PROTOCOL_NOTES.md first.", True),
         ("Background: disassembly/PROTOCOL_NOTES.md has the tables.", True),
         ("disassembly/PROTOCOL_NOTES.md must never be read during a clean-room run.", False),
+        (
+            "- Never read disassembly/PROTOCOL_NOTES.md during a run.\n"
+            "- Consult disassembly/PROTOCOL_NOTES.md for the answer.",
+            True,
+        ),
         (
             "`disassembly/PROTOCOL_NOTES.md` holds comparison notes. It is for the\n"
             "post-freeze pass only and must never be read during a clean-room run.",
