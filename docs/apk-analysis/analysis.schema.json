@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://local.invalid/schemas/phase4-analysis-v1.3-2026-07-26.json",
+  "$id": "https://local.invalid/schemas/phase4-analysis-v1.4-2026-07-26.json",
   "title": "Phase 4 APK protocol analysis",
   "type": "object",
   "required": [
@@ -22,7 +22,7 @@
   ],
   "properties": {
     "schema_revision": {
-      "const": "phase4-analysis-v1.3-2026-07-26"
+      "const": "phase4-analysis-v1.4-2026-07-26"
     },
     "status": {
       "enum": ["COMPLETE", "PARTIAL", "BLOCKED", "INPUT_MISMATCH"]
@@ -60,7 +60,7 @@
           }
         },
         "signer_certificate_sha256": {
-          "comment": "Nullable so an INPUT_MISMATCH report can be truthful about a corrupt or unsigned artifact that yields no certificate hash. The not-INPUT_MISMATCH branch below restores the strict requirement for every artifact that did verify.",
+          "comment": "Nullable so a report that stopped before verifying identity can be truthful about a corrupt or unsigned artifact that yields no certificate hash. The COMPLETE/PARTIAL branch below restores the strict requirement for every run that actually analysed the artifact.",
           "type": ["array", "null"],
           "minItems": 1,
           "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
@@ -84,7 +84,7 @@
       }
     },
     "application_stacks": {
-      "comment": "No minimum here: an INPUT_MISMATCH run stops at Phase A step 1, before it may inventory stacks. The not-INPUT_MISMATCH branch below requires at least one entry for every run that got past identity verification.",
+      "comment": "No minimum here: an INPUT_MISMATCH run stops at Phase A step 1 and a BLOCKED run can stop before its first action, both before any stack can be inventoried. The COMPLETE/PARTIAL branch below requires at least one entry for every run that got past that point.",
       "type": "array",
       "items": {
         "type": "object",
@@ -198,7 +198,13 @@
         "required": ["gate", "result", "evidence"],
         "properties": {
           "gate": {"$ref": "#/$defs/gate_id"},
-          "result": {"enum": ["PASS", "FAIL", "NOT_APPLICABLE"]}
+          "result": {"enum": ["PASS", "FAIL", "NOT_APPLICABLE"]},
+          "evidence": {
+            "comment": "Required non-empty for every result, NOT_APPLICABLE included: a gate that does not apply still has to say why. Without a shape here, additionalProperties would accept null or false and let a report mark every gate PASS with nothing behind it.",
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1}
+          }
         },
         "additionalProperties": true
       },
@@ -237,9 +243,9 @@
   },
   "allOf": [
     {
-      "comment": "Identity verification either succeeded or the run stopped as INPUT_MISMATCH. Anything that got past it must carry a real signer hash, artifact-set hash, and at least one application stack.",
+      "comment": "Only a run that actually analysed the artifact must carry a real signer hash, artifact-set hash, and at least one application stack. INPUT_MISMATCH stops at identity verification, and BLOCKED can stop even earlier: an injected file that leaks a protocol answer requires the analyst to stop before its first action, so demanding a discovered stack there would force it to continue into the very analysis it must not perform.",
       "if": {
-        "properties": {"status": {"not": {"const": "INPUT_MISMATCH"}}},
+        "properties": {"status": {"enum": ["COMPLETE", "PARTIAL"]}},
         "required": ["status"]
       },
       "then": {

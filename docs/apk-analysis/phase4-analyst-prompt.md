@@ -39,11 +39,17 @@ INPUTS
 - Expected version code: <<VERSION_CODE>>
 - Source and lookup date: <<SOURCE_AND_DATE>>
 - Expected archive/set SHA-256: <<SET_SHA256>>
+  Computed as follows, so you can reproduce it rather than copy it. If the delivery is a single
+  archive (one APK or one XAPK), it is that archive's SHA-256. If it is a loose set of files, build
+  a manifest with one `<basename> <lowercase hex sha256>` line per supplied file, LF-terminated,
+  UTF-8, sorted byte-wise by basename, with no trailing blank line; the set digest is that
+  manifest's SHA-256. Record the manifest verbatim in SEARCH_LOG.md. A mismatch between the
+  computed and expected digest is an identity failure.
 - Expected signer certificate SHA-256: <<SIGNER_SHA256>>
 - Supplied files: <<SUPPLIED_FILES>>
 - Output directory: "<<WORKSPACE>>"
 - Known acquisition limitations: see input/identity.json -> known_acquisition_limitations
-- Required analysis.json schema and revision: input/analysis.schema.json, revision phase4-analysis-v1.3-2026-07-26
+- Required analysis.json schema and revision: input/analysis.schema.json, revision phase4-analysis-v1.4-2026-07-26
 
 NON-NEGOTIABLE RULES
 

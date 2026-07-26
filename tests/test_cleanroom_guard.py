@@ -147,6 +147,28 @@ _TIMING_VALUE = re.compile(
     r"\b\d+(?:\.\d+)?\s*(?:ms|msec|millisecond|sec|second)s?\b", re.IGNORECASE
 )
 
+# A framing or checksum description is contamination even when it names no model. What separates
+# it from the prompt's own instructions is assertion: "the protocol uses an XOR checksum" states
+# an answer, while "checksum/CRC algorithm with covered byte range" tells the analyst what to go
+# and find. Only a copula immediately before the algorithm noun counts, with at most one filler
+# word, so the instruction phrasing throughout these documents stays clean.
+_ASSERTED_ALGORITHM = re.compile(
+    r"\b(?:uses?|is|are|was|were|computed|calculated|derived|consists? of|begins? with|"
+    r"ends? with|prefixed (?:with|by)|terminated (?:with|by)|wrapped in|framed (?:with|by))\b"
+    r"(?:\s+(?:an?|the|its))?"
+    r"(?:\s+\w+)?\s+"
+    r"(?:XOR|CRC|checksum|framing|preamble|terminator|delimiter|sync\s+byte|magic\s+byte)\b",
+    re.IGNORECASE,
+)
+# The same assertion written noun-first: "each frame is terminated by a newline". No analyst-visible
+# document phrases anything this way, because an instruction says what to look for rather than what
+# the answer turned out to be.
+_ASSERTED_FRAMING = re.compile(
+    r"\b(?:frames?|packets?|payloads?|messages?)\s+(?:is|are)\s+(?:\w+\s+){0,2}"
+    r"(?:terminated|prefixed|framed|delimited|wrapped|padded|escaped|preceded|followed)\b",
+    re.IGNORECASE,
+)
+
 
 def _answer_key_violation(line: str) -> str | None:
     """Describe why a line reads as protocol evidence, or return None if it is clean.
@@ -177,6 +199,8 @@ def _answer_key_violation(line: str) -> str | None:
         return "device-name matching pattern"
     if _REPEAT_CONTEXT.search(line) and _TIMING_VALUE.search(line):
         return "command repeat/hold timing"
+    if _ASSERTED_ALGORITHM.search(line) or _ASSERTED_FRAMING.search(line):
+        return "asserted framing or checksum description"
     return None
 
 
@@ -190,13 +214,19 @@ def _answer_key_violations(text: str) -> list[str]:
 
 
 def _walk_repo() -> list[Path]:
-    """Yield every file in the repo, skipping vendored and worktree trees."""
+    """Yield every file in the repo, skipping vendored and worktree trees.
+
+    Directory symlinks are recorded but never descended into. ``disassembly/`` is machine-local
+    and holds decompilation trees, so a symlink there could otherwise send this walk into a cycle
+    or out of the checkout entirely, where it would report an unrelated external file as an
+    in-repository offender.
+    """
     found: list[Path] = []
     stack = [REPO_ROOT]
     while stack:
         current = stack.pop()
         for child in current.iterdir():
-            if child.is_dir():
+            if child.is_dir() and not child.is_symlink():
                 if child.name not in _PRUNED:
                     stack.append(child)
             else:
@@ -261,6 +291,8 @@ def test_injected_instructions_carry_no_answer_key(relative_path: str) -> None:
         "the local name is `SLEEP-1`",
         "Protocol X repeats every 150 ms",
         "hold the button and resend every 100 ms",
+        "The bed protocol uses an XOR checksum",
+        "each frame is terminated by a newline",
     ],
 )
 def test_answer_key_forms_are_detected(line: str) -> None:
@@ -283,6 +315,9 @@ def test_answer_key_forms_are_detected(line: str) -> None:
         "Auto-disconnect after configurable idle time (default 40s)",
         "File-name patterns worth opening directly: `*Ble*`, `*Bluetooth*`",
         "- exact local-name rules, prefixes, suffixes, regexes, and exclusions",
+        "- checksum/CRC algorithm with covered byte range, initial value, polynomial",
+        "which are frequently the exact methods doing bit manipulation and checksums",
+        "Write reproducer code for every packet builder, checksum/CRC, and parser",
     ],
 )
 def test_ordinary_prose_is_not_flagged(line: str) -> None:
