@@ -255,16 +255,6 @@ _BOND_STATE_FALLBACKS: Final[dict[str, str]] = {
 }
 
 
-def _log_detached_removal(task: asyncio.Task[OperationResult]) -> None:
-    """Consume a bond removal that outlived the flow that started it."""
-    if task.cancelled():
-        return
-    if (err := task.exception()) is not None:
-        _LOGGER.warning("Bond removal failed after the flow closed: %s", err)
-        return
-    _LOGGER.info("Bond removal finished after the flow closed: %s", task.result().outcome)
-
-
 class NotAdvertisingError(Exception):
     """Raised when a bed is not advertising, so no connection was attempted.
 
@@ -2356,15 +2346,13 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             options.append("use_existing_bond")
         if can_replace_existing:
             options.append("remove_bond_and_pair")
+        default_action = "use_existing_bond" if can_use_existing else "pair_now"
 
         return self.async_show_form(
             step_id=step_id,
             data_schema=vol.Schema(
                 {
-                    vol.Required(
-                        "action",
-                        default="use_existing_bond" if can_use_existing else "pair_now",
-                    ): SelectSelector(
+                    vol.Required("action", default=default_action): SelectSelector(
                         SelectSelectorConfig(
                             options=options,
                             mode=SelectSelectorMode.LIST,
@@ -3743,8 +3731,8 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
         if owner.transport is TransportClass.PROXY:
             return self._async_abort_unpair("proxy_owned", name, address, owner)
 
-        selector_source = owner.source
-        selector_adapter = owner.adapter
+        selection_source = owner.source
+        selection_adapter = owner.adapter
         if not owner.is_host:
             # No recorded owner, which is every entry paired before provenance
             # existed. The host's own BlueZ still holds a record for this exact
@@ -3763,21 +3751,20 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
             ):
                 return self._async_abort_unpair("proxy_owned", name, address, owner)
             if (
-                selector_source is None
-                and selector_adapter is None
-                and prediction.chosen is not None
+                prediction.chosen is not None
                 and prediction.chosen.transport is TransportClass.LOCAL
             ):
-                # Without this, a host with two bonded adapters and no recorded
-                # owner is permanently ambiguous, and the documented recovery of
-                # pinning the adapter to clear has no effect at all.
-                selector_source = prediction.chosen.source
-                selector_adapter = prediction.chosen.adapter
+                # Legacy entries do not name the bond owner. A proven local
+                # connection path supplies the same adapter identifiers newer
+                # entries persist, so an explicitly selected adapter can still
+                # disambiguate two host bonds.
+                selection_source = prediction.chosen.source
+                selection_adapter = prediction.chosen.adapter
 
         selection = select_local_bond(
             inventory,
-            owner_source=selector_source,
-            owner_adapter=selector_adapter,
+            owner_source=selection_source,
+            owner_adapter=selection_adapter,
         )
         if selection.status is BondSelectionStatus.UNREADABLE:
             return self._async_abort_unpair("bluez_unavailable", name, address, owner)
@@ -3862,7 +3849,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
             # a config or repair flow could otherwise connect to this bed while
             # its bond is being removed.
             async with async_get_connect_lock(self.hass, record.address):
-                return await self._async_shielded_removal(record)
+                return await self._async_remove_and_apply(record)
 
         # Hold the bed out of use for the whole transaction, through the
         # coordinator's own locking order. Releasing the locks before the
@@ -3871,9 +3858,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
         # already holds the command lock and is waiting for it.
         try:
             async with coordinator.async_transport_operation("unpair"):
-                return await self._async_shielded_removal(record)
-        except asyncio.CancelledError:
-            raise
+                return await self._async_remove_and_apply(record)
         except Exception as err:  # noqa: BLE001 - report, do not remove blindly
             _LOGGER.warning("Could not unpair %s: %s", self.config_entry.title, err)
             return OperationResult(
@@ -3881,31 +3866,20 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 detail=str(err) or err.__class__.__name__,
             )
 
-    async def _async_shielded_removal(self, record: LocalBondRecord) -> OperationResult:
-        """Remove the bond, verify it, and record the result, uncancellably.
-
-        Closing the progress dialog cancels this worker, and that cancellation
-        can land after BlueZ has already accepted RemoveDevice. Letting it
-        interrupt the verification or the entry update would leave the entry
-        claiming a bond that no longer exists, which makes every later
-        connection skip pairing.
-        """
-        task = self.hass.async_create_task(
-            self._async_remove_and_record(record),
-            "adjustable_bed_bond_removal",
-        )
+    async def _async_remove_and_apply(self, record: LocalBondRecord) -> OperationResult:
+        """Finish a started removal and persist its result before cancellation."""
+        removal_task = self.hass.async_create_task(async_remove_local_bond(record))
         try:
-            return await asyncio.shield(task)
+            removal = await asyncio.shield(removal_task)
         except asyncio.CancelledError:
-            # The shielded task still finishes and still applies its result;
-            # consume its outcome so it cannot surface as a never-retrieved
-            # exception.
-            task.add_done_callback(_log_detached_removal)
+            # Once RemoveDevice may have been sent, cancellation cannot safely
+            # abandon the verification read. Keep the surrounding transport
+            # lock held, record a confirmed removal, then honor cancellation.
+            removal = await removal_task
+            result = self._unpair_result(removal)
+            self._apply_confirmed_unpair(result)
             raise
-
-    async def _async_remove_and_record(self, record: LocalBondRecord) -> OperationResult:
-        """Remove one bond and apply what its confirmed outcome means."""
-        result = self._unpair_result(await async_remove_local_bond(record))
+        result = self._unpair_result(removal)
         self._apply_confirmed_unpair(result)
         return result
 
