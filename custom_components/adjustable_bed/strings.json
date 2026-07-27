@@ -1981,6 +1981,10 @@
             "title": "Replace a bond the bed no longer accepts",
             "description": "**{name}** ({address}) connects, but every encrypted read is refused. That is what happens when this host still holds a Bluetooth bond the bed itself has forgotten, usually after the bed was reset or paired with something else.\n\n**Bond stored on:** {transport}\n\nContinuing removes that bond and creates a new one. Home Assistant checks the bed is reachable before removing anything, so a sleeping bed will not be left without a bond, and the new bond is only recorded once it has been confirmed to work.\n\nPut the bed into pairing mode, then select **Submit**."
           },
+          "stale_bond_progress": {
+            "title": "Replacing the bond",
+            "description": "Replacing the Bluetooth bond for **{name}** ({address})\u2026"
+          },
           "stale_bond_result": {
             "title": "Bond recovery",
             "description": "**{name}**\n\n{outcome}"

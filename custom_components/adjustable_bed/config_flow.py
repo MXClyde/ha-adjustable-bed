@@ -3027,10 +3027,13 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         if user_input is not None:
             address = self._manual_data.get(CONF_ADDRESS, "")
             current = await async_read_local_bonds(address)
-            if current.sole_bond != record:
+            current_record = current.sole_bond
+            if current_record is None or not current_record.is_same_bond_as(record):
                 # The confirmation named one exact BlueZ record. If it changed
                 # while the dialog was open, never apply that stale approval to
                 # whatever now occupies the same deterministic object path.
+                # Identity, not equality: a bed that merely reconnects flips
+                # ``connected``/``trusted`` and is still the approved bond.
                 self._pairing_remove_record = None
                 return await self._async_pairing_step(
                     self._pairing_origin_step or "bluetooth_pairing", None
@@ -3196,7 +3199,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     outcome=OperationOutcome.UNPAIR_UNCONFIRMED,
                     detail="bond_unreadable_before_removal",
                 )
-            if current.sole_bond != record:
+            current_record = current.sole_bond
+            # Identity, not equality: ``connected``/``trusted`` change on their
+            # own between the confirmation and this worker, and a bed that just
+            # reconnected is still the bond the user approved removing.
+            if current_record is None or not current_record.is_same_bond_as(record):
                 if current.bonded_records:
                     _LOGGER.warning(
                         "Not replacing the bond for %s: the confirmed BlueZ record changed",

@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 from copy import copy
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -5554,3 +5555,60 @@ async def test_an_interrupted_disconnect_leaves_the_probe_client_tracked(
         )
 
     assert tracked == [client]
+
+
+async def test_a_reconnect_while_confirming_still_authorizes_the_replacement(
+    hass: HomeAssistant,
+) -> None:
+    """``connected``/``trusted`` flip on their own while the dialog is open.
+
+    Whole-record equality read that as "a different bond", threw away the
+    approval the user had just given and bounced them back to the pairing form.
+    Identity is the device object and its adapter, not the bed's link state.
+    """
+    flow = _pairing_flow(hass)
+    flow._pairing_origin_step = "manual_pairing"
+    record = _bond_record()
+    flow._pairing_remove_record = record
+    reconnected = LocalBondInventory(
+        status=BluezReadStatus.OK,
+        records=(replace(record, connected=True, trusted=True),),
+    )
+
+    with (
+        _patch_inventory(reconnected),
+        _patch_local_prediction(),
+        patch.object(flow, "_async_start_pairing_operation") as start,
+    ):
+        await flow.async_step_pairing_replace_confirm({})
+
+    start.assert_called_once()
+    assert flow._pairing_remove_record == record
+
+
+async def test_a_reconnect_before_removal_still_replaces_the_bond(
+    hass: HomeAssistant,
+) -> None:
+    """The worker re-reads under the lock and must reach the same verdict."""
+    flow = _pairing_flow(hass)
+    address = flow._manual_data[CONF_ADDRESS]
+    record = _bond_record()
+    reconnected = LocalBondInventory(
+        status=BluezReadStatus.OK,
+        records=(replace(record, connected=True, trusted=True),),
+    )
+
+    with (
+        _patch_inventory(reconnected),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
+            AsyncMock(return_value=BondRemovalResult(status=BondRemovalStatus.REMOVED)),
+        ) as removal,
+        patch.object(
+            flow, "_attempt_pairing", AsyncMock(return_value=_verified_evidence())
+        ),
+    ):
+        result = await flow._async_replace_bond(address, record)
+
+    removal.assert_awaited_once()
+    assert result.outcome is OperationOutcome.SUCCESS

@@ -169,6 +169,10 @@
             "title": "Erstatt en kobling sengen ikke lenger godtar",
             "description": "**{name}** ({address}) kobler til, men alle krypterte lesinger avvises. Det er det som skjer når denne verten fortsatt har en Bluetooth-kobling som sengen selv har glemt, gjerne etter at sengen er tilbakestilt eller paret med noe annet.\n\n**Koblingen er lagret på:** {transport}\n\nFortsetter du, fjernes den koblingen og en ny opprettes. Home Assistant sjekker at sengen er tilgjengelig før noe fjernes, så en sovende seng blir ikke stående uten kobling, og den nye koblingen lagres først når den er bekreftet å virke.\n\nSett sengen i paremodus, og velg så **Send inn**."
           },
+          "stale_bond_progress": {
+            "title": "Erstatter koblingen",
+            "description": "Erstatter Bluetooth-koblingen for **{name}** ({address})\u2026"
+          },
           "stale_bond_result": {
             "title": "Gjenoppretting av kobling",
             "description": "**{name}**\n\n{outcome}"

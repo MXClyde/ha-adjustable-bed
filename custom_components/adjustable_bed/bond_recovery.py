@@ -38,12 +38,14 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import HomeAssistant
 
 from .bluetooth_bond import (
     BondSelectionStatus,
+    LocalBondRecord,
     async_read_local_bonds,
     async_remove_local_bond,
     select_local_bond,
@@ -80,7 +82,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
-class RecoveryEligibility(str):
+class RecoveryEligibility(StrEnum):
     """Why a stale-bond recovery is or is not on offer."""
 
     ELIGIBLE = "eligible"
@@ -102,8 +104,8 @@ class RecoveryEligibility(str):
 class RecoveryOffer:
     """Whether recovery may be offered, and against which exact bond."""
 
-    eligibility: str
-    record: Any = None
+    eligibility: RecoveryEligibility
+    record: LocalBondRecord | None = None
     owner: BondOwner | None = None
 
     @property
@@ -122,6 +124,21 @@ def evidence_is_local_auth_failure(issue_data: dict[str, Any]) -> bool:
     return (
         issue_data.get("evidence_status") == BondVerificationStatus.AUTH_FAILED.value
         and issue_data.get("evidence_transport") == TransportClass.LOCAL.value
+    )
+
+
+def evidence_is_proxy_auth_failure(issue_data: dict[str, Any]) -> bool:
+    """Return True when a proxy carried an authentication failure.
+
+    Only this combination makes a proxy-held stale bond the likely explanation:
+    the route was a proxy *and* the bond it presented was refused. Knowing the
+    route alone proves nothing. A proxy that merely failed to pair, timed out or
+    could not find a characteristic has the ordinary causes and must keep the
+    guided pairing retry rather than being sent to read-only guidance.
+    """
+    return (
+        issue_data.get("evidence_status") == BondVerificationStatus.AUTH_FAILED.value
+        and issue_data.get("evidence_transport") == TransportClass.PROXY.value
     )
 
 
@@ -318,6 +335,9 @@ async def _async_recovery_transaction(
     assert offer.owner is not None
     target_source = offer.owner.source
     assert target_source is not None
+    # Guaranteed by the ``is_eligible`` gate in ``async_recover_local_bond``.
+    target = offer.record
+    assert target is not None
 
     async with _transport_gate():
         _report(SetupAction.LOCATING)
@@ -370,9 +390,40 @@ async def _async_recovery_transaction(
                 payload=current_bond,
             )
 
+        # The record was selected before the preflight, which has since waited
+        # for an advertisement, connected, probed and disconnected. BlueZ object
+        # paths are deterministic and this integration's locks do not exclude
+        # other D-Bus clients, so an external one can remove and recreate a bond
+        # on that same path in the interval. Confirm the approved bond is still
+        # the bond about to be destroyed, while refusing is still free.
+        confirmed = await async_read_local_bonds(address)
+        if not confirmed.readable:
+            _LOGGER.warning(
+                "Not recovering the bond for %s: the host's bonds could not be "
+                "re-read before removal (%s)",
+                address,
+                confirmed.status,
+            )
+            return OperationResult(
+                outcome=OperationOutcome.UNPAIR_UNCONFIRMED,
+                detail="bond_unreadable_before_removal",
+            )
+        latest = select_local_bond(confirmed, owner_source=target_source)
+        if not latest.is_exact or latest.record is None or not latest.record.is_same_bond_as(target):
+            _LOGGER.warning(
+                "Not recovering the bond for %s: the approved BlueZ record "
+                "changed before it could be removed (%s)",
+                address,
+                latest.status,
+            )
+            return OperationResult(
+                outcome=OperationOutcome.UNPAIR_FAILED,
+                detail="bond_changed_before_removal",
+            )
+
         _report(SetupAction.UNPAIRING)
         state.removal_started = True
-        removal = await async_remove_local_bond(offer.record)
+        removal = await async_remove_local_bond(latest.record)
         if not removal.succeeded:
             _LOGGER.warning(
                 "Not recovering the bond for %s: removal failed (%s)",
@@ -499,18 +550,43 @@ async def _async_connect_and_verify(
                 detail="unexpected_connection_source",
             )
 
+        pair_error: Exception | None = None
         if pair:
             report_action(SetupAction.PAIRING)
-            await client.pair()
+            try:
+                await client.pair()
+            except Exception as err:  # noqa: BLE001 - the verifier decides
+                # The RPC can create the bond and still raise, typically by
+                # timing out waiting for its own reply. The link is usually
+                # still up, so let the auth-gated read decide whether a bond
+                # exists instead of discarding one that was just made. Giving up
+                # here is not neutral: the old bond is already gone, so the
+                # caller would clear the marker and the next connection would
+                # pair on top of a good new bond - the wedge this path exists
+                # to avoid.
+                pair_error = err
+                _LOGGER.warning(
+                    "Pairing %s raised (%s); verifying whether a bond was made anyway",
+                    name,
+                    err,
+                )
 
         report_action(SetupAction.VERIFYING_BOND)
-        return await async_verify_authenticated_access(
+        evidence = await async_verify_authenticated_access(
             client,
             bed_type=bed_type,
             protocol_variant=protocol_variant,
             path=path,
             operation=operation,
         )
+        if pair_error is not None and not evidence.proves_bond:
+            # Nothing proved a bond, so the pairing failure is the real outcome
+            # and is more informative than an unproven verification.
+            return OperationResult(
+                outcome=OperationOutcome.CONNECTION_FAILED,
+                detail=str(pair_error) or pair_error.__class__.__name__,
+            )
+        return evidence
     except Exception as err:  # noqa: BLE001 - a failure here is an outcome
         _LOGGER.warning("Bond recovery for %s failed: %s", name, err)
         return OperationResult(

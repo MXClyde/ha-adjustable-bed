@@ -615,6 +615,15 @@ def test_pairing_repair_translations_cover_every_progress_and_result() -> None:
         "disconnecting",
         "unpairing",
     }
+    # Every step id this flow can render. A step with no strings shows the user
+    # an untitled, undescribed dialog for the whole time it is on screen.
+    required_steps = {
+        "confirm",
+        "proxy_bond",
+        "stale_bond_confirm",
+        "stale_bond_progress",
+        "stale_bond_result",
+    }
     required_results = {
         "recovery_success",
         "recovery_not_run",
@@ -631,8 +640,10 @@ def test_pairing_repair_translations_cover_every_progress_and_result() -> None:
         assert required_progress <= flow["progress"].keys()
         assert required_results <= flow["abort"].keys()
         assert "title" in pairing
-        assert "confirm" in flow["step"]
+        assert required_steps <= flow["step"].keys()
         assert "pairing_failed" in flow["abort"]
+        for step in required_steps:
+            assert flow["step"][step].keys() >= {"title", "description"}
 
 
 async def test_try_pair_returns_false_when_device_not_in_range(hass: HomeAssistant) -> None:
@@ -1250,3 +1261,82 @@ async def test_a_combined_pair_is_never_offered_stale_bond_recovery(
     assert result["step_id"] == "confirm"
     # The host's bond store is never even consulted for a pair.
     read_bonds.assert_not_awaited()
+
+
+async def test_a_proxy_pairing_failure_keeps_the_guided_pairing_retry(
+    hass: HomeAssistant,
+) -> None:
+    """Naming the route is not evidence that the route holds a stale bond.
+
+    An ordinary pairing failure over a proxy records the proxy as the transport
+    too. Routing every one of those to the read-only proxy guidance left users
+    whose bed simply failed to pair with an abort and no way to try again.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_OKIMAT,
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_proxy_pairing_failure_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(
+        TEST_ADDRESS,
+        TEST_NAME,
+        entry.entry_id,
+        issue_data={
+            "evidence_status": BondVerificationStatus.INCONCLUSIVE.value,
+            "evidence_transport": TransportClass.PROXY.value,
+            "evidence_source": "proxy-source",
+        },
+    )
+    flow.hass = hass
+
+    with patch(
+        "custom_components.adjustable_bed.bond_recovery.async_read_local_bonds",
+        AsyncMock(return_value=_host_bond_inventory()),
+    ):
+        result = await flow.async_step_init()
+
+    assert result["step_id"] == "confirm"
+
+
+async def test_a_proxy_authentication_failure_still_gets_proxy_guidance(
+    hass: HomeAssistant,
+) -> None:
+    """Route plus a refused bond is what makes a proxy-held bond the suspect."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_OKIMAT,
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_proxy_auth_failure_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(
+        TEST_ADDRESS,
+        TEST_NAME,
+        entry.entry_id,
+        issue_data={
+            "evidence_status": BondVerificationStatus.AUTH_FAILED.value,
+            "evidence_transport": TransportClass.PROXY.value,
+            "evidence_source": "proxy-source",
+        },
+    )
+    flow.hass = hass
+
+    with patch(
+        "custom_components.adjustable_bed.bond_recovery.async_read_local_bonds",
+        AsyncMock(return_value=_host_bond_inventory()),
+    ):
+        result = await flow.async_step_init()
+
+    assert result["step_id"] == "proxy_bond"

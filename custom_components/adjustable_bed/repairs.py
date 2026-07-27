@@ -39,6 +39,7 @@ from .bond_recovery import (
     RecoveryOffer,
     async_recover_local_bond,
     async_recovery_offer,
+    evidence_is_proxy_auth_failure,
     recovery_context,
 )
 from .bond_verification import (
@@ -338,9 +339,12 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
             return await self.async_step_stale_bond_confirm()
         if self._offer.eligibility == RecoveryEligibility.KEEPS_FIRST_LINK:
             return await self.async_step_confirm()
-        if self._issue_data.get("evidence_transport") == TransportClass.PROXY.value:
-            # The bond lives on a proxy. Nothing here can clear it, and offering
-            # a host-side action would only look like it had.
+        if evidence_is_proxy_auth_failure(self._issue_data):
+            # A proxy carried an authentication failure, so the suspect bond is
+            # the one it presented, and that lives in a store this host cannot
+            # read. Nothing here can clear it, and offering a host-side action
+            # would only look like it had. Every other proxy failure keeps the
+            # guided pairing below: naming the route is not evidence of a bond.
             return await self.async_step_proxy_bond()
         return await self.async_step_confirm()
 
@@ -365,7 +369,10 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
     ) -> FlowResult:
         """Confirm replacing a host bond the bed no longer honours."""
         offer = self._offer
-        if offer is None or not offer.is_eligible:
+        record = offer.record if offer is not None else None
+        # ``is_eligible`` already implies a record; naming it keeps that
+        # guarantee visible to the type checker rather than only at runtime.
+        if offer is None or not offer.is_eligible or record is None:
             return await self.async_step_confirm()
 
         if user_input is not None:
@@ -384,9 +391,7 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
             description_placeholders={
                 "name": self._name,
                 "address": self._address,
-                "transport": (
-                    offer.record.adapter_address or offer.record.adapter_path
-                ),
+                "transport": record.adapter_address or record.adapter_path,
             },
         )
 

@@ -264,6 +264,17 @@ class TestWhenRecoveryIsOffered:
 class TestRunningRecovery:
     """Nothing is destroyed until the bed has proven it is reachable."""
 
+    @pytest.fixture(autouse=True)
+    def _approved_bond_still_present(self):
+        """Default: the approved bond is still exactly the one BlueZ holds.
+
+        The transaction re-reads BlueZ immediately before ``RemoveDevice``, so
+        every test that expects a removal needs that re-read to agree. Tests
+        about the re-read itself override this with their own patch.
+        """
+        with _patch_inventory(_record()):
+            yield
+
     def _offer(self) -> RecoveryOffer:
         return RecoveryOffer(
             eligibility=RecoveryEligibility.ELIGIBLE,
@@ -864,3 +875,166 @@ class TestRunningRecovery:
         wait.assert_not_called()
         removal.assert_not_called()
         assert result.outcome is OperationOutcome.UNPAIR_FAILED
+
+    async def test_a_bond_that_vanished_during_the_preflight_is_not_removed(
+        self, hass: HomeAssistant
+    ) -> None:
+        """The record was chosen before the preflight connected and disconnected.
+
+        BlueZ object paths are deterministic and nothing here locks out other
+        D-Bus clients, so the approved record has to be re-confirmed rather than
+        trusted across that window.
+        """
+        fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
+        with (
+            patch(
+                f"{_RECOVERY}.async_wait_for_advertisement",
+                AsyncMock(return_value=(fresh, MagicMock())),
+            ),
+            _patch_inventory(),
+            patch(f"{_RECOVERY}.async_remove_local_bond") as removal,
+            patch(
+                "bleak_retry_connector.establish_connection",
+                AsyncMock(return_value=_client()),
+            ),
+            patch(
+                f"{_RECOVERY}.async_verify_authenticated_access",
+                AsyncMock(return_value=_bond(BondVerificationStatus.AUTH_FAILED, "preflight")),
+            ),
+            patch(f"{_RECOVERY}.async_path_for_source", return_value=_local_path()),
+        ):
+            result = await async_recover_local_bond(
+                hass,
+                address=TEST_ADDRESS,
+                name="Bed",
+                offer=self._offer(),
+                bed_type=BED_TYPE_OKIMAT,
+                protocol_variant=None,
+            )
+        removal.assert_not_called()
+        assert result.outcome is OperationOutcome.UNPAIR_FAILED
+        assert result.detail == "bond_changed_before_removal"
+
+    async def test_an_unreadable_host_before_removal_removes_nothing(
+        self, hass: HomeAssistant
+    ) -> None:
+        """A read that never answered cannot authorize destroying anything."""
+        fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
+        with (
+            patch(
+                f"{_RECOVERY}.async_wait_for_advertisement",
+                AsyncMock(return_value=(fresh, MagicMock())),
+            ),
+            _patch_inventory(_record(), readable=False),
+            patch(f"{_RECOVERY}.async_remove_local_bond") as removal,
+            patch(
+                "bleak_retry_connector.establish_connection",
+                AsyncMock(return_value=_client()),
+            ),
+            patch(
+                f"{_RECOVERY}.async_verify_authenticated_access",
+                AsyncMock(return_value=_bond(BondVerificationStatus.AUTH_FAILED, "preflight")),
+            ),
+            patch(f"{_RECOVERY}.async_path_for_source", return_value=_local_path()),
+        ):
+            result = await async_recover_local_bond(
+                hass,
+                address=TEST_ADDRESS,
+                name="Bed",
+                offer=self._offer(),
+                bed_type=BED_TYPE_OKIMAT,
+                protocol_variant=None,
+            )
+        removal.assert_not_called()
+        assert result.outcome is OperationOutcome.UNPAIR_UNCONFIRMED
+        assert result.detail == "bond_unreadable_before_removal"
+
+    async def test_a_pairing_error_still_verifies_the_link(
+        self, hass: HomeAssistant
+    ) -> None:
+        """``pair()`` can create the bond and still raise waiting for its reply.
+
+        The old bond is already gone by then, so reporting failure would clear
+        the marker and make the next connection pair on top of a good new bond,
+        which is the wedge this whole path exists to avoid. The auth-gated read
+        decides, not the RPC.
+        """
+        fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
+        removed = BondRemovalResult(
+            status=BondRemovalStatus.REMOVED, record=_record(), removed_at=_REMOVED_AT
+        )
+        recovery_client = _client()
+        recovery_client.pair = AsyncMock(side_effect=TimeoutError("no reply"))
+        with (
+            patch(
+                f"{_RECOVERY}.async_wait_for_advertisement",
+                AsyncMock(return_value=(fresh, MagicMock())),
+            ),
+            patch(f"{_RECOVERY}.async_remove_local_bond", AsyncMock(return_value=removed)),
+            patch(
+                "bleak_retry_connector.establish_connection",
+                AsyncMock(side_effect=[_client(), recovery_client]),
+            ),
+            patch(
+                f"{_RECOVERY}.async_verify_authenticated_access",
+                AsyncMock(
+                    side_effect=[
+                        _bond(BondVerificationStatus.AUTH_FAILED, "preflight"),
+                        _bond(BondVerificationStatus.VERIFIED, "stale_bond_recovery"),
+                    ]
+                ),
+            ),
+            patch(f"{_RECOVERY}.async_path_for_source", return_value=_local_path()),
+        ):
+            result = await async_recover_local_bond(
+                hass,
+                address=TEST_ADDRESS,
+                name="Bed",
+                offer=self._offer(),
+                bed_type=BED_TYPE_OKIMAT,
+                protocol_variant=None,
+            )
+        recovery_client.pair.assert_awaited_once_with()
+        assert result.succeeded
+
+    async def test_a_pairing_error_with_no_proof_reports_that_error(
+        self, hass: HomeAssistant
+    ) -> None:
+        """Nothing proved a bond, so the pairing failure is the real outcome."""
+        fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
+        removed = BondRemovalResult(
+            status=BondRemovalStatus.REMOVED, record=_record(), removed_at=_REMOVED_AT
+        )
+        recovery_client = _client()
+        recovery_client.pair = AsyncMock(side_effect=TimeoutError("no reply"))
+        with (
+            patch(
+                f"{_RECOVERY}.async_wait_for_advertisement",
+                AsyncMock(return_value=(fresh, MagicMock())),
+            ),
+            patch(f"{_RECOVERY}.async_remove_local_bond", AsyncMock(return_value=removed)),
+            patch(
+                "bleak_retry_connector.establish_connection",
+                AsyncMock(side_effect=[_client(), recovery_client]),
+            ),
+            patch(
+                f"{_RECOVERY}.async_verify_authenticated_access",
+                AsyncMock(
+                    side_effect=[
+                        _bond(BondVerificationStatus.AUTH_FAILED, "preflight"),
+                        _bond(BondVerificationStatus.AUTH_FAILED, "stale_bond_recovery"),
+                    ]
+                ),
+            ),
+            patch(f"{_RECOVERY}.async_path_for_source", return_value=_local_path()),
+        ):
+            result = await async_recover_local_bond(
+                hass,
+                address=TEST_ADDRESS,
+                name="Bed",
+                offer=self._offer(),
+                bed_type=BED_TYPE_OKIMAT,
+                protocol_variant=None,
+            )
+        assert not result.succeeded
+        assert result.detail is not None and "no reply" in result.detail
