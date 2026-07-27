@@ -485,6 +485,102 @@ class TestPairingPersistence:
         assert options == ["pair_now"]
 
     @pytest.mark.parametrize("step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"])
+    async def test_a_bond_is_not_certified_when_another_route_could_win(
+        self, hass: HomeAssistant, step: str
+    ) -> None:
+        """Certifying a bond persists a marker without ever connecting.
+
+        Home Assistant re-ranks every connectable scanner inside connect(), so a
+        proxy in range can take the connection the prediction gave to the bonded
+        adapter. That transport holds no bond, and the marker then suppresses
+        pairing.
+
+        A bed that can be verified is safe either way, because the check connects
+        and records the route it really took, so the action stays available and
+        simply has to prove itself.
+        """
+        flow = self._new_pairing_flow(hass)
+        inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+        contested = _patch_contested_prediction()
+
+        with _patch_inventory(inventory), contested:
+            result = await getattr(flow, step)(None)
+
+        options = (
+            result["data_schema"].schema[next(iter(result["data_schema"].schema))].config["options"]
+        )
+        # Both actions connect, so neither is asserting anything about a route.
+        assert "use_existing_bond" in options
+        assert "remove_bond_and_pair" in options
+
+        # Choosing it starts the verification rather than creating an entry, so
+        # no marker exists until something proved the bond over the air.
+        with _patch_inventory(inventory), contested, patch.object(flow, "_attempt_pairing"):
+            started = await getattr(flow, step)({"action": "use_existing_bond"})
+        assert started["type"] is FlowResultType.SHOW_PROGRESS
+        assert flow._pairing_mode == "verify_existing"
+        assert flow._pairing_route_certain is False
+
+    @pytest.mark.parametrize("step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"])
+    async def test_a_one_connection_bed_will_not_use_a_bond_it_cannot_prove(
+        self, hass: HomeAssistant, step: str
+    ) -> None:
+        """The bed that cannot verify is the one that can least afford a wrong bet.
+
+        It grants roughly one connection per pairing window, so setup must not
+        spend it checking the bond, which leaves asserting the record from the
+        prediction. If the connection then goes out over the proxy instead, that
+        transport holds no bond and the marker suppresses pairing on the only
+        link the bed will give: it stays dead until someone power-cycles it.
+        """
+        flow = self._new_pairing_flow(hass)
+        flow._manual_data[CONF_BED_TYPE] = BED_TYPE_LEGGETT_GEN2
+        inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+        contested = _patch_contested_prediction()
+
+        with _patch_inventory(inventory), contested:
+            result = await getattr(flow, step)(None)
+
+        options = (
+            result["data_schema"].schema[next(iter(result["data_schema"].schema))].config["options"]
+        )
+        assert "use_existing_bond" not in options
+        assert next(iter(result["data_schema"].schema)).default() == "pair_now"
+        # The form has to say why the action is missing. "No usable bond" would
+        # be false: the bond is there, on a route that may well be the one used.
+        assert (
+            "chooses which when it connects" in result["description_placeholders"]["bond_state"]
+        )
+
+        # And it cannot be forced through by submitting it directly.
+        with _patch_inventory(inventory), contested:
+            refused = await getattr(flow, step)({"action": "use_existing_bond"})
+        assert refused["type"] is not FlowResultType.CREATE_ENTRY
+
+    async def test_a_deferred_bond_is_asserted_only_over_a_certain_route(
+        self, hass: HomeAssistant
+    ) -> None:
+        """The certifying short-circuit is where a wrong prediction is persisted."""
+        flow = self._new_pairing_flow(hass)
+        flow._manual_data[CONF_BED_TYPE] = BED_TYPE_LEGGETT_GEN2
+        flow._pairing_mode = "verify_existing"
+        flow._pairing_verify_record = _bond_record()
+        prediction = PathPrediction(chosen=None, paths=())
+
+        flow._pairing_route_certain = True
+        certified = await flow._async_start_pairing_operation("AA:BB:CC:DD:EE:01", prediction)
+        assert certified["type"] is FlowResultType.CREATE_ENTRY
+        assert certified["data"][CONF_BLE_BOND_ESTABLISHED] is True
+
+        flow._pairing_route_certain = False
+        deferred = await flow._async_start_pairing_operation("AA:BB:CC:DD:EE:01", prediction)
+        # Still no connection spent, but nothing is claimed either: the
+        # coordinator asks to pair, which costs nothing if the bond is there.
+        assert deferred["type"] is FlowResultType.CREATE_ENTRY
+        assert deferred["data"].get(CONF_BLE_BOND_ESTABLISHED) is not True
+        assert CONF_BLE_BOND_CONTEXT not in deferred["data"]
+
+    @pytest.mark.parametrize("step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"])
     async def test_a_one_connection_bed_cannot_replace_an_existing_bond(
         self, hass: HomeAssistant, step: str
     ) -> None:
@@ -3641,6 +3737,18 @@ def _patch_local_prediction(source: str = "11:22:33:44:55:66", adapter: str = "h
     return patch(
         "custom_components.adjustable_bed.config_flow.async_predict_path",
         return_value=PathPrediction(chosen=path, paths=(path,)),
+    )
+
+
+def _patch_contested_prediction():
+    """Predict the bonded adapter while a proxy could still take the connection."""
+    bonded = ConnectionPath(
+        source="11:22:33:44:55:66", transport=TransportClass.LOCAL, adapter="hci0"
+    )
+    proxy = ConnectionPath(source="bedroom-proxy", transport=TransportClass.PROXY)
+    return patch(
+        "custom_components.adjustable_bed.config_flow.async_predict_path",
+        return_value=PathPrediction(chosen=bonded, paths=(bonded, proxy)),
     )
 
 

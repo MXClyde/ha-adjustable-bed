@@ -1119,6 +1119,55 @@ async def test_a_reverified_same_adapter_bond_is_not_rewritten(
     assert entry.data[CONF_BLE_BOND_CONTEXT] == context
 
 
+async def test_a_successful_repair_does_not_reload_a_one_connection_bed(
+    hass: HomeAssistant,
+) -> None:
+    """The reload would take away the link the repair just paired on.
+
+    Pairing a live link reports success without a new authenticated read, so the
+    repair drops the old provenance, and an untagged entry write reads as an
+    options change. On a bed that grants one connection per pairing window the
+    resulting reload strands it until it is power-cycled.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_LEGGETT_GEN2,
+            CONF_BLE_BOND_CONTEXT: {
+                "version": 1,
+                "transport": "local",
+                "source": "11:22:33:44:55:66",
+                "adapter": "hci0",
+            },
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_no_reload_entry",
+    )
+    entry.add_to_hass(hass)
+
+    claimed: list[bool] = []
+    coordinator = MagicMock()
+    coordinator.async_pair_now = AsyncMock(return_value=True)
+    coordinator.last_bond_evidence = None
+    coordinator.begin_internal_bond_update = claimed.append
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, entry.entry_id)
+    flow.hass = hass
+    try:
+        assert await flow._async_pair_via_coordinator() is True
+    finally:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+
+    # The cleanup still happened, and the coordinator was given the chance to
+    # claim it so the update listener leaves the entry loaded.
+    assert CONF_BLE_BOND_CONTEXT not in entry.data
+    assert entry.data[CONF_BLE_BOND_ESTABLISHED] is True
+    assert claimed == [True]
+
+
 async def test_an_unproven_coordinator_repair_drops_the_old_provenance(
     hass: HomeAssistant,
 ) -> None:

@@ -898,6 +898,10 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
         """Clear the bond state held by the coordinator that owns the link."""
         self._single_inner.apply_confirmed_bond_removal()
 
+    def begin_internal_bond_update(self, bond_established: bool) -> None:
+        """Tag the next bond write on the coordinator that owns the link."""
+        self._single_inner.begin_internal_bond_update(bond_established)
+
     async def async_shutdown(self) -> None:
         for unsub in self._child_unsubs:
             unsub()

@@ -257,6 +257,7 @@
           "bond_state_existing": "Bond state: already bonded",
           "bond_state_multiple": "Bond state: several adapters",
           "bond_state_none": "Bond state: not bonded",
+          "bond_state_route_uncertain": "Bond state: route not certain",
           "bond_state_mismatched": "Bond state"
         },
         "data_description": {
@@ -270,6 +271,7 @@
           "bond_state_existing": "✅ This Home Assistant host already has a Bluetooth bond for this bed. The actions below reflect whether the selected adapter can use it and whether it can be replaced safely.",
           "bond_state_multiple": "⚠️ More than one Bluetooth adapter on this host is bonded to this bed. Pairing again will use whichever adapter Home Assistant connects through.",
           "bond_state_none": "ℹ️ This Home Assistant host has no Bluetooth bond for this bed yet.",
+          "bond_state_route_uncertain": "ℹ️ This Home Assistant host has a Bluetooth bond for this bed, but more than one adapter or proxy could take the connection, and Home Assistant chooses which when it connects. Setting up with the existing bond would assume a route it cannot guarantee, so pair again instead and let the connection record which transport really owns the bond.",
           "bond_state_mismatched": "ℹ️ This Home Assistant host has a Bluetooth bond for this bed, but on a different adapter from the one this connection will use. Bonds belong to one adapter, so that one cannot be used here. Pair again to create a bond on this adapter, or select the bonded adapter instead."
         }
       },
