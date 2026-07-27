@@ -483,6 +483,46 @@ class TestPairingPersistence:
         assert options == ["pair_now"]
 
     @pytest.mark.parametrize("step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"])
+    async def test_a_bond_is_not_certified_when_another_route_could_win(
+        self, hass: HomeAssistant, step: str
+    ) -> None:
+        """Certifying a bond persists a marker without ever connecting.
+
+        Home Assistant re-ranks every connectable scanner inside connect(), so a
+        proxy in range can take the connection the prediction gave to the bonded
+        adapter. That transport holds no bond, and the marker then suppresses
+        pairing: a failed authentication and a retry for an ordinary bed, and the
+        entire pairing window for a bed that grants one connection.
+        """
+        flow = self._new_pairing_flow(hass)
+        inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+        bonded = ConnectionPath(
+            source="11:22:33:44:55:66", transport=TransportClass.LOCAL, adapter="hci0"
+        )
+        proxy = ConnectionPath(source="bedroom-proxy", transport=TransportClass.PROXY)
+        contested = patch(
+            "custom_components.adjustable_bed.config_flow.async_predict_path",
+            return_value=PathPrediction(chosen=bonded, paths=(bonded, proxy)),
+        )
+
+        with _patch_inventory(inventory), contested:
+            result = await getattr(flow, step)(None)
+
+        options = (
+            result["data_schema"].schema[next(iter(result["data_schema"].schema))].config["options"]
+        )
+        assert "use_existing_bond" not in options
+        assert next(iter(result["data_schema"].schema)).default() == "pair_now"
+
+        # Replacing stays available: it connects, and records the route it took.
+        assert "remove_bond_and_pair" in options
+
+        # And the action cannot be forced through by submitting it directly.
+        with _patch_inventory(inventory), contested:
+            refused = await getattr(flow, step)({"action": "use_existing_bond"})
+        assert refused["type"] is not FlowResultType.CREATE_ENTRY
+
+    @pytest.mark.parametrize("step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"])
     async def test_a_one_connection_bed_cannot_replace_an_existing_bond(
         self, hass: HomeAssistant, step: str
     ) -> None:

@@ -1068,6 +1068,19 @@ class AdjustableBedCoordinator:
             # rather than the shared entry (issue #329).
             self._async_persist_config(data)
 
+    def begin_internal_bond_update(self, bond_established: bool) -> None:
+        """Claim the caller's next entry write as one of our own bond updates.
+
+        A repair for a bed that grants one connection per pairing window runs on
+        the link it has just paired, and an ordinary entry write fires the
+        options listener whose reload disconnects that link. The bed grants no
+        replacement until it is power-cycled, so a *successful* repair would
+        strand it. Only the tagging is exposed, never the write: a caller whose
+        tag does not land must still persist, and merely reload.
+        """
+        self._ble_bond_established = bond_established
+        self._begin_internal_entry_update(bond_established)
+
     def _record_bond_provenance(self) -> None:
         """Persist which transport owns the bond this link just proved.
 
@@ -3479,9 +3492,7 @@ class AdjustableBedCoordinator:
                 # unwinds before the fallback below can run, and the caller is
                 # about to abort. Try the same fallback close first: an occupied
                 # link is the one thing this gate exists to prevent.
-                if client is not None and client.is_connected:
-                    with contextlib.suppress(Exception):
-                        await client.disconnect()
+                await self._async_force_close(client)
                 raise
             if client is not None and client.is_connected:
                 # The link outlived the disconnect, either because bleak raised
@@ -3489,8 +3500,7 @@ class AdjustableBedCoordinator:
                 # Force it closed before raising, or nothing ever will:
                 # close_stale_connections_by_address is None on non-BlueZ
                 # backends.
-                with contextlib.suppress(Exception):
-                    await client.disconnect()
+                await self._async_force_close(client)
                 if client.is_connected:
                     raise RuntimeError(
                         f"Could not release the Bluetooth connection to {self._address}"
@@ -3504,6 +3514,29 @@ class AdjustableBedCoordinator:
                     self._last_disconnected = datetime.now(UTC)
                     self._notify_connection_state_change(False)
             yield
+
+    async def _async_force_close(self, client: BleakClient | None) -> None:
+        """Close a link the ordinary teardown left connected, and keep it closed.
+
+        The teardown clears ``_intentional_disconnect`` on its way out, so a
+        disconnect callback from this close would be read as an unexpected drop
+        and schedule the auto-reconnect. That timer fires after the gate has
+        released its locks, which for an unpair means reconnecting and creating
+        the very bond the user just asked to remove.
+        """
+        if client is not None and client.is_connected:
+            self._intentional_disconnect = True
+            try:
+                with contextlib.suppress(Exception):
+                    await client.disconnect()
+            finally:
+                self._intentional_disconnect = False
+        # A callback that landed before the flag was set may have queued a
+        # reconnect already. This gate promises the bed stays released for the
+        # whole operation, so nothing may be waiting to undo that.
+        if self._reconnect_timer is not None:
+            self._reconnect_timer.cancel()
+            self._reconnect_timer = None
 
     async def _async_disconnect_locked(self, reason: str = "intentional") -> bool:
         """Disconnect from the bed. The caller MUST already hold ``self._lock``.
