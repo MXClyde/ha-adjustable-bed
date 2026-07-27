@@ -42,7 +42,12 @@ from .adapter import (
 )
 from .address_lock import async_get_connect_lock
 from .ble_auth import is_ble_authentication_error
-from .bluetooth_transport import ConnectionPath, TransportClass, async_path_for_source
+from .bluetooth_transport import (
+    ConnectionPath,
+    TransportClass,
+    async_path_for_source,
+    client_source,
+)
 from .bond_verification import (
     CONF_BLE_BOND_CONTEXT,
     BondEvidence,
@@ -2258,17 +2263,7 @@ class AdjustableBedCoordinator:
                 # Recorded here, immediately after the connect, because bond
                 # verification runs before controller startup and must be able
                 # to attribute a failure to the transport that carried it.
-                actual_adapter = "unknown"
-                try:
-                    # Try to get the actual connection source from the client
-                    # (accessing private bleak internals for diagnostic purposes)
-                    backend: Any = getattr(self._client, "_backend", None)
-                    backend_device: Any = getattr(backend, "_device", None)
-                    details = getattr(backend_device, "details", None)
-                    if isinstance(details, dict):
-                        actual_adapter = details.get("source", "unknown")
-                except Exception:
-                    _LOGGER.debug("Could not determine actual connection adapter")
+                actual_adapter = client_source(self._client) or "unknown"
 
                 # Track successful connection for diagnostics (issue #168)
                 self._connection_success_count += 1
@@ -3220,9 +3215,10 @@ class AdjustableBedCoordinator:
                 # non-BlueZ backends.
                 with contextlib.suppress(Exception):
                     await client.disconnect()
-                raise RuntimeError(
-                    f"Could not release the Bluetooth connection to {self._address}"
-                )
+                if client.is_connected:
+                    raise RuntimeError(
+                        f"Could not release the Bluetooth connection to {self._address}"
+                    )
             yield
 
     async def _async_disconnect_locked(self, reason: str = "intentional") -> None:
