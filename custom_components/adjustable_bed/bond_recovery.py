@@ -35,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -177,9 +177,10 @@ async def async_recovery_offer(
 
 @dataclass(slots=True)
 class _RecoveryState:
-    """Cancellation boundary for a destructive recovery transaction."""
+    """Cancellation boundary and progress of a destructive recovery transaction."""
 
     removal_started: bool = False
+    removal_confirmed: bool = False
 
 
 async def _async_await_task_completion[T](task: asyncio.Task[T]) -> T:
@@ -202,6 +203,7 @@ async def async_recover_local_bond(
     protocol_variant: str | None,
     transport_operation: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
     on_verified: Callable[[OperationResult], Awaitable[None]] | None = None,
+    on_bond_removed: Callable[[], Awaitable[None]] | None = None,
     report_action: Callable[[SetupAction], None] | None = None,
     report_progress: Callable[[float], None] | None = None,
     report_path: Callable[[ConnectionPath | None], None] | None = None,
@@ -211,6 +213,11 @@ async def async_recover_local_bond(
     Cancellation is honoured until removal begins. Once BlueZ may have removed
     the old bond, the transaction is allowed to finish so closing the Repairs
     dialog cannot strand the bed halfway through recovery.
+
+    ``on_bond_removed`` invalidates whatever the caller persisted about the bond
+    that was just removed, and runs whenever removal was confirmed but the
+    replacement was not - ``on_verified`` overwrites the same state on the path
+    where a new bond was proven.
     """
     if not offer.is_eligible:
         return OperationResult(
@@ -247,11 +254,26 @@ async def async_recover_local_bond(
             address,
         )
         result = await _async_await_task_completion(transaction)
-    if result.succeeded and on_verified is not None:
-        async def _persist() -> None:
-            await on_verified(result)
 
-        persistence = hass.async_create_task(_persist(), eager_start=False)
+    async def _persist_verified() -> None:
+        assert on_verified is not None
+        await on_verified(result)
+
+    async def _persist_removal() -> None:
+        assert on_bond_removed is not None
+        await on_bond_removed()
+
+    persist: Callable[[], Coroutine[Any, Any, None]] | None = None
+    if result.succeeded:
+        if on_verified is not None:
+            persist = _persist_verified
+    elif state.removal_confirmed and on_bond_removed is not None:
+        # The old bond is gone and no new one was proven. Whatever the caller
+        # recorded about the removed bond has to go with it, or the next
+        # connection trusts a marker for a bond that no longer exists.
+        persist = _persist_removal
+    if persist is not None:
+        persistence = hass.async_create_task(persist(), eager_start=False)
         try:
             await asyncio.shield(persistence)
         except asyncio.CancelledError:
@@ -354,10 +376,19 @@ async def _async_recovery_transaction(
                 removal.error,
             )
             return OperationResult(
-                outcome=OperationOutcome.UNPAIR_FAILED,
+                outcome=(
+                    OperationOutcome.UNPAIR_UNCONFIRMED
+                    if removal.is_unconfirmed
+                    else OperationOutcome.UNPAIR_FAILED
+                ),
                 detail=removal.error or str(removal.status),
                 payload=removal,
             )
+        # The bond the entry still points at is provably gone. Everything below
+        # can fail, and the marker must not survive any of it: a marker that
+        # says "bonded" makes the next connection skip pair=True on a device
+        # that now has no bond, which just repeats the authentication failure.
+        state.removal_confirmed = True
         # RemoveDevice invalidates the BlueZ Device1 object used by the
         # preflight connection. Require an advertisement after the RPC
         # completed so the reconnect receives a newly resolved BLEDevice. The

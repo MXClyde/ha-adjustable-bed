@@ -188,6 +188,7 @@
           "recovery_not_run": "❌ Gjenopprettingen ble ikke kjørt.",
           "recovery_not_advertising": "❌ Sengen sender ikke ut Bluetooth-signal, så ingenting ble endret og den gamle koblingen er fortsatt lagret. Sett sengen i paremodus og kjør reparasjonen på nytt.",
           "recovery_unpair_failed": "❌ Den gamle koblingen kunne ikke fjernes, så ingenting annet ble forsøkt.",
+          "recovery_unpair_unconfirmed": "❌ Fjerningen av den gamle koblingen kunne ikke bekreftes, så den kan fortsatt ligge der, og ingen ny ble opprettet. Sett sengen i paremodus og kjør denne reparasjonen på nytt.",
           "recovery_failed_unchanged": "❌ Den eksisterende koblingen kunne ikke kontrolleres på en trygg måte, så ingenting ble endret. Kontroller at sengen er innenfor rekkevidde, og kjør reparasjonen på nytt.",
           "recovery_partial": "❌ Den gamle koblingen ble fjernet, men den nye kunne ikke bekreftes. Reparasjonen forblir derfor åpen. Sett sengen i paremodus og kjør den på nytt."
         }

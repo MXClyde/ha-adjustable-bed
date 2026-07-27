@@ -1055,6 +1055,7 @@
           "recovery_not_run": "❌ The recovery did not run.",
           "recovery_not_advertising": "❌ The bed is not advertising, so nothing was changed and the old bond is still in place. Put the bed into pairing mode and run this repair again.",
           "recovery_unpair_failed": "❌ The old bond could not be removed, so nothing else was attempted.",
+          "recovery_unpair_unconfirmed": "❌ Removing the old bond could not be confirmed, so it may or may not still be there and no new one was made. Put the bed into pairing mode and run this repair again.",
           "recovery_failed_unchanged": "❌ The existing bond could not be checked safely, so nothing was changed. Make sure the bed is in range and run this repair again.",
           "recovery_partial": "❌ The old bond was removed but the new one could not be confirmed, so this repair stays open. Put the bed into pairing mode and run it again."
         }

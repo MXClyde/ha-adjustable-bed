@@ -97,12 +97,22 @@ class LocalBondRecord:
     def is_same_bond_as(self, other: LocalBondRecord) -> bool:
         """Return True when two reads describe the same BlueZ bond.
 
-        Identity is the device object and the adapter holding it, plus the fact
-        that a bond is still there. Whole-dataclass equality would also compare
-        ``connected`` and ``trusted``, which change while a confirmation dialog
-        is open and would refuse a removal the user already approved for exactly
-        this bond.
+        Identity is the device object, the adapter holding it and - whenever
+        both reads name it - that adapter's own MAC. Object paths are reusable:
+        swapping a host dongle can hand ``hci0``, and therefore this bed's
+        deterministic device path, to different hardware than the one named in
+        the confirmation the user approved.
+
+        Whole-dataclass equality would instead also compare ``connected`` and
+        ``trusted``, which change while a confirmation dialog is open and would
+        refuse a removal the user already approved for exactly this bond.
         """
+        if (
+            self.adapter_address is not None
+            and other.adapter_address is not None
+            and self.adapter_address.upper() != other.adapter_address.upper()
+        ):
+            return False
         return (
             self.device_path == other.device_path
             and self.adapter_path == other.adapter_path
@@ -246,6 +256,21 @@ class BondRemovalResult:
     def succeeded(self) -> bool:
         """Return True only for a removal that was carried out and confirmed."""
         return self.status is BondRemovalStatus.REMOVED
+
+    @property
+    def is_unconfirmed(self) -> bool:
+        """Return True when the bond may or may not have survived.
+
+        A refused RPC and a verification that could not be read say nothing
+        about whether the bond is still there, which is a different thing to
+        tell the user than BlueZ still reporting one: "nothing changed" would
+        send them back to remove a bond that may already be gone, when what
+        they actually need is to pair a replacement.
+        """
+        return self.status is BondRemovalStatus.RPC_FAILED or (
+            self.status is BondRemovalStatus.VERIFICATION_FAILED
+            and self.error != "bond_still_present"
+        )
 
 
 async def _async_managed_objects() -> dict[str, Any] | None:

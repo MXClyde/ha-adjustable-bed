@@ -258,6 +258,7 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
                 else None
             ),
             on_verified=self._async_persist_recovered_bond,
+            on_bond_removed=self._async_clear_removed_bond,
             report_action=self.async_report_action,
             report_progress=self.async_report_progress,
             report_path=self.async_report_path,
@@ -309,6 +310,8 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
             result.detail != "authentication_state_unconfirmed"
         ):
             note_key = "recovery_partial"
+        elif result.outcome is OperationOutcome.UNPAIR_UNCONFIRMED:
+            note_key = "recovery_unpair_unconfirmed"
         elif result.outcome is OperationOutcome.UNPAIR_FAILED:
             note_key = "recovery_unpair_failed"
         else:
@@ -342,6 +345,24 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
             # A loaded entry has an update listener which schedules the reload.
             # Setup-retry entries have no listener yet, so reload those here.
             await self.hass.config_entries.async_reload(entry.entry_id)
+
+    async def _async_clear_removed_bond(self) -> None:
+        """Drop the marker and provenance for a bond that was just removed.
+
+        Only ever called once removal was confirmed and the replacement was not.
+        The repair stays open, so no reload is forced here: what matters is that
+        the entry no longer claims a bond, so the next connection asks to pair
+        instead of repeating the authentication failure on an unbonded device.
+        """
+        entry = self._entry()
+        if entry is None:
+            return
+        data = dict(entry.data)
+        data.pop(CONF_BLE_BOND_ESTABLISHED, None)
+        data.pop(CONF_BLE_BOND_CONTEXT, None)
+        data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
+        if data != dict(entry.data):
+            self.hass.config_entries.async_update_entry(entry, data=data)
 
     async def async_step_confirm(
         self, user_input: dict[str, Any] | None = None

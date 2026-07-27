@@ -49,7 +49,6 @@ from .adapter import (
 from .address_lock import async_get_connect_lock
 from .bluetooth_bond import (
     BondRemovalResult,
-    BondRemovalStatus,
     BondSelectionStatus,
     LocalBondInventory,
     LocalBondRecord,
@@ -2759,14 +2758,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     address,
                     removal.error,
                 )
-                unconfirmed = removal.status is BondRemovalStatus.RPC_FAILED or (
-                    removal.status is BondRemovalStatus.VERIFICATION_FAILED
-                    and removal.error != "bond_still_present"
-                )
                 return OperationResult(
                     outcome=(
                         OperationOutcome.UNPAIR_UNCONFIRMED
-                        if unconfirmed
+                        if removal.is_unconfirmed
                         else OperationOutcome.UNPAIR_FAILED
                     ),
                     detail=removal.error or str(removal.status),

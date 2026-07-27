@@ -30,6 +30,7 @@ from custom_components.adjustable_bed.const import (
     BED_TYPE_LEGGETT_GEN2,
     CONF_BED_TYPE,
     CONF_BLE_BOND_ESTABLISHED,
+    CONF_BLE_BOND_MARKER_UNRELIABLE,
     DOMAIN,
 )
 from custom_components.adjustable_bed.repairs import (
@@ -242,6 +243,45 @@ async def test_recovery_persistence_reloads_an_unloaded_entry(
     mock_reload.assert_awaited_once_with(entry.entry_id)
 
 
+async def test_a_removed_bond_stops_being_recorded_even_when_recovery_fails(
+    hass: HomeAssistant,
+) -> None:
+    """The marker for a bond that is provably gone must go with it.
+
+    The repair stays open, and the entry would otherwise still claim a bond, so
+    the next connection would skip pair=True on an unbonded device and repeat
+    the authentication failure this repair was raised for.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: "okimat",
+            CONF_BLE_BOND_ESTABLISHED: True,
+            CONF_BLE_BOND_MARKER_UNRELIABLE: True,
+            CONF_BLE_BOND_CONTEXT: {
+                "version": 1,
+                "transport": "local",
+                "source": "11:22:33:44:55:66",
+                "adapter": "hci0",
+            },
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="failed_recovery_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, entry.entry_id)
+    flow.hass = hass
+
+    await flow._async_clear_removed_bond()
+
+    assert CONF_BLE_BOND_ESTABLISHED not in entry.data
+    assert CONF_BLE_BOND_CONTEXT not in entry.data
+    assert CONF_BLE_BOND_MARKER_UNRELIABLE not in entry.data
+
+
 def test_pairing_repair_translations_cover_every_progress_and_result() -> None:
     """The Repairs namespace must localize phases and terminal guidance."""
     root = Path(__file__).parents[1] / "custom_components/adjustable_bed"
@@ -258,6 +298,7 @@ def test_pairing_repair_translations_cover_every_progress_and_result() -> None:
         "recovery_not_run",
         "recovery_not_advertising",
         "recovery_unpair_failed",
+        "recovery_unpair_unconfirmed",
         "recovery_failed_unchanged",
         "recovery_partial",
     }
@@ -628,3 +669,6 @@ async def test_a_reconnect_between_confirm_and_removal_does_not_block_recovery(
             device_path="/org/bluez/hci1/dev_AA_BB_CC_DD_EE_FF",
         )
     )
+    # Replacing the dongle reuses hci0, and with it every path in this record.
+    # The bond the user approved was the one on the adapter that is now gone.
+    assert not pinned.is_same_bond_as(replace(pinned, adapter_address="AA:00:00:00:00:01"))

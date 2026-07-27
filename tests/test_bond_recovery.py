@@ -417,6 +417,53 @@ class TestRunningRecovery:
         connect.assert_awaited_once()
         assert result.outcome is OperationOutcome.UNPAIR_FAILED
 
+    async def test_an_unverifiable_removal_is_not_reported_as_unchanged(
+        self, hass: HomeAssistant
+    ) -> None:
+        """RemoveDevice was accepted and the check could not be read.
+
+        "The bond could not be removed" would send the user back to remove a
+        bond that may already be gone, when what they may need is to pair a
+        replacement.
+        """
+        fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
+        unconfirmed = BondRemovalResult(
+            status=BondRemovalStatus.VERIFICATION_FAILED,
+            error="bluez_unreadable_after_removal",
+        )
+        removed_marker = AsyncMock()
+        with (
+            patch(
+                f"{_RECOVERY}.async_wait_for_advertisement",
+                AsyncMock(return_value=(fresh, MagicMock())),
+            ),
+            patch(
+                f"{_RECOVERY}.async_remove_local_bond",
+                AsyncMock(return_value=unconfirmed),
+            ),
+            patch(
+                "bleak_retry_connector.establish_connection",
+                AsyncMock(return_value=_client()),
+            ),
+            patch(f"{_RECOVERY}.async_path_for_source", return_value=_local_path()),
+            patch(
+                f"{_RECOVERY}.async_verify_authenticated_access",
+                AsyncMock(return_value=_bond(BondVerificationStatus.AUTH_FAILED, "preflight")),
+            ),
+        ):
+            result = await async_recover_local_bond(
+                hass,
+                address=TEST_ADDRESS,
+                name="Bed",
+                offer=self._offer(),
+                bed_type=BED_TYPE_OKIMAT,
+                protocol_variant=None,
+                on_bond_removed=removed_marker,
+            )
+        assert result.outcome is OperationOutcome.UNPAIR_UNCONFIRMED
+        # Nothing is known to have been removed, so nothing is invalidated.
+        removed_marker.assert_not_awaited()
+
     async def test_removal_without_a_completion_time_stops_before_reconnect(
         self, hass: HomeAssistant
     ) -> None:
@@ -508,9 +555,59 @@ class TestRunningRecovery:
         preflight_client.disconnect.assert_awaited_once_with()
         recovery_client.disconnect.assert_awaited_once_with()
 
+    async def test_a_confirmed_removal_invalidates_the_marker_even_when_pairing_fails(
+        self, hass: HomeAssistant
+    ) -> None:
+        """The removed bond's marker must not outlive the bond itself.
+
+        The repair stays open, and a marker still saying "bonded" would make the
+        next connection skip pair=True on a device that now has no bond, which
+        just repeats the authentication failure it was raised for.
+        """
+        fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
+        removed = BondRemovalResult(
+            status=BondRemovalStatus.REMOVED,
+            record=_record(),
+            removed_at=_REMOVED_AT,
+        )
+        removed_marker = AsyncMock()
+        persisted = AsyncMock()
+        with (
+            patch(
+                f"{_RECOVERY}.async_wait_for_advertisement",
+                AsyncMock(side_effect=[(fresh, MagicMock()), (fresh, None)]),
+            ),
+            patch(
+                f"{_RECOVERY}.async_remove_local_bond", AsyncMock(return_value=removed)
+            ),
+            patch(
+                "bleak_retry_connector.establish_connection",
+                AsyncMock(return_value=_client()),
+            ),
+            patch(f"{_RECOVERY}.async_path_for_source", return_value=_local_path()),
+            patch(
+                f"{_RECOVERY}.async_verify_authenticated_access",
+                AsyncMock(return_value=_bond(BondVerificationStatus.AUTH_FAILED, "preflight")),
+            ),
+        ):
+            result = await async_recover_local_bond(
+                hass,
+                address=TEST_ADDRESS,
+                name="Bed",
+                offer=self._offer(),
+                bed_type=BED_TYPE_OKIMAT,
+                protocol_variant=None,
+                on_verified=persisted,
+                on_bond_removed=removed_marker,
+            )
+        assert result.outcome is OperationOutcome.BOND_VERIFICATION_FAILED
+        removed_marker.assert_awaited_once_with()
+        persisted.assert_not_awaited()
+
     async def test_a_verified_new_bond_succeeds_and_carries_its_owner(
         self, hass: HomeAssistant
     ) -> None:
+        removed_marker = AsyncMock()
         fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
         removed = BondRemovalResult(
             status=BondRemovalStatus.REMOVED,
@@ -549,12 +646,15 @@ class TestRunningRecovery:
                 offer=self._offer(),
                 bed_type=BED_TYPE_OKIMAT,
                 protocol_variant=None,
+                on_bond_removed=removed_marker,
             )
         assert result.succeeded
         assert result.path is not None
         assert result.path.transport is TransportClass.LOCAL
         preflight_client.pair.assert_not_awaited()
         recovery_client.pair.assert_awaited_once_with()
+        # The replacement was proven, so its marker is written, not cleared.
+        removed_marker.assert_not_awaited()
 
     async def test_reconnect_uses_a_device_resolved_after_removal(
         self, hass: HomeAssistant
