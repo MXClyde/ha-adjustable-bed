@@ -109,6 +109,7 @@ from custom_components.adjustable_bed.const import (
     DOMAIN,
     KAIDI_VARIANT_SEAT_1,
     KEESON_VARIANT_ERGOMOTION,
+    LEGGETT_VARIANT_GEN2,
     LEGGETT_VARIANT_OKIN,
     MALOUF_LAYOUT_HILO,
     OCTO_VARIANT_STANDARD,
@@ -386,19 +387,64 @@ class TestPairingPersistence:
     @pytest.mark.parametrize(
         "step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"]
     )
-    async def test_an_existing_host_bond_can_be_used_without_re_pairing(
+    async def test_an_existing_host_bond_is_proven_before_it_is_used(
         self, hass: HomeAssistant, step: str
     ) -> None:
-        """A bond this host really holds should not force a pointless re-pair."""
+        """BlueZ saying "paired" is not the bed accepting an authenticated write.
+
+        A stale record looks identical to a good one, so this has to be proven
+        over the air before setup claims the bond is usable (#461).
+        """
         flow = self._new_pairing_flow(hass)
         inventory = LocalBondInventory(
             status=BluezReadStatus.OK, records=(_bond_record(),)
         )
-        with _patch_inventory(inventory):
-            result = await getattr(flow, step)({"action": "use_existing_bond"})
+        attempt = AsyncMock(return_value=_verified_evidence())
+        with (
+            _patch_inventory(inventory),
+            patch.object(flow, "_attempt_pairing", attempt),
+        ):
+            progress = await getattr(flow, step)({"action": "use_existing_bond"})
+            assert progress["type"] is FlowResultType.SHOW_PROGRESS
+            result = await _finish_pairing(hass, flow)
 
+        # Verified over the air, and without asking for a new bond.
+        assert attempt.await_args.kwargs["request_bond"] is False
         assert result["type"] is FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_BLE_BOND_ESTABLISHED] is True
+
+    @pytest.mark.parametrize(
+        "step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"]
+    )
+    async def test_an_unprovable_existing_bond_is_not_accepted(
+        self, hass: HomeAssistant, step: str
+    ) -> None:
+        """Without proof, fall back to pairing rather than record a bond."""
+        flow = self._new_pairing_flow(hass)
+        inventory = LocalBondInventory(
+            status=BluezReadStatus.OK, records=(_bond_record(),)
+        )
+        inconclusive = BondEvidence(
+            status=BondVerificationStatus.INCONCLUSIVE,
+            owner=BondOwner(transport=TransportClass.LOCAL, source="hci0"),
+            operation="verify_existing_bond",
+            observed_at="2026-07-27T00:00:00+00:00",
+            error="timeout",
+        )
+        with (
+            _patch_inventory(inventory),
+            patch.object(flow, "_attempt_pairing", AsyncMock(return_value=inconclusive)),
+        ):
+            await getattr(flow, step)({"action": "use_existing_bond"})
+            await hass.async_block_till_done()
+            await flow.async_step_pairing_progress()
+            result = await flow.async_step_pairing_result()
+
+        assert flow.operation.result is not None
+        assert (
+            flow.operation.result.outcome is OperationOutcome.BOND_VERIFICATION_FAILED
+        )
+        assert result["type"] is FlowResultType.FORM
 
     @pytest.mark.parametrize(
         "step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"]
@@ -3789,10 +3835,18 @@ async def test_replacing_a_bond_that_cannot_be_removed_does_not_pair(
     """Pairing on top of a bond the user asked to replace would hide the failure."""
     flow = _pairing_flow(hass)
     flow._pairing_remove_record = _bond_record()
+    flow._pairing_mode = "replace_local"
+    fresh = AdvertisementEvidence(
+        status=FreshnessStatus.FRESH, age_seconds=1.0, rssi=-55, source="hci0"
+    )
     failed = BondRemovalResult(
         status=BondRemovalStatus.VERIFICATION_FAILED, error="bond_still_present"
     )
     with (
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
+            AsyncMock(return_value=(fresh, MagicMock())),
+        ),
         patch(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
             AsyncMock(return_value=failed),
@@ -3803,6 +3857,56 @@ async def test_replacing_a_bond_that_cannot_be_removed_does_not_pair(
 
     attempt.assert_not_called()
     assert result.outcome is OperationOutcome.UNPAIR_FAILED
+
+
+async def test_a_sleeping_bed_never_loses_its_bond_to_a_replacement(
+    hass: HomeAssistant,
+) -> None:
+    """Removing first would leave a sleeping bed with no bond and no way back."""
+    flow = _pairing_flow(hass)
+    flow._pairing_remove_record = _bond_record()
+    flow._pairing_mode = "replace_local"
+    stale = AdvertisementEvidence(status=FreshnessStatus.STALE, age_seconds=600.0)
+    with (
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
+            AsyncMock(return_value=(stale, None)),
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond"
+        ) as removal,
+        patch.object(flow, "_attempt_pairing") as attempt,
+    ):
+        result = await flow._async_pairing_worker()
+
+    removal.assert_not_called()
+    attempt.assert_not_called()
+    assert result.outcome is OperationOutcome.NOT_ADVERTISING
+
+
+async def test_replacing_a_bond_requires_its_own_confirmation(
+    hass: HomeAssistant,
+) -> None:
+    """#461 routes the replace action through confirmation, not a list choice."""
+    flow = _pairing_flow(hass)
+    inventory = LocalBondInventory(
+        status=BluezReadStatus.OK, records=(_bond_record(),)
+    )
+    with (
+        _patch_inventory(inventory),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond"
+        ) as removal,
+    ):
+        result = await flow.async_step_bluetooth_pairing(
+            {"action": "remove_bond_and_pair"}
+        )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "pairing_replace_confirm"
+    # Naming the adapter matters on a host with more than one.
+    assert result["description_placeholders"]["transport"] == "11:22:33:44:55:66"
+    removal.assert_not_called()
 
 
 async def test_a_one_connection_bed_defers_pairing_without_removing_a_bond(
@@ -4070,3 +4174,90 @@ async def test_unpair_refuses_when_the_bond_state_changed_after_confirmation(
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "unpair_changed"
     removal.assert_not_called()
+
+
+async def test_the_preview_follows_the_adapter_the_user_actually_picked(
+    hass: HomeAssistant,
+    mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+    enable_custom_integrations,
+) -> None:
+    """Previewing the defaults can omit the warning for the chosen combination."""
+    seen: list[tuple] = []
+
+    async def _note(_self, address, adapter, bed_type=None, variant=None):
+        # Patched onto the class, so the bound instance arrives positionally.
+        seen.append((address, adapter, bed_type, variant))
+        return "preview"
+
+    with (
+        patch.object(AdjustableBedConfigFlow, "_async_transport_note", _note),
+        # The adapter has to be offered by the form before it can be submitted,
+        # and the schema is built on the first render.
+        patch(
+            "custom_components.adjustable_bed.config_flow.get_available_adapters",
+            return_value={"auto": "Automatic", "esphome_bedroom": "Bedroom proxy"},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_BLUETOOTH},
+            data=mock_bluetooth_service_info,
+        )
+        # A variant that does not belong to the chosen bed type re-renders the
+        # form with everything the user submitted still in hand.
+        rendered = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                # A pairing-required type, so the proxy warning is relevant.
+                CONF_BED_TYPE: BED_TYPE_VIBRADORM,
+                CONF_MOTOR_COUNT: 2,
+                CONF_PROTOCOL_VARIANT: LEGGETT_VARIANT_GEN2,
+                CONF_PREFERRED_ADAPTER: "esphome_bedroom",
+            },
+        )
+        assert rendered["type"] is FlowResultType.FORM
+
+    assert seen, "the form should have been re-rendered with a preview"
+    _address, adapter, bed_type, _variant = seen[-1]
+    assert adapter == "esphome_bedroom"
+    assert bed_type == BED_TYPE_VIBRADORM
+
+
+async def test_typed_address_setup_previews_the_transport_once_it_is_valid(
+    hass: HomeAssistant, enable_custom_integrations
+) -> None:
+    """Raw manual entry had no preview at all before connecting."""
+    flow = AdjustableBedConfigFlow()
+    flow.hass = hass
+    flow.context = {"source": SOURCE_USER}
+
+    with patch.object(
+        AdjustableBedConfigFlow,
+        "_async_transport_note",
+        AsyncMock(return_value="Likely connection: Direct Bluetooth"),
+    ):
+        # An invalid motor count keeps us on the form, with the address known.
+        result = await flow.async_step_manual_entry(
+            {
+                CONF_ADDRESS: "AA:BB:CC:DD:EE:FF",
+                CONF_BED_TYPE: BED_TYPE_OKIMAT,
+                CONF_MOTOR_COUNT: 99,
+            }
+        )
+
+    assert result["type"] is FlowResultType.FORM
+    assert "Direct Bluetooth" in result["description_placeholders"]["transport"]
+
+
+async def test_typed_address_setup_previews_nothing_before_an_address_exists(
+    hass: HomeAssistant, enable_custom_integrations
+) -> None:
+    """There is nothing to predict until the user has typed a real address."""
+    flow = AdjustableBedConfigFlow()
+    flow.hass = hass
+    flow.context = {"source": SOURCE_USER}
+
+    result = await flow.async_step_manual_entry(None)
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["description_placeholders"]["transport"] == ""

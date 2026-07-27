@@ -43,6 +43,10 @@
         "data_description": {
           "action": "Prøv igjen beholder sengetypen, adapteren og protokollinnstillingene du allerede valgte."
         }
+      },
+      "pairing_replace_confirm": {
+        "title": "Erstatt den eksisterende koblingen",
+        "description": "**{name}** har allerede en Bluetooth-kobling med denne Home Assistant-verten, lagret på **{transport}**.\n\nFortsetter du, fjernes den koblingen og sengen pares på nytt fra bunnen av. Home Assistant sjekker først at sengen faktisk er tilgjengelig, så en sovende seng blir ikke stående uten kobling.\n\nVelg **Send inn** for å erstatte den, eller gå tilbake for å beholde og bruke den som den er."
       }
     },
     "progress": {

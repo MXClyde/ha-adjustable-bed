@@ -146,7 +146,7 @@
       },
       "manual_entry": {
         "title": "Manual Configuration",
-        "description": "Enter the bed's Bluetooth address manually.",
+        "description": "Enter the bed's Bluetooth address manually.\n\n{transport}",
         "data": {
           "address": "Bluetooth address",
           "bed_type": "Bed type",
@@ -325,6 +325,10 @@
         "data_description": {
           "action": "Try again keeps the bed type, adapter and protocol settings you already chose."
         }
+      },
+      "pairing_replace_confirm": {
+        "title": "Replace the existing bond",
+        "description": "**{name}** already has a Bluetooth bond with this Home Assistant host, stored on **{transport}**.\n\nContinuing removes that bond and pairs again from scratch. Home Assistant checks first that the bed is actually reachable, so a sleeping bed will not be left without a bond.\n\nSelect **Submit** to replace it, or go back to keep it and use it as it is."
       }
     },
     "progress": {
