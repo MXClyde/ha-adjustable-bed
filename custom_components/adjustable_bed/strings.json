@@ -373,7 +373,7 @@
           "outcome_timed_out": "❌ The bed stopped responding partway through. Put it back into pairing mode and select **Try again**.",
           "outcome_cancelled": "❌ Pairing was cancelled.",
           "outcome_connection_failed": "❌ Could not pair. Another app or the bed's own remote may be holding the bed's connection, or it may be out of range. Select **Try again**.",
-          "outcome_removal_unconfirmed": "⚠️ Home Assistant asked BlueZ to remove the existing bond but could not confirm whether it is gone, so pairing was not attempted. Check the host's Bluetooth settings, then select **Try again**."
+          "outcome_removal_unconfirmed": "⚠️ Home Assistant could not confirm what happened to the existing bond, so pairing was not attempted and the bond may still be in place. Check the host's Bluetooth settings, then select **Try again**."
         }
       },
       "pairing_replace_confirm": {

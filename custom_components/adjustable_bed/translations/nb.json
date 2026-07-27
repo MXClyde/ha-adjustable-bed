@@ -61,7 +61,7 @@
           "outcome_timed_out": "❌ Sengen sluttet å svare underveis. Sett den i paremodus igjen og velg **Prøv igjen**.",
           "outcome_cancelled": "❌ Paringen ble avbrutt.",
           "outcome_connection_failed": "❌ Klarte ikke å pare. En annen app eller sengens egen fjernkontroll kan holde tilkoblingen, eller sengen kan være utenfor rekkevidde. Velg **Prøv igjen**.",
-          "outcome_removal_unconfirmed": "⚠️ Home Assistant ba BlueZ om å fjerne den eksisterende koblingen, men fikk ikke bekreftet om den er borte, så paring ble ikke forsøkt. Sjekk Bluetooth-innstillingene på verten, og velg **Prøv igjen**."
+          "outcome_removal_unconfirmed": "⚠️ Home Assistant fikk ikke bekreftet hva som skjedde med den eksisterende koblingen, så paring ble ikke forsøkt, og koblingen kan fortsatt være på plass. Sjekk Bluetooth-innstillingene på verten, og velg **Prøv igjen**."
         }
       },
       "pairing_replace_confirm": {

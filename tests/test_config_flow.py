@@ -4075,7 +4075,7 @@ async def test_unverified_bond_removal_does_not_claim_the_bond_remains(
     attempt.assert_not_called()
     assert result.outcome is OperationOutcome.UNPAIR_UNCONFIRMED
     outcome = await flow._async_pairing_outcome_note(result, None)
-    assert "not confirm whether it is gone" in outcome
+    assert "could not confirm what happened to the existing bond" in outcome
 
 
 async def test_a_sleeping_bed_never_loses_its_bond_to_a_replacement(
@@ -4962,7 +4962,11 @@ async def test_replacement_revalidates_the_bond_under_the_address_lock(
 
     async def changed_inventory(_address: str) -> LocalBondInventory:
         assert lock.locked()
-        return LocalBondInventory(status=BluezReadStatus.OK)
+        # A bond is still there, it is simply not the one that was confirmed.
+        return LocalBondInventory(
+            status=BluezReadStatus.OK,
+            records=(_bond_record(adapter_address="AA:AA:AA:AA:AA:AA"),),
+        )
 
     with (
         patch(
@@ -4978,6 +4982,55 @@ async def test_replacement_revalidates_the_bond_under_the_address_lock(
     attempt.assert_not_called()
     assert result.outcome is OperationOutcome.UNPAIR_FAILED
     assert result.detail == "bond_changed_before_removal"
+
+
+async def test_an_unreadable_revalidation_does_not_claim_the_bond_survived(
+    hass: HomeAssistant,
+) -> None:
+    """A failed BlueZ read proves nothing, so it must not be reported as a failure.
+
+    "The old bond is still in place" is a claim about BlueZ that a read which
+    never answered cannot support, and it sends the user looking for a bond that
+    may not be there.
+    """
+    flow = _pairing_flow(hass)
+    address = flow._manual_data[CONF_ADDRESS]
+
+    with (
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.UNAVAILABLE)),
+        patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
+        patch.object(flow, "_attempt_pairing") as attempt,
+    ):
+        result = await flow._async_replace_bond(address, _bond_record())
+
+    # Nothing was removed and nothing was paired, so neither may be claimed.
+    removal.assert_not_called()
+    attempt.assert_not_called()
+    assert result.outcome is OperationOutcome.UNPAIR_UNCONFIRMED
+    assert result.detail == "bond_unreadable_before_removal"
+
+
+async def test_a_bond_already_gone_pairs_instead_of_refusing(
+    hass: HomeAssistant,
+) -> None:
+    """Nothing destructive is left to do, and the user still asked to pair."""
+    flow = _pairing_flow(hass)
+    address = flow._manual_data[CONF_ADDRESS]
+
+    with (
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK)),
+        patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
+        patch.object(
+            flow, "_attempt_pairing", AsyncMock(return_value=_verified_evidence())
+        ) as attempt,
+    ):
+        result = await flow._async_replace_bond(address, _bond_record())
+
+    # Removing a record that is not there would be the only thing that could
+    # fail here, so it is skipped rather than attempted and reported.
+    removal.assert_not_called()
+    attempt.assert_awaited_once()
+    assert result.outcome is OperationOutcome.SUCCESS
 
 
 async def test_replacement_holds_the_address_lock_until_pairing_finishes(

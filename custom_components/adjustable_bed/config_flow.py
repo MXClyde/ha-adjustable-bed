@@ -378,9 +378,10 @@ _PAIRING_OUTCOME_FALLBACKS: Final[dict[str, str]] = {
         "on the Home Assistant host."
     ),
     "removal_unconfirmed": (
-        "⚠️ Home Assistant asked BlueZ to remove the existing bond but could "
-        "not confirm whether it is gone, so pairing was not attempted. Check "
-        "the host's Bluetooth settings, then select **Try again**."
+        "⚠️ Home Assistant could not confirm what happened to the existing "
+        "bond, so pairing was not attempted and the bond may still be in "
+        "place. Check the host's Bluetooth settings, then select **Try "
+        "again**."
     ),
     "removal_failed": (
         "❌ The existing bond could not be removed, so pairing was not attempted "
@@ -3179,15 +3180,40 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             )
         async with async_get_connect_lock(self.hass, address):
             current = await async_read_local_bonds(address)
-            if current.sole_bond != record:
+            # Three different things can make this re-read disagree with the
+            # confirmation, and only one of them is "the bond is still there".
+            if not current.readable:
+                # A failed or timed-out read proves nothing either way. Nothing
+                # was removed, so say the state could not be confirmed rather
+                # than assert the old bond survived.
                 _LOGGER.warning(
-                    "Not replacing the bond for %s: the confirmed BlueZ record changed",
+                    "Not replacing the bond for %s: the host's bonds could not be read (%s)",
                     address,
+                    current.status,
                 )
                 return OperationResult(
-                    outcome=OperationOutcome.UNPAIR_FAILED,
-                    detail="bond_changed_before_removal",
+                    outcome=OperationOutcome.UNPAIR_UNCONFIRMED,
+                    detail="bond_unreadable_before_removal",
                 )
+            if current.sole_bond != record:
+                if current.bonded_records:
+                    _LOGGER.warning(
+                        "Not replacing the bond for %s: the confirmed BlueZ record changed",
+                        address,
+                    )
+                    return OperationResult(
+                        outcome=OperationOutcome.UNPAIR_FAILED,
+                        detail="bond_changed_before_removal",
+                    )
+                # Readable and empty: something else already removed the bond,
+                # so the destructive half of this transaction has nothing left to
+                # do. Refusing here would deny the pairing the user asked for
+                # over a record that is already gone.
+                _LOGGER.info(
+                    "The bond for %s was already gone; pairing without removing anything",
+                    address,
+                )
+                return await self._async_pair_and_classify(address, "replace_local", device)
             self.async_report_action(SetupAction.UNPAIRING)
             removal = await async_remove_local_bond(record)
             if not removal.succeeded:
