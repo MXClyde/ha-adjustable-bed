@@ -42,12 +42,18 @@ from .adapter import (
 )
 from .address_lock import async_get_connect_lock
 from .ble_auth import is_ble_authentication_error
-from .bluetooth_transport import ConnectionPath, TransportClass, async_path_for_source
+from .bluetooth_transport import (
+    ConnectionPath,
+    TransportClass,
+    async_path_for_source,
+    client_source,
+)
 from .bond_verification import (
     CONF_BLE_BOND_CONTEXT,
     BondEvidence,
     BondOwner,
     BondVerificationStatus,
+    bond_context_matches,
     bond_owner_from_entry,
     build_bond_context,
 )
@@ -809,6 +815,7 @@ class AdjustableBedCoordinator:
         *,
         established: bool | None = None,
         unreliable: bool | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
         """Apply bond-state changes to runtime state and entry data in ONE write.
 
@@ -834,6 +841,8 @@ class AdjustableBedCoordinator:
                 data[CONF_BLE_BOND_MARKER_UNRELIABLE] = True
             else:
                 data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
+        if context is not None:
+            data[CONF_BLE_BOND_CONTEXT] = context
         if data != dict(self.entry.data):
             self._begin_internal_entry_update(
                 bool(data.get(CONF_BLE_BOND_ESTABLISHED, False))
@@ -860,13 +869,12 @@ class AdjustableBedCoordinator:
             observed_at=datetime.now(UTC).isoformat(),
         )
         context = build_bond_context(evidence)
-        if self.entry.data.get(CONF_BLE_BOND_CONTEXT) == context:
+        if bond_context_matches(self.entry.data.get(CONF_BLE_BOND_CONTEXT), context):
+            # Same owner as last time. The observation timestamp always differs,
+            # so comparing whole contexts would rewrite the entry on every
+            # reconnect, and every write fires the options listener.
             return
-        data = {**self.entry.data, CONF_BLE_BOND_CONTEXT: context}
-        self._begin_internal_entry_update(
-            bool(data.get(CONF_BLE_BOND_ESTABLISHED, False))
-        )
-        self.hass.config_entries.async_update_entry(self.entry, data=data)
+        self._persist_bond_flags(established=True, context=context)
 
     def _begin_internal_entry_update(self, bond_established: bool) -> None:
         """Mark the next entry update as an internal bond-marker write.
@@ -1234,6 +1242,10 @@ class AdjustableBedCoordinator:
         # Read succeeded → the encrypted link works → we are bonded. Record which
         # transport carried that proof, so a later unpair or recovery knows where
         # the bond actually lives instead of guessing (issue #459).
+        # The link is authenticated now, so any earlier authentication failure
+        # is history. Leaving it in place would let a later repair believe it
+        # still had grounds to remove a bond that is demonstrably working.
+        self._last_bond_evidence = None
         self._record_bond_provenance()
         release_latch = False
         if self._ble_bond_marker_unreliable:
@@ -2251,17 +2263,7 @@ class AdjustableBedCoordinator:
                 # Recorded here, immediately after the connect, because bond
                 # verification runs before controller startup and must be able
                 # to attribute a failure to the transport that carried it.
-                actual_adapter = "unknown"
-                try:
-                    # Try to get the actual connection source from the client
-                    # (accessing private bleak internals for diagnostic purposes)
-                    backend: Any = getattr(self._client, "_backend", None)
-                    backend_device: Any = getattr(backend, "_device", None)
-                    details = getattr(backend_device, "details", None)
-                    if isinstance(details, dict):
-                        actual_adapter = details.get("source", "unknown")
-                except Exception:
-                    _LOGGER.debug("Could not determine actual connection adapter")
+                actual_adapter = client_source(self._client) or "unknown"
 
                 # Track successful connection for diagnostics (issue #168)
                 self._connection_success_count += 1
@@ -3206,9 +3208,17 @@ class AdjustableBedCoordinator:
             client = self._client
             await self._async_disconnect_locked(f"transport_operation_{operation}")
             if client is not None and client.is_connected:
-                raise RuntimeError(
-                    f"Could not release the Bluetooth connection to {self._address}"
-                )
+                # _async_disconnect_locked clears self._client even when the
+                # disconnect raised, so this local is the last reference to a
+                # live link. Force it closed before raising, or nothing ever
+                # will: close_stale_connections_by_address is None on
+                # non-BlueZ backends.
+                with contextlib.suppress(Exception):
+                    await client.disconnect()
+                if client.is_connected:
+                    raise RuntimeError(
+                        f"Could not release the Bluetooth connection to {self._address}"
+                    )
             yield
 
     async def _async_disconnect_locked(self, reason: str = "intentional") -> None:

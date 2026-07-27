@@ -122,6 +122,23 @@ class TestCoordinatorConnection:
         assert result is True
         assert coordinator.controller is not None
 
+    async def test_connect_records_the_scanner_that_actually_routed_the_client(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ) -> None:
+        """A rerouted wrapper must not inherit its original device's source."""
+        mock_bleak_client._connected_scanner = SimpleNamespace(source="routed-scanner")
+        mock_bleak_client._backend = SimpleNamespace(
+            _device=SimpleNamespace(details={"source": "original-scanner"})
+        )
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+
+        assert await coordinator.async_connect() is True
+        assert coordinator._actual_adapter == "routed-scanner"
+
     async def test_connect_arms_disconnect_timer_after_post_connect_hydration(
         self,
         hass: HomeAssistant,
@@ -4804,6 +4821,30 @@ class TestBondProvenanceAndTransportGate:
             assert lock.locked()
         assert not lock.locked()
 
+        await coordinator.async_shutdown()
+
+    async def test_the_transport_gate_accepts_a_successful_fallback_disconnect(
+        self, hass: HomeAssistant, mock_config_entry
+    ) -> None:
+        """A second disconnect that closes the client releases the operation."""
+        from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+
+        mock_config_entry.add_to_hass(hass)
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        client = MagicMock()
+        client.is_connected = True
+
+        async def disconnect() -> None:
+            if client.disconnect.await_count == 2:
+                client.is_connected = False
+
+        client.disconnect = AsyncMock(side_effect=disconnect)
+        coordinator._client = client
+
+        async with coordinator.async_transport_operation("unpair"):
+            pass
+
+        assert client.disconnect.await_count == 2
         await coordinator.async_shutdown()
 
     async def test_an_authenticated_read_records_who_owns_the_bond(

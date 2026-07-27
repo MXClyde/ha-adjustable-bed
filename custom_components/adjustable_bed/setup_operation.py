@@ -96,8 +96,13 @@ class OperationOutcome(StrEnum):
     PAIRING_NOT_SUPPORTED = "pairing_not_supported"
     AUTHENTICATION_FAILED = "authentication_failed"
     BOND_VERIFICATION_FAILED = "bond_verification_failed"
+    # Distinct from a failure: a timeout or an absent characteristic proves
+    # neither that a bond exists nor that it does not, and telling a user their
+    # link is unauthenticated would push them into replacing a working bond.
+    BOND_VERIFICATION_INCONCLUSIVE = "bond_verification_inconclusive"
     PROXY_OWNED_BOND = "proxy_owned_bond"
     UNPAIR_FAILED = "unpair_failed"
+    UNPAIR_UNCONFIRMED = "unpair_unconfirmed"
     CANCELLED = "cancelled"
 
 

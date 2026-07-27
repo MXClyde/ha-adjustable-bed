@@ -14,6 +14,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.adjustable_bed.bluetooth_transport import (
+    ConnectionPath,
+    TransportClass,
+)
+from custom_components.adjustable_bed.bond_verification import (
+    CONF_BLE_BOND_CONTEXT,
+    BondVerificationStatus,
+)
 from custom_components.adjustable_bed.const import (
     BED_TYPE_LEGGETT_GEN2,
     CONF_BED_TYPE,
@@ -37,12 +45,25 @@ async def test_async_create_fix_flow_builds_pairing_flow(hass: HomeAssistant) ->
     flow = await async_create_fix_flow(
         hass,
         f"pairing_required_{TEST_ADDRESS.replace(':', '_').lower()}",
-        {"address": TEST_ADDRESS, "name": TEST_NAME, "entry_id": "abc123"},
+        {
+            "address": TEST_ADDRESS,
+            "name": TEST_NAME,
+            "entry_id": "abc123",
+            "evidence_status": "auth_failed",
+            "evidence_transport": "proxy",
+            "evidence_source": "bedroom-proxy",
+            "evidence_adapter": None,
+            "evidence_observed_at": "2026-07-27T00:00:00+00:00",
+        },
     )
     assert isinstance(flow, PairingRequiredRepairFlow)
     assert flow._address == TEST_ADDRESS
     assert flow._name == TEST_NAME
     assert flow._entry_id == "abc123"
+    assert flow._evidence is not None
+    assert flow._evidence.status is BondVerificationStatus.AUTH_FAILED
+    assert flow._evidence.owner.transport is TransportClass.PROXY
+    assert flow._evidence.owner.source == "bedroom-proxy"
 
 
 async def test_confirm_step_shows_form_first(hass: HomeAssistant) -> None:
@@ -187,6 +208,7 @@ async def test_try_pair_succeeds_and_clears_marker(hass: HomeAssistant) -> None:
     flow.hass = hass
 
     client = MagicMock()
+    client._connected_scanner = MagicMock(source="bedroom-proxy")
     client.pair = AsyncMock()
     client.read_gatt_char = AsyncMock(return_value=b"Model X")
     client.disconnect = AsyncMock()
@@ -194,6 +216,12 @@ async def test_try_pair_succeeds_and_clears_marker(hass: HomeAssistant) -> None:
     with (
         patch(BLEAK_DEVICE, return_value=MagicMock()),
         patch(ESTABLISH, new=AsyncMock(return_value=client)) as mock_establish,
+        patch(
+            "custom_components.adjustable_bed.repairs.async_path_for_source",
+            return_value=ConnectionPath(
+                source="bedroom-proxy", transport=TransportClass.PROXY
+            ),
+        ),
         patch.object(
             hass.config_entries, "async_reload", new=AsyncMock()
         ) as mock_reload,
@@ -202,6 +230,8 @@ async def test_try_pair_succeeds_and_clears_marker(hass: HomeAssistant) -> None:
 
     assert result is True
     assert entry.data[CONF_BLE_BOND_ESTABLISHED] is True
+    assert entry.data[CONF_BLE_BOND_CONTEXT]["transport"] == "proxy"
+    assert entry.data[CONF_BLE_BOND_CONTEXT]["source"] == "bedroom-proxy"
     assert mock_establish.await_args.kwargs["pair"] is True
     client.pair.assert_not_awaited()
     mock_reload.assert_awaited_once_with(entry.entry_id)
@@ -421,6 +451,12 @@ async def test_try_pair_treats_non_auth_read_error_as_success(hass: HomeAssistan
             CONF_NAME: TEST_NAME,
             CONF_BED_TYPE: "okimat",
             CONF_BLE_BOND_ESTABLISHED: False,
+            CONF_BLE_BOND_CONTEXT: {
+                "version": 1,
+                "transport": "local",
+                "source": "11:22:33:44:55:66",
+                "adapter": "hci0",
+            },
         },
         unique_id=TEST_ADDRESS,
         entry_id="repair_inconclusive_entry",
@@ -442,6 +478,7 @@ async def test_try_pair_treats_non_auth_read_error_as_success(hass: HomeAssistan
         assert await flow._async_try_pair() is True
 
     assert entry.data[CONF_BLE_BOND_ESTABLISHED] is True
+    assert CONF_BLE_BOND_CONTEXT not in entry.data
     mock_reload.assert_awaited_once_with(entry.entry_id)
     client.disconnect.assert_awaited_once()
 

@@ -426,7 +426,22 @@ class TestSelectingWhichRecord:
             self._inventory(first, second), owner_source="99:99:99:99:99:99"
         )
         assert not selection.is_exact
-        assert selection.status is BondSelectionStatus.AMBIGUOUS
+        # The named adapter is known and holds no bond, so this is not a choice
+        # between candidates; there is simply no record that provenance points at.
+        assert selection.status is BondSelectionStatus.UNKNOWN_OWNER
+        assert selection.record is None
+
+    def test_a_mismatched_source_does_not_fall_through_to_the_interface_name(
+        self,
+    ) -> None:
+        """A looser identifier must not rescue an explicit mismatch."""
+        only = self._record(_ADAPTER_0, "11:22:33:44:55:66")
+        selection = select_local_bond(
+            self._inventory(only),
+            owner_source="99:99:99:99:99:99",
+            owner_adapter="hci0",
+        )
+        assert not selection.is_exact
 
     def test_two_bonds_and_no_provenance_is_ambiguous(self) -> None:
         first = self._record(_ADAPTER_0, "11:22:33:44:55:66")
