@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,7 +44,11 @@ from .adapter import (
     read_ble_device_info,
 )
 from .address_lock import async_get_connect_lock
-from .bluetooth_freshness import FreshnessStatus, async_gate_connection
+from .bluetooth_freshness import (
+    FreshnessStatus,
+    async_gate_connection,
+    async_wait_for_advertisement,
+)
 from .bluetooth_transport import (
     ConnectionPath,
     async_describe_actual,
@@ -149,6 +154,13 @@ from .discovery_settings import (
     async_set_discovery_disabled,
 )
 from .kaidi_metadata import add_kaidi_entry_metadata, resolve_kaidi_advertisement
+from .setup_operation import (
+    BluetoothOperationMixin,
+    ConnectionLifetimePolicy,
+    OperationOutcome,
+    OperationResult,
+    SetupAction,
+)
 from .unsupported import (
     build_misidentified_issue_url,
     capture_device_info,
@@ -275,6 +287,12 @@ def _add_malouf_entry_data(
 # blocks entry creation.
 _PROBE_TIMEOUT_SECONDS = 15.0
 
+# How long the setup probe waits for the bed to advertise before reporting it as
+# absent. Deliberately shorter than the pairing wait: someone who just put a bed
+# into pairing mode is standing at the bed and expects to wait, while someone
+# finishing a setup form is not, and the result step offers Retry either way.
+_PROBE_ADVERTISEMENT_WAIT_SECONDS = 10.0
+
 
 def _skips_setup_connection_probe(bed_type: str | None, variant: str | None) -> bool:
     """Return True when setup should avoid a redundant Gen2 connection cycle.
@@ -315,7 +333,7 @@ class CapabilityReport:
     freshness: FreshnessStatus | None = None
 
 
-class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
+class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Adjustable Bed."""
 
     VERSION = 3
@@ -2406,7 +2424,79 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_create_entry(title=title, data=entry_data)
         self._pending_entry = entry_data
         self._pending_title = title
-        return await self.async_step_verify_connection()
+        return await self.async_step_setup_progress()
+
+    def _async_start_probe_operation(self) -> None:
+        """Prepare the shared operation state for a capability probe."""
+        assert self._pending_entry is not None
+        address = self._pending_entry[CONF_ADDRESS]
+        preferred = self._pending_entry.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO)
+        self.async_begin_operation(
+            name=self._pending_entry.get(CONF_NAME) or address,
+            address=address,
+            prediction=async_predict_path(self.hass, address, preferred),
+            action=SetupAction.LOCATING,
+            policy=(
+                ConnectionLifetimePolicy.KEEP_FIRST_LINK
+                if _skips_setup_connection_probe(
+                    self._pending_entry.get(CONF_BED_TYPE),
+                    self._pending_entry.get(CONF_PROTOCOL_VARIANT),
+                )
+                else ConnectionLifetimePolicy.ORDINARY
+            ),
+            placeholders={
+                "name": self._pending_entry.get(CONF_NAME) or address,
+                "address": address,
+            },
+        )
+
+    async def _async_probe_worker(self) -> OperationResult:
+        """Run the capability probe as a tracked background operation.
+
+        Everything the client touches happens in this one task: the per-address
+        connect lock is reentrant per ``asyncio.Task``, so splitting the connect
+        and the disconnect across tasks would deadlock rather than re-enter.
+        """
+        assert self._pending_entry is not None
+        report = await self._probe_capabilities(
+            self._pending_entry[CONF_ADDRESS],
+            self._pending_entry.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO),
+            self._pending_entry.get(CONF_BED_TYPE),
+            self._pending_entry.get(CONF_PROTOCOL_VARIANT),
+            reporter=self.async_report_action,
+            wait_progress=self.async_report_progress,
+            path_reporter=self.async_report_path,
+        )
+        if report.freshness is not None and report.freshness is not FreshnessStatus.FRESH:
+            outcome = OperationOutcome.NOT_ADVERTISING
+        elif not report.connected:
+            outcome = OperationOutcome.CONNECTION_FAILED
+        else:
+            outcome = OperationOutcome.SUCCESS
+        return OperationResult(
+            outcome=outcome,
+            detail=report.error,
+            path=report.actual_path or report.predicted_path,
+            payload=report,
+        )
+
+    async def async_step_setup_progress(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Run the read-only capability probe behind a live progress view.
+
+        Without this the form the user just submitted sits there frozen for as
+        long as the BLE stack takes, which is indistinguishable from a hang
+        (issue #457).
+        """
+        assert self._pending_entry is not None
+        if self._operation is None or self._operation.terminal_consumed:
+            self._async_start_probe_operation()
+        return await self.async_run_operation_step(
+            step_id="setup_progress",
+            worker=self._async_probe_worker,
+            next_step_id="verify_connection",
+        )
 
     async def _probe_capabilities(
         self,
@@ -2414,6 +2504,10 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         preferred_adapter: str | None,
         bed_type: str | None,
         protocol_variant: str | None = None,
+        *,
+        reporter: Callable[[SetupAction], None] | None = None,
+        wait_progress: Callable[[float], None] | None = None,
+        path_reporter: Callable[[ConnectionPath | None], None] | None = None,
     ) -> CapabilityReport:
         """Connect once (read-only) and report what was detected.
 
@@ -2428,9 +2522,20 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         recently. Without that check a bed that is asleep or unplugged still
         looks present in Home Assistant's history, and the probe burns its whole
         timeout producing a failure that reads like a pairing problem (#458).
+
+        ``reporter`` receives the current phase so a progress view can name what
+        is happening. ``wait_progress`` drives the numeric bar, and is passed
+        only to the advertisement wait: that is the one step whose duration is
+        known in advance, so it is the only one where a percentage is honest.
+        ``path_reporter`` is called the moment the routed transport is known, so
+        the progress view can name it while the probe is still running.
         """
         from bleak import BleakClient
         from bleak_retry_connector import establish_connection
+
+        def _report(action: SetupAction) -> None:
+            if reporter is not None:
+                reporter(action)
 
         has_position_feedback = bed_type_has_position_feedback(bed_type, protocol_variant)
         report = CapabilityReport(position_feedback=has_position_feedback)
@@ -2438,15 +2543,24 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         prediction = async_predict_path(self.hass, address, preferred_adapter)
         report.predicted_path = prediction.chosen
 
-        evidence, device = async_gate_connection(
-            self.hass,
-            address,
-            source=(
-                preferred_adapter
-                if preferred_adapter and preferred_adapter != ADAPTER_AUTO
-                else None
-            ),
+        _report(SetupAction.LOCATING)
+        source = (
+            preferred_adapter
+            if preferred_adapter and preferred_adapter != ADAPTER_AUTO
+            else None
         )
+        if wait_progress is not None:
+            # Give a bed that is merely between advertising intervals, or that
+            # the user is walking over to wake, a chance before refusing.
+            evidence, device = await async_wait_for_advertisement(
+                self.hass,
+                address,
+                source=source,
+                wait_timeout=_PROBE_ADVERTISEMENT_WAIT_SECONDS,
+                on_progress=wait_progress,
+            )
+        else:
+            evidence, device = async_gate_connection(self.hass, address, source=source)
         report.freshness = evidence.status
         report.rssi = evidence.rssi
         if not evidence.is_fresh or device is None:
@@ -2473,6 +2587,7 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         try:
             async with async_get_connect_lock(self.hass, address):
                 try:
+                    _report(SetupAction.CONNECTING)
                     client = await establish_connection(
                         BleakClient,
                         device,
@@ -2492,6 +2607,9 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
                         )
                         if report.actual_path is not None:
                             report.via_proxy = not report.actual_path.owns_host_bond
+                        if path_reporter is not None:
+                            path_reporter(report.actual_path)
+                    _report(SetupAction.DISCOVERING_SERVICES)
                     await discover_services(client, address)
                     services = list(client.services) if client.services else []
                     report.service_count = len(services)
@@ -2504,11 +2622,13 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
                             ):
                                 writable += 1
                     report.writable_count = writable
+                    _report(SetupAction.READING_CAPABILITIES)
                     report.manufacturer, report.model = await read_ble_device_info(
                         client, address
                     )
                 finally:
                     if client is not None:
+                        _report(SetupAction.DISCONNECTING)
                         try:
                             await client.disconnect()
                         except Exception:  # noqa: BLE001 - cleanup must not raise
@@ -2613,30 +2733,42 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_verify_connection(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Probe the bed once (read-only) and show a capability checklist.
+        """Show the capability checklist produced by the setup_progress step.
 
-        Shown after the confirm/manual step for non-PIN/non-pairing beds. The
-        Submit button always finishes setup - a failed probe is informational
-        only and never blocks entry creation.
-
-        When the bed was not advertising, the form also offers Retry, which
-        re-runs the check in place. The user can wake the bed and try again
+        This is a result step: the probe itself ran as a background task behind
+        a progress view, so this only renders what it found. Submit always
+        finishes setup - a failed probe is informational and never blocks entry
+        creation. When the bed was not advertising the form also offers Retry,
+        which re-runs the check in place, so the user can go wake the bed
         without losing everything they already filled in (#458).
+
+        It must never create an entry on ``user_input is None``. Home Assistant
+        re-enters a flow's current step on its own (the progress task's
+        done-callback, a frontend refresh), and an entry created from one of
+        those would be an entry the user never confirmed.
         """
         assert self._pending_entry is not None
 
-        if user_input is not None and user_input.get("action") != "retry":
+        if user_input is not None:
+            if user_input.get("action") == "retry":
+                self._async_start_probe_operation()
+                return await self.async_step_setup_progress()
             return self.async_create_entry(
                 title=self._pending_title or self._pending_entry.get(CONF_NAME, "Adjustable Bed"),
                 data=self._pending_entry,
             )
 
-        report = await self._probe_capabilities(
-            self._pending_entry[CONF_ADDRESS],
-            self._pending_entry.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO),
-            self._pending_entry.get(CONF_BED_TYPE),
-            self._pending_entry.get(CONF_PROTOCOL_VARIANT),
-        )
+        result = self.operation.result
+        report = result.payload if result is not None else None
+        if not isinstance(report, CapabilityReport):
+            # No operation ran (a direct call, or state lost). Fall back to a
+            # blocking probe rather than showing an empty checklist.
+            report = await self._probe_capabilities(
+                self._pending_entry[CONF_ADDRESS],
+                self._pending_entry.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO),
+                self._pending_entry.get(CONF_BED_TYPE),
+                self._pending_entry.get(CONF_PROTOCOL_VARIANT),
+            )
 
         schema: dict[vol.Marker, Any] = {}
         if report.freshness is not None and report.freshness is not FreshnessStatus.FRESH:

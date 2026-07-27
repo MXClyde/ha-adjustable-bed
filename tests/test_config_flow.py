@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from copy import copy
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -141,6 +143,36 @@ def test_octo_one_motor_count_is_limited_to_standard_tv_lifts() -> None:
     assert _is_valid_motor_count(BED_TYPE_OCTO, "auto", 1)
     assert not _is_valid_motor_count(BED_TYPE_OCTO, OCTO_VARIANT_STAR2, 1)
     assert not _is_valid_motor_count(BED_TYPE_LINAK, "auto", 1)
+
+
+@pytest.fixture(autouse=True)
+def _no_advertisement_wait():
+    """Do not spend the real advertisement wait in tests.
+
+    The probe waits a few seconds for a bed that is between advertising
+    intervals. Every test here runs against a Bluetooth manager that has no
+    history at all, so the wait can only ever time out - it would add seconds
+    per test and prove nothing. The wait itself is covered in
+    tests/test_bluetooth_freshness.py.
+    """
+    with patch(
+        "custom_components.adjustable_bed.config_flow._PROBE_ADVERTISEMENT_WAIT_SECONDS",
+        0.0,
+    ):
+        yield
+
+
+async def _advance_progress(hass: HomeAssistant, result: Any) -> Any:
+    """Drive a progress result through to the step that follows it.
+
+    Setup now runs its BLE work as a background task behind a progress view, so
+    a submitted form returns SHOW_PROGRESS rather than the next form.
+    """
+    while result["type"] == FlowResultType.SHOW_PROGRESS:
+        await hass.async_block_till_done()
+        result = await hass.config_entries.flow.async_configure(result["flow_id"])
+    return result
+
 
 
 class TestPairingInstructions:
@@ -916,7 +948,10 @@ class TestBluetoothDiscoveryFlow:
             },
         )
 
-        # A connectable scanner is mocked, so the verify_connection step appears.
+        # A connectable scanner is mocked, so setup runs the probe behind a
+        # progress view and then shows the verify_connection result step.
+        assert result["type"] == FlowResultType.SHOW_PROGRESS
+        result = await _advance_progress(hass, result)
         assert result["type"] == FlowResultType.FORM
         assert result["step_id"] == "verify_connection"
         result = await hass.config_entries.flow.async_configure(
@@ -1021,7 +1056,10 @@ class TestBluetoothDiscoveryFlow:
             },
         )
 
-        # A connectable scanner is mocked, so the verify_connection step appears.
+        # A connectable scanner is mocked, so setup runs the probe behind a
+        # progress view and then shows the verify_connection result step.
+        assert result["type"] == FlowResultType.SHOW_PROGRESS
+        result = await _advance_progress(hass, result)
         assert result["type"] == FlowResultType.FORM
         assert result["step_id"] == "verify_connection"
         result = await hass.config_entries.flow.async_configure(
@@ -1067,6 +1105,8 @@ class TestBluetoothDiscoveryFlow:
             )
 
             # The probe failed, but the verify step is informational only.
+            assert result["type"] == FlowResultType.SHOW_PROGRESS
+            result = await _advance_progress(hass, result)
             assert result["type"] == FlowResultType.FORM
             assert result["step_id"] == "verify_connection"
             result = await hass.config_entries.flow.async_configure(
@@ -1107,7 +1147,9 @@ class TestBluetoothDiscoveryFlow:
         )
 
         # A connectable scanner is mocked, so accepted input proceeds through
-        # the non-blocking verify_connection step before creating the entry.
+        # the non-blocking progress + verify_connection steps before creating
+        # the entry.
+        result = await _advance_progress(hass, result)
         assert result["type"] == FlowResultType.FORM
         assert result["step_id"] == "verify_connection"
         result = await hass.config_entries.flow.async_configure(
@@ -1439,7 +1481,10 @@ class TestBluetoothDiscoveryFlow:
             },
         )
 
-        # A connectable scanner is mocked, so the verify_connection step appears.
+        # A connectable scanner is mocked, so setup runs the probe behind a
+        # progress view and then shows the verify_connection result step.
+        assert result["type"] == FlowResultType.SHOW_PROGRESS
+        result = await _advance_progress(hass, result)
         assert result["type"] == FlowResultType.FORM
         assert result["step_id"] == "verify_connection"
         result = await hass.config_entries.flow.async_configure(
@@ -2845,12 +2890,41 @@ def _fresh_gate(
     return evidence, MagicMock()
 
 
+class _PatchGate:
+    """Make the capability probe see a bed that is advertising right now.
+
+    The probe reaches the gate by two routes: directly when it runs inline, and
+    through the wait helper when it runs behind a progress view. Both are
+    patched so a test does not have to know which one it took.
+    """
+
+    def __init__(
+        self, source: str, rssi: int, transport: TransportClass = TransportClass.LOCAL
+    ) -> None:
+        self._result = _fresh_gate(source, rssi, transport)
+        self._patches = [
+            patch(
+                "custom_components.adjustable_bed.config_flow.async_gate_connection",
+                return_value=self._result,
+            ),
+            patch(
+                "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
+                AsyncMock(return_value=self._result),
+            ),
+        ]
+
+    def __enter__(self) -> None:
+        for item in self._patches:
+            item.start()
+
+    def __exit__(self, *exc: object) -> None:
+        for item in reversed(self._patches):
+            item.stop()
+
+
 def _patch_gate(source: str, rssi: int, transport: TransportClass = TransportClass.LOCAL):
     """Patch the freshness gate used by the capability probe."""
-    return patch(
-        "custom_components.adjustable_bed.config_flow.async_gate_connection",
-        return_value=_fresh_gate(source, rssi, transport),
-    )
+    return _PatchGate(source, rssi, transport)
 
 
 def _fake_connected_client() -> MagicMock:
@@ -2899,6 +2973,7 @@ async def test_verify_connection_success_then_creates_entry(
         verify = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input={CONF_PREFERRED_ADAPTER: "auto"}
         )
+        verify = await _advance_progress(hass, verify)
         assert verify["type"] == FlowResultType.FORM
         assert verify["step_id"] == "verify_connection"
         caps = verify["description_placeholders"]["capabilities"]
@@ -2959,6 +3034,7 @@ async def test_verify_connection_warns_when_no_writable_characteristic(
         verify = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input={CONF_PREFERRED_ADAPTER: "auto"}
         )
+        verify = await _advance_progress(hass, verify)
         assert verify["step_id"] == "verify_connection"
         caps = verify["description_placeholders"]["capabilities"]
         assert "No writable characteristic found" in caps
@@ -2992,6 +3068,7 @@ async def test_verify_connection_failure_still_creates_entry(
         verify = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input={CONF_PREFERRED_ADAPTER: "auto"}
         )
+        verify = await _advance_progress(hass, verify)
         assert verify["step_id"] == "verify_connection"
         assert "Could not connect" in verify["description_placeholders"]["capabilities"]
 
@@ -3019,3 +3096,161 @@ async def test_verify_connection_skipped_without_scanner(
 
     assert created["type"] == FlowResultType.CREATE_ENTRY
     assert created["data"][CONF_BED_TYPE] == BED_TYPE_LINAK
+
+
+# ---------------------------------------------------------------------------
+# setup_progress step, driven through the real flow manager (issues #457, #460)
+# ---------------------------------------------------------------------------
+
+
+async def test_setup_shows_a_progress_view_before_the_result(
+    hass: HomeAssistant,
+    mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+    enable_custom_integrations,
+) -> None:
+    """Submitting setup must render an active progress view, not a frozen form."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=mock_bluetooth_service_info
+    )
+    with (
+        patch.object(AdjustableBedConfigFlow, "_verification_possible", return_value=True),
+        _patch_gate("hci0", -55),
+        patch("bleak_retry_connector.establish_connection", AsyncMock(return_value=_fake_connected_client())),
+        patch("custom_components.adjustable_bed.config_flow.discover_services", AsyncMock(return_value=True)),
+        patch(
+            "custom_components.adjustable_bed.config_flow.read_ble_device_info",
+            AsyncMock(return_value=(None, None)),
+        ),
+    ):
+        progress = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={CONF_PREFERRED_ADAPTER: "auto"}
+        )
+        assert progress["type"] == FlowResultType.SHOW_PROGRESS
+        assert progress["step_id"] == "setup_progress"
+        # The view names the bed and the Bluetooth action under way.
+        assert progress["progress_action"] in {
+            "locating",
+            "connecting",
+            "discovering_services",
+            "reading_capabilities",
+            "disconnecting",
+        }
+        assert progress["description_placeholders"]["name"] == "Test Bed"
+
+        done = await _advance_progress(hass, progress)
+        assert done["step_id"] == "verify_connection"
+
+        created = await hass.config_entries.flow.async_configure(done["flow_id"], user_input={})
+    assert created["type"] == FlowResultType.CREATE_ENTRY
+
+
+async def test_the_probe_runs_once_even_if_the_progress_step_is_re_entered(
+    hass: HomeAssistant,
+    mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+    enable_custom_integrations,
+) -> None:
+    """A refresh or a double submit must not open a second BLE connection."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=mock_bluetooth_service_info
+    )
+    connects = AsyncMock(return_value=_fake_connected_client())
+    with (
+        patch.object(AdjustableBedConfigFlow, "_verification_possible", return_value=True),
+        _patch_gate("hci0", -55),
+        patch("bleak_retry_connector.establish_connection", connects),
+        patch("custom_components.adjustable_bed.config_flow.discover_services", AsyncMock(return_value=True)),
+        patch(
+            "custom_components.adjustable_bed.config_flow.read_ble_device_info",
+            AsyncMock(return_value=(None, None)),
+        ),
+    ):
+        progress = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={CONF_PREFERRED_ADAPTER: "auto"}
+        )
+        # Poll the running step the way a reconnecting frontend would.
+        again = await hass.config_entries.flow.async_configure(progress["flow_id"])
+        assert again["type"] in (FlowResultType.SHOW_PROGRESS, FlowResultType.FORM)
+        await _advance_progress(hass, again)
+
+    assert connects.await_count == 1
+
+
+async def test_a_not_advertising_bed_offers_retry_and_still_allows_finishing(
+    hass: HomeAssistant,
+    mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+    enable_custom_integrations,
+) -> None:
+    """The gate refusal is explained, retryable, and never blocks setup (#458)."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=mock_bluetooth_service_info
+    )
+    with (
+        patch.object(AdjustableBedConfigFlow, "_verification_possible", return_value=True),
+        patch("bleak_retry_connector.establish_connection") as connects,
+    ):
+        progress = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={CONF_PREFERRED_ADAPTER: "auto"}
+        )
+        verify = await _advance_progress(hass, progress)
+        assert verify["step_id"] == "verify_connection"
+        caps = verify["description_placeholders"]["capabilities"]
+        assert "not currently advertising" in caps
+        # Nothing may reach the BLE stack once the gate has refused.
+        connects.assert_not_called()
+
+        # Retry re-runs the check in place rather than restarting the flow.
+        retried = await hass.config_entries.flow.async_configure(
+            verify["flow_id"], user_input={"action": "retry"}
+        )
+        assert retried["type"] == FlowResultType.SHOW_PROGRESS
+        retried = await _advance_progress(hass, retried)
+        assert retried["step_id"] == "verify_connection"
+
+        created = await hass.config_entries.flow.async_configure(
+            retried["flow_id"], user_input={"action": "finish"}
+        )
+    assert created["type"] == FlowResultType.CREATE_ENTRY
+    assert created["data"][CONF_ADDRESS] == mock_bluetooth_service_info.address
+
+
+async def test_abandoning_the_flow_mid_probe_leaves_no_connected_client(
+    hass: HomeAssistant,
+    mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+    enable_custom_integrations,
+) -> None:
+    """Cancellation must not leak the bed's single BLE connection."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=mock_bluetooth_service_info
+    )
+    client = _fake_connected_client()
+    release = asyncio.Event()
+    reached_gatt = asyncio.Event()
+
+    async def _slow_discover(*_args, **_kwargs):
+        reached_gatt.set()
+        await release.wait()
+        return True
+
+    with (
+        patch.object(AdjustableBedConfigFlow, "_verification_possible", return_value=True),
+        _patch_gate("hci0", -55),
+        patch("bleak_retry_connector.establish_connection", AsyncMock(return_value=client)),
+        patch(
+            "custom_components.adjustable_bed.config_flow.discover_services",
+            _slow_discover,
+        ),
+    ):
+        progress = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={CONF_PREFERRED_ADAPTER: "auto"}
+        )
+        assert progress["type"] == FlowResultType.SHOW_PROGRESS
+
+        # Abort only once the worker is genuinely holding an open client.
+        async with asyncio.timeout(5):
+            await reached_gatt.wait()
+
+        hass.config_entries.flow.async_abort(progress["flow_id"])
+        release.set()
+        await hass.async_block_till_done()
+
+    client.disconnect.assert_awaited()

@@ -25,7 +25,21 @@
         "data_description": {
           "action": "Prøv igjen sjekker sengen på nytt uten at du mister innstillingene du nettopp fylte ut."
         }
+      },
+      "setup_progress": {
+        "title": "Sjekker tilkoblingen",
+        "description": "Sjekker **{name}** ({address})…"
       }
+    },
+    "progress": {
+      "locating": "Leter etter sengen…",
+      "connecting": "Kobler til over Bluetooth…",
+      "discovering_services": "Finner Bluetooth-tjenester…",
+      "reading_capabilities": "Leser enhetsinformasjon…",
+      "pairing": "Parer med sengen…",
+      "verifying_bond": "Bekrefter Bluetooth-koblingen…",
+      "disconnecting": "Kobler fra…",
+      "unpairing": "Fjerner Bluetooth-koblingen…"
     }
   }
 }

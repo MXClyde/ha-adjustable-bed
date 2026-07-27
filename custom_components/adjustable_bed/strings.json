@@ -288,7 +288,21 @@
         "data_description": {
           "address": "MAC address in format XX:XX:XX:XX:XX:XX"
         }
+      },
+      "setup_progress": {
+        "title": "Checking the connection",
+        "description": "Checking **{name}** ({address})…"
       }
+    },
+    "progress": {
+      "locating": "Looking for the bed…",
+      "connecting": "Connecting over Bluetooth…",
+      "discovering_services": "Discovering Bluetooth services…",
+      "reading_capabilities": "Reading device information…",
+      "pairing": "Pairing with the bed…",
+      "verifying_bond": "Verifying the Bluetooth bond…",
+      "disconnecting": "Disconnecting…",
+      "unpairing": "Removing the Bluetooth bond…"
     },
     "abort": {
       "already_configured": "This Bluetooth address already belongs to an Adjustable Bed entry. Check both active and ignored Adjustable Bed entries under Settings > Devices & services, then reload or reconfigure that entry instead of adding it again.",
