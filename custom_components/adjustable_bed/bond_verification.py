@@ -36,17 +36,18 @@ from typing import TYPE_CHECKING, Any
 
 from .ble_auth import is_ble_authentication_error
 from .bluetooth_transport import ConnectionPath, TransportClass
-from .const import DEVICE_INFO_CHARS, DEVICE_INFO_READ_TIMEOUT, requires_pairing
+from .const import (
+    CONF_BLE_BOND_CONTEXT,
+    DEVICE_INFO_CHARS,
+    DEVICE_INFO_READ_TIMEOUT,
+    requires_pairing,
+)
 
 if TYPE_CHECKING:
     from bleak import BleakClient
 
 _LOGGER = logging.getLogger(__name__)
 
-# Entry-data key holding who owns the bond and how it was proven. Kept separate
-# from the legacy boolean so an entry written by an older version is never
-# mistaken for one with real provenance.
-CONF_BLE_BOND_CONTEXT = "ble_bond_context"
 
 BOND_CONTEXT_VERSION = 1
 
