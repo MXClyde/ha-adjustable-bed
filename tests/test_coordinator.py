@@ -4926,6 +4926,38 @@ class TestBondProvenanceAndTransportGate:
         assert client.disconnect.await_count == 2
         await coordinator.async_shutdown()
 
+    async def test_the_transport_gate_closes_the_link_after_an_unexpected_error(
+        self, hass: HomeAssistant, mock_config_entry
+    ) -> None:
+        """An aborted gate must not leave the bed's connection occupied.
+
+        Only BleakError counts as a failed teardown, so anything else unwinds
+        straight past the fallback close.
+        """
+        from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+
+        mock_config_entry.add_to_hass(hass)
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        client = MagicMock()
+        client.is_connected = True
+
+        async def disconnect() -> None:
+            if client.disconnect.await_count == 1:
+                raise OSError("backend went away")
+            client.is_connected = False
+
+        client.disconnect = AsyncMock(side_effect=disconnect)
+        coordinator._client = client
+
+        with pytest.raises(OSError):
+            async with coordinator.async_transport_operation("unpair"):
+                pytest.fail("the gate must not hand over an occupied bed")
+
+        assert client.disconnect.await_count == 2
+        assert client.is_connected is False
+
+        await coordinator.async_shutdown()
+
     async def test_an_authenticated_read_records_who_owns_the_bond(
         self, hass: HomeAssistant, mock_config_entry
     ) -> None:

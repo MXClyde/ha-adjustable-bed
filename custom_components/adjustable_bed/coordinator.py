@@ -3464,9 +3464,19 @@ class AdjustableBedCoordinator:
             async_get_connect_lock(self.hass, self._address),
         ):
             client = self._client
-            released = await self._async_disconnect_locked(
-                f"transport_operation_{operation}"
-            )
+            try:
+                released = await self._async_disconnect_locked(
+                    f"transport_operation_{operation}"
+                )
+            except Exception:
+                # Only BleakError is handled as a failed teardown; anything else
+                # unwinds before the fallback below can run, and the caller is
+                # about to abort. Try the same fallback close first: an occupied
+                # link is the one thing this gate exists to prevent.
+                if client is not None and client.is_connected:
+                    with contextlib.suppress(Exception):
+                        await client.disconnect()
+                raise
             if client is not None and client.is_connected:
                 # The link outlived the disconnect, either because bleak raised
                 # or because it returned without actually closing the link.
