@@ -24,6 +24,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.adjustable_bed.address_lock import async_get_connect_lock
 from custom_components.adjustable_bed.bluetooth_bond import (
     BluezReadStatus,
     BondRemovalResult,
@@ -411,6 +412,8 @@ class TestPairingPersistence:
         assert flow._pairing_origin_step == step.removeprefix("async_step_")
         assert result["type"] is FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_BLE_BOND_ESTABLISHED] is True
+        assert result["data"][CONF_BLE_BOND_CONTEXT]["source"] == "hci0"
+        assert result["data"][CONF_BLE_BOND_CONTEXT]["adapter"] == "hci0"
 
     @pytest.mark.parametrize("step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"])
     async def test_an_unprovable_existing_bond_is_not_accepted(
@@ -443,6 +446,45 @@ class TestPairingPersistence:
         assert flow.operation.result.outcome is OperationOutcome.BOND_VERIFICATION_INCONCLUSIVE
         assert result["type"] is FlowResultType.FORM
         assert "either way" in result["description_placeholders"]["outcome"]
+
+    @pytest.mark.parametrize("step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"])
+    async def test_a_bond_on_another_local_adapter_is_not_offered(
+        self, hass: HomeAssistant, step: str
+    ) -> None:
+        """A BlueZ bond is usable only through the adapter that owns it."""
+        flow = self._new_pairing_flow(hass)
+        inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+        with (
+            _patch_inventory(inventory),
+            _patch_local_prediction("22:33:44:55:66:77", "hci1"),
+        ):
+            result = await getattr(flow, step)(None)
+
+        options = (
+            result["data_schema"].schema[next(iter(result["data_schema"].schema))].config["options"]
+        )
+        assert options == ["pair_now"]
+
+    @pytest.mark.parametrize("step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"])
+    async def test_a_one_connection_bed_cannot_replace_an_existing_bond(
+        self, hass: HomeAssistant, step: str
+    ) -> None:
+        """Replacement cannot run when setup must preserve the first link."""
+        flow = self._new_pairing_flow(hass)
+        flow._manual_data[CONF_BED_TYPE] = BED_TYPE_LEGGETT_GEN2
+        inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+        with _patch_inventory(inventory), _patch_local_prediction():
+            result = await getattr(flow, step)(None)
+
+        options = (
+            result["data_schema"].schema[next(iter(result["data_schema"].schema))].config["options"]
+        )
+        assert options == ["pair_now", "use_existing_bond"]
+
+        with _patch_inventory(inventory), _patch_local_prediction():
+            rejected = await getattr(flow, step)({"action": "remove_bond_and_pair"})
+        assert rejected["type"] is FlowResultType.FORM
+        assert flow._pairing_remove_record is None
 
     @pytest.mark.parametrize("step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"])
     async def test_an_existing_bond_is_not_offered_without_a_proven_local_path(
@@ -3477,9 +3519,9 @@ def _bond_record(adapter_address: str = "11:22:33:44:55:66") -> LocalBondRecord:
     )
 
 
-def _patch_local_prediction(source: str = "hci0"):
+def _patch_local_prediction(source: str = "11:22:33:44:55:66", adapter: str = "hci0"):
     """Make the predicted path a proven local adapter."""
-    path = ConnectionPath(source=source, transport=TransportClass.LOCAL, adapter=source)
+    path = ConnectionPath(source=source, transport=TransportClass.LOCAL, adapter=adapter)
     return patch(
         "custom_components.adjustable_bed.config_flow.async_predict_path",
         return_value=PathPrediction(chosen=path, paths=(path,)),
@@ -3645,8 +3687,11 @@ async def test_a_confirmed_unpair_clears_the_bond_marker(
         )
         assert progress["type"] == FlowResultType.SHOW_PROGRESS
         assert progress["progress_action"] == "unpairing"
+        await hass.async_block_till_done()
+        # The worker owns this update. Closing the flow before the result screen
+        # must not leave a removed bond recorded as present.
+        assert CONF_BLE_BOND_ESTABLISHED not in mock_config_entry.data
         while progress["type"] == FlowResultType.SHOW_PROGRESS:
-            await hass.async_block_till_done()
             progress = await hass.config_entries.options.async_configure(progress["flow_id"])
 
     assert progress["step_id"] == "unpair_result"
@@ -4014,6 +4059,43 @@ async def test_replacing_a_bond_requires_its_own_confirmation(
     # Naming the adapter matters on a host with more than one.
     assert result["description_placeholders"]["transport"] == "11:22:33:44:55:66"
     removal.assert_not_called()
+
+
+async def test_bond_replacement_holds_the_address_lock_through_pairing(
+    hass: HomeAssistant,
+) -> None:
+    """No competing connector may enter between removal and replacement."""
+    flow = _pairing_flow(hass)
+    flow._pairing_remove_record = _bond_record()
+    flow._pairing_mode = "replace_local"
+    lock = async_get_connect_lock(hass, _bond_record().address)
+    fresh = AdvertisementEvidence(
+        status=FreshnessStatus.FRESH, age_seconds=1.0, rssi=-55, source="hci0"
+    )
+
+    async def remove(_record: LocalBondRecord) -> BondRemovalResult:
+        assert lock.locked()
+        return BondRemovalResult(status=BondRemovalStatus.REMOVED)
+
+    async def pair(*_args: Any, **_kwargs: Any) -> BondEvidence:
+        assert lock.locked()
+        return _verified_evidence()
+
+    with (
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
+            AsyncMock(return_value=(fresh, MagicMock())),
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
+            AsyncMock(side_effect=remove),
+        ),
+        patch.object(flow, "_attempt_pairing", AsyncMock(side_effect=pair)),
+    ):
+        result = await flow._async_pairing_worker()
+
+    assert result.outcome is OperationOutcome.SUCCESS
+    assert not lock.locked()
 
 
 async def test_a_one_connection_bed_defers_pairing_without_removing_a_bond(
@@ -4512,48 +4594,6 @@ async def test_a_legacy_entry_now_routing_through_a_proxy_cannot_unpair(
     removal.assert_not_called()
 
 
-async def test_a_bed_that_defers_pairing_is_not_offered_bond_actions(
-    hass: HomeAssistant,
-) -> None:
-    """Offering to replace a bond that setup will never touch is a lie.
-
-    LP Comfort Connect defers bonding to the coordinator's first connection, so
-    picking "remove the existing bond and pair again" here would create the
-    entry with nothing removed and nothing paired.
-    """
-    flow = _pairing_flow(hass)
-    flow._manual_data[CONF_BED_TYPE] = BED_TYPE_LEGGETT_GEN2
-    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
-
-    with _patch_inventory(inventory), _patch_local_prediction():
-        result = await flow.async_step_manual_pairing(None)
-
-    options = (
-        result["data_schema"].schema[next(iter(result["data_schema"].schema))].config["options"]
-    )
-    assert options == ["pair_now"]
-    assert "first connection" in result["description_placeholders"]["bond_state"]
-
-
-async def test_an_existing_bond_on_another_adapter_is_not_offered(
-    hass: HomeAssistant,
-) -> None:
-    """A pinned adapter cannot use a bond that lives on a different one."""
-    flow = _pairing_flow(hass)
-    flow._manual_data[CONF_PREFERRED_ADAPTER] = "AA:AA:AA:AA:AA:AA"
-    inventory = LocalBondInventory(
-        status=BluezReadStatus.OK, records=(_bond_record(adapter_address="11:22:33:44:55:66"),)
-    )
-
-    with _patch_inventory(inventory), _patch_local_prediction():
-        result = await flow.async_step_manual_pairing(None)
-
-    options = (
-        result["data_schema"].schema[next(iter(result["data_schema"].schema))].config["options"]
-    )
-    assert options == ["pair_now"]
-
-
 async def test_verifying_an_existing_bond_probes_its_owning_adapter(
     hass: HomeAssistant,
 ) -> None:
@@ -4624,3 +4664,33 @@ async def test_bond_replacement_completes_even_if_the_flow_goes_away(
         await asyncio.wait_for(paired.wait(), timeout=1)
 
     assert paired.is_set()
+
+
+async def test_a_confirmed_unpair_persists_without_the_result_screen(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    """Closing the dialog must not leave the entry claiming a bond BlueZ deleted."""
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        data={**mock_config_entry.data, CONF_BLE_BOND_ESTABLISHED: True},
+    )
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+    removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=_bond_record())
+    with (
+        _patch_inventory(inventory),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
+            AsyncMock(return_value=removed),
+        ),
+    ):
+        confirm = await _open_unpair(hass, mock_config_entry.entry_id)
+        progress = await hass.config_entries.options.async_configure(
+            confirm["flow_id"], user_input={}
+        )
+        assert progress["type"] == FlowResultType.SHOW_PROGRESS
+        # Let the worker finish, then walk away rather than advancing to the
+        # result step that used to own this update.
+        await hass.async_block_till_done()
+        hass.config_entries.options.async_abort(progress["flow_id"])
+
+    assert CONF_BLE_BOND_ESTABLISHED not in mock_config_entry.data
