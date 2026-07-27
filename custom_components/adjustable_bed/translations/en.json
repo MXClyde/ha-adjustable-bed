@@ -330,10 +330,46 @@
         "title": "Pairing result",
         "description": "**{name}**\n\n{outcome}",
         "data": {
-          "action": "What next"
+          "action": "What next",
+          "outcome_no_run": "Outcome: no run",
+          "outcome_verified_local": "Outcome: verified local",
+          "outcome_verified_proxy": "Outcome: verified proxy",
+          "outcome_verified_unknown": "Outcome: verified unknown",
+          "outcome_existing_verified_local": "Outcome: existing verified local",
+          "outcome_existing_verified_proxy": "Outcome: existing verified proxy",
+          "outcome_existing_verified_unknown": "Outcome: existing verified unknown",
+          "outcome_unproven": "Outcome: unproven",
+          "outcome_not_advertising": "Outcome: not advertising",
+          "outcome_auth_failed": "Outcome: auth failed",
+          "outcome_inconclusive": "Outcome: inconclusive",
+          "outcome_unsupported": "Outcome: unsupported",
+          "outcome_removal_failed": "Outcome: removal failed",
+          "outcome_in_use": "Outcome: in use",
+          "outcome_no_slots": "Outcome: no slots",
+          "outcome_timed_out": "Outcome: timed out",
+          "outcome_cancelled": "Outcome: cancelled",
+          "outcome_connection_failed": "Outcome: connection failed"
         },
         "data_description": {
-          "action": "Try again keeps the bed type, adapter and protocol settings you already chose."
+          "action": "Try again keeps the bed type, adapter and protocol settings you already chose.",
+          "outcome_no_run": "❌ Pairing did not run. Select **Try again**.",
+          "outcome_verified_local": "✅ Paired, and the bond was confirmed. It is stored on this Home Assistant host ({transport}).",
+          "outcome_verified_proxy": "✅ Paired, and the bond was confirmed. It is stored on the Bluetooth proxy {transport}, not on Home Assistant, so moving this bed to a different proxy will mean pairing again.",
+          "outcome_verified_unknown": "✅ Paired, and the bond was confirmed. Home Assistant could not tell which adapter or proxy carried it, so it does not know where the bond is stored.",
+          "outcome_existing_verified_local": "✅ The existing bond works. It is stored on this Home Assistant host ({transport}), and setup will use it as it is.",
+          "outcome_existing_verified_proxy": "✅ The existing bond works. It is stored on the Bluetooth proxy {transport}, so moving this bed to a different proxy will mean pairing again.",
+          "outcome_existing_verified_unknown": "✅ The existing bond works, but Home Assistant could not tell which adapter or proxy carried the check, so it does not know where the bond is stored.",
+          "outcome_unproven": "⚠️ Pairing completed, but this bed gives Home Assistant no way to confirm the bond. Setup will finish; the integration will ask to pair again on its first connection rather than assume it worked.",
+          "outcome_not_advertising": "❌ The bed is not advertising, so no connection was attempted. Put it into pairing mode or move it closer to an adapter or proxy, then select **Try again**.",
+          "outcome_auth_failed": "❌ The bed connected, but the link is still unauthenticated, so the bond did not form. Put the bed back into pairing mode and select **Try again**.",
+          "outcome_inconclusive": "⚠️ Home Assistant could not confirm the existing bond either way: the check timed out or the bed does not answer it. The bond may well be fine. You can try again, or pair from scratch if the bed does not respond afterwards.",
+          "outcome_unsupported": "❌ This Bluetooth adapter or proxy cannot pair. ESPHome proxies need ESPHome 2024.3.0 or newer; otherwise pair through a Bluetooth adapter on the Home Assistant host.",
+          "outcome_removal_failed": "⚠️ The existing bond could not be confirmed as removed, so pairing was not attempted. Home Assistant does not know whether that bond is still in place. Try again, and use Remove the Bluetooth bond from the device's options if it persists.",
+          "outcome_in_use": "❌ The bed's Bluetooth connection is already in use. Beds allow only one connection at a time, so close the manufacturer's app and put the physical remote down, then select **Try again**.",
+          "outcome_no_slots": "❌ Every Bluetooth adapter and proxy that can reach this bed is out of free connections. Free one up, or add another proxy, then select **Try again**.",
+          "outcome_timed_out": "❌ The bed stopped responding partway through. Put it back into pairing mode and select **Try again**.",
+          "outcome_cancelled": "❌ Pairing was cancelled.",
+          "outcome_connection_failed": "❌ Could not pair. Another app or the bed's own remote may be holding the bed's connection, or it may be out of range. Select **Try again**."
         }
       },
       "pairing_replace_confirm": {

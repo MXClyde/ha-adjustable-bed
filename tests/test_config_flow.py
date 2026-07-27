@@ -446,10 +446,15 @@ class TestPairingPersistence:
             result = await flow.async_step_pairing_result()
 
         assert flow.operation.result is not None
+        # Inconclusive, not failed: a timed-out check proves nothing either way,
+        # and calling it a failure would push the user into replacing a bond
+        # that may be working.
         assert (
-            flow.operation.result.outcome is OperationOutcome.BOND_VERIFICATION_FAILED
+            flow.operation.result.outcome
+            is OperationOutcome.BOND_VERIFICATION_INCONCLUSIVE
         )
         assert result["type"] is FlowResultType.FORM
+        assert "either way" in result["description_placeholders"]["outcome"]
 
     @pytest.mark.parametrize(
         "step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"]
