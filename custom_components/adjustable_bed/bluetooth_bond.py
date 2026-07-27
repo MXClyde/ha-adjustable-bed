@@ -97,24 +97,24 @@ class LocalBondRecord:
     def is_same_bond_as(self, other: LocalBondRecord) -> bool:
         """Return True when two reads describe the same BlueZ bond.
 
-        Identity is the device object, the adapter holding it and - whenever
-        both reads name it - that adapter's own MAC. Object paths are reusable:
-        swapping a host dongle can hand ``hci0``, and therefore this bed's
-        deterministic device path, to different hardware than the one named in
-        the confirmation the user approved.
+        Identity is the device object, the adapter holding it, and that
+        adapter's own MAC. Both reads must name the MAC, because every other
+        field here is reusable: swapping a host dongle can hand ``hci0``, and
+        with it this bed's deterministic device path, to different hardware than
+        the one named in the confirmation the user approved. A record whose
+        adapter address BlueZ did not publish cannot rule that out, so it never
+        answers True - this method exists to authorize destroying a bond, and
+        "probably the same one" is not a basis for that.
 
         Whole-dataclass equality would instead also compare ``connected`` and
         ``trusted``, which change while a confirmation dialog is open and would
         refuse a removal the user already approved for exactly this bond.
         """
-        if (
-            self.adapter_address is not None
-            and other.adapter_address is not None
-            and self.adapter_address.upper() != other.adapter_address.upper()
-        ):
+        if self.adapter_address is None or other.adapter_address is None:
             return False
         return (
-            self.device_path == other.device_path
+            self.adapter_address.upper() == other.adapter_address.upper()
+            and self.device_path == other.device_path
             and self.adapter_path == other.adapter_path
             and self.address.upper() == other.address.upper()
             and self.has_bond == other.has_bond

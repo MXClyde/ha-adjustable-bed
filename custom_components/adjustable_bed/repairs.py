@@ -48,6 +48,7 @@ from .bond_verification import (
     BondOwner,
     BondVerificationStatus,
     bond_context_matches,
+    bond_owner_from_entry,
     build_bond_context,
 )
 from .const import (
@@ -274,6 +275,25 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
         entry = self._entry()
         return entry is not None and is_paired(entry.data)
 
+    def _proxy_bond_recorded(self) -> bool:
+        """Return True when this entry records a bond that a proxy made.
+
+        An authentication failure carried by a proxy is not by itself evidence
+        that the proxy holds a bond. The coordinator reports exactly the same
+        evidence for a bed that is simply not bonded: ``pair=True`` fails, the
+        fallback connects without pairing, and the auth-gated read then reports
+        insufficient authentication. Sending that user to read-only guidance
+        tells them to factory-reset or reflash a proxy, which erases every
+        unrelated bond on it and still leaves this bed unpaired.
+
+        Provenance is the independent signal, because it is only ever written
+        from a verification that positively proved a bond.
+        """
+        entry = self._entry()
+        if entry is None or not entry.data.get(CONF_BLE_BOND_ESTABLISHED):
+            return False
+        return bond_owner_from_entry(entry.data).transport is TransportClass.PROXY
+
     def _paired_entry_data(self, verified_owner: BondOwner | None) -> dict[str, Any] | None:
         """Return entry data for a repaired bond without stale ownership."""
         entry = self._entry()
@@ -348,12 +368,12 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
             return await self.async_step_stale_bond_confirm()
         if self._offer.eligibility == RecoveryEligibility.KEEPS_FIRST_LINK:
             return await self.async_step_confirm()
-        if evidence_is_proxy_auth_failure(self._issue_data):
-            # A proxy carried an authentication failure, so the suspect bond is
-            # the one it presented, and that lives in a store this host cannot
-            # read. Nothing here can clear it, and offering a host-side action
-            # would only look like it had. Every other proxy failure keeps the
-            # guided pairing below: naming the route is not evidence of a bond.
+        if evidence_is_proxy_auth_failure(self._issue_data) and self._proxy_bond_recorded():
+            # A proxy carried an authentication failure *and* this entry records
+            # a bond the proxy proved, so the suspect is that bond, and it lives
+            # in a store this host cannot read. Nothing here can clear it, and
+            # offering a host-side action would only look like it had. Without
+            # both halves the bed is simply unbonded and keeps guided pairing.
             return await self.async_step_proxy_bond()
         return await self.async_step_confirm()
 
