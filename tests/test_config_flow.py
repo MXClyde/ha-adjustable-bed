@@ -21,7 +21,14 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.adjustable_bed.adapter import AdapterSelectionResult
+from custom_components.adjustable_bed.bluetooth_freshness import (
+    AdvertisementEvidence,
+    FreshnessStatus,
+)
+from custom_components.adjustable_bed.bluetooth_transport import (
+    ConnectionPath,
+    TransportClass,
+)
 from custom_components.adjustable_bed.config_flow import (
     AdjustableBedConfigFlow,
     _default_motor_count,
@@ -2816,6 +2823,36 @@ class TestOptionsFlow:
 # ---------------------------------------------------------------------------
 
 
+def _fresh_gate(
+    source: str,
+    rssi: int,
+    transport: TransportClass = TransportClass.LOCAL,
+) -> tuple[AdvertisementEvidence, MagicMock]:
+    """Return a passing freshness gate result over a given transport.
+
+    The probe no longer picks an adapter itself: it asks the freshness gate
+    whether the bed has actually advertised recently, and only then resolves a
+    device to connect to (issue #458).
+    """
+    path = ConnectionPath(source=source, transport=transport, scanner_name=source, rssi=rssi)
+    evidence = AdvertisementEvidence(
+        status=FreshnessStatus.FRESH,
+        age_seconds=1.0,
+        rssi=rssi,
+        source=source,
+        path=path,
+    )
+    return evidence, MagicMock()
+
+
+def _patch_gate(source: str, rssi: int, transport: TransportClass = TransportClass.LOCAL):
+    """Patch the freshness gate used by the capability probe."""
+    return patch(
+        "custom_components.adjustable_bed.config_flow.async_gate_connection",
+        return_value=_fresh_gate(source, rssi, transport),
+    )
+
+
 def _fake_connected_client() -> MagicMock:
     """Fake BleakClient with one service and a writable characteristic."""
     char = MagicMock()
@@ -2843,19 +2880,9 @@ async def test_verify_connection_success_then_creates_entry(
     assert result["step_id"] == "bluetooth_confirm"
 
     client = _fake_connected_client()
-    selection = AdapterSelectionResult(
-        device=MagicMock(),
-        source="esphome_bedroom",
-        rssi=-60,
-        connectable=True,
-        available_sources=[],
-    )
     with (
         patch.object(AdjustableBedConfigFlow, "_verification_possible", return_value=True),
-        patch(
-            "custom_components.adjustable_bed.config_flow.select_adapter",
-            AsyncMock(return_value=selection),
-        ),
+        _patch_gate("esphome_bedroom", -60, TransportClass.PROXY),
         patch(
             "bleak_retry_connector.establish_connection",
             AsyncMock(return_value=client),
@@ -2877,7 +2904,7 @@ async def test_verify_connection_success_then_creates_entry(
         caps = verify["description_placeholders"]["capabilities"]
         assert "Connected" in caps
         assert "esphome_bedroom" in caps
-        assert "ESPHome proxy" in caps
+        assert "Bluetooth proxy" in caps
         # GATT + device-info details surface in the checklist.
         assert "writable characteristic" in caps
         assert "OKIN" in caps
@@ -2913,19 +2940,9 @@ async def test_verify_connection_warns_when_no_writable_characteristic(
     client.services = [service]
     client.disconnect = AsyncMock()
 
-    selection = AdapterSelectionResult(
-        device=MagicMock(),
-        source="hci0",
-        rssi=-55,
-        connectable=True,
-        available_sources=[],
-    )
     with (
         patch.object(AdjustableBedConfigFlow, "_verification_possible", return_value=True),
-        patch(
-            "custom_components.adjustable_bed.config_flow.select_adapter",
-            AsyncMock(return_value=selection),
-        ),
+        _patch_gate("hci0", -55),
         patch(
             "bleak_retry_connector.establish_connection",
             AsyncMock(return_value=client),
@@ -2964,19 +2981,9 @@ async def test_verify_connection_failure_still_creates_entry(
     )
     assert result["step_id"] == "bluetooth_confirm"
 
-    selection = AdapterSelectionResult(
-        device=MagicMock(),
-        source="hci0",
-        rssi=-72,
-        connectable=True,
-        available_sources=[],
-    )
     with (
         patch.object(AdjustableBedConfigFlow, "_verification_possible", return_value=True),
-        patch(
-            "custom_components.adjustable_bed.config_flow.select_adapter",
-            AsyncMock(return_value=selection),
-        ),
+        _patch_gate("hci0", -72),
         patch(
             "bleak_retry_connector.establish_connection",
             AsyncMock(side_effect=Exception("device busy")),

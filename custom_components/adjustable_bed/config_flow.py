@@ -41,9 +41,17 @@ from .adapter import (
     find_service_info_by_address,
     get_discovered_service_info,
     read_ble_device_info,
-    select_adapter,
 )
 from .address_lock import async_get_connect_lock
+from .bluetooth_freshness import FreshnessStatus, async_gate_connection
+from .bluetooth_transport import (
+    ConnectionPath,
+    async_describe_actual,
+    async_describe_prediction,
+    async_path_for_source,
+    async_predict_path,
+    client_source,
+)
 from .const import (
     ADAPTER_AUTO,
     ALL_PROTOCOL_VARIANTS,
@@ -297,6 +305,14 @@ class CapabilityReport:
     model: str | None = None
     position_feedback: bool = False
     error: str | None = None
+    # Which path the probe expected to take, and which one it really took. They
+    # can differ: Home Assistant re-ranks every scanner when it connects, so a
+    # prediction is never a promise (issue #456).
+    predicted_path: ConnectionPath | None = None
+    actual_path: ConnectionPath | None = None
+    # Set when the bed had not advertised recently enough to be worth calling
+    # establish_connection on at all (issue #458).
+    freshness: FreshnessStatus | None = None
 
 
 class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -422,6 +438,33 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
             self.hass, self.hass.config.language, "config", {DOMAIN}
         )
         return translations.get(f"component.{DOMAIN}.config.{key}", default)
+
+    async def _async_transport_note(
+        self,
+        address: str,
+        preferred_adapter: str | None,
+        bed_type: str | None = None,
+        protocol_variant: str | None = None,
+    ) -> str:
+        """Describe the Bluetooth path setup will most likely take.
+
+        Recomputed on every render of the form rather than captured once when
+        the flow started: which adapters and proxies can see a bed changes from
+        moment to moment, and showing a path that has since disappeared is worse
+        than showing none.
+        """
+        try:
+            prediction = async_predict_path(self.hass, address, preferred_adapter)
+            return await async_describe_prediction(
+                self.hass,
+                prediction,
+                pairing_required=bool(
+                    bed_type and requires_pairing(bed_type, protocol_variant)
+                ),
+            )
+        except Exception:  # noqa: BLE001 - never block setup on a preview
+            _LOGGER.debug("Could not describe the connection path for %s", address, exc_info=True)
+            return ""
 
     async def _get_pairing_instructions(
         self, bed_type: str | None, protocol_variant: str | None = None
@@ -1114,6 +1157,12 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         description_placeholders = {
             "name": self._discovery_info.name or "Unknown",
             "address": self._discovery_info.address.upper(),
+            "transport": await self._async_transport_note(
+                self._discovery_info.address,
+                ADAPTER_AUTO,
+                bed_type,
+                VARIANT_AUTO,
+            ),
         }
 
         # Add detection confidence info for ambiguous cases
@@ -1756,6 +1805,9 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
                 "name": device_name,
                 "address": address,
                 "setup_note": f"\n{octo_split_note}" if octo_split_note else "",
+                "transport": await self._async_transport_note(
+                    address, ADAPTER_AUTO, defaults_bed_type
+                ),
             },
         )
 
@@ -2371,6 +2423,11 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         coordinator can take the bed's single BLE connection afterwards, and it
         never raises: any failure is captured in ``report.error`` so setup stays
         non-blocking.
+
+        Before connecting it checks that the bed has actually advertised
+        recently. Without that check a bed that is asleep or unplugged still
+        looks present in Home Assistant's history, and the probe burns its whole
+        timeout producing a failure that reads like a pairing problem (#458).
         """
         from bleak import BleakClient
         from bleak_retry_connector import establish_connection
@@ -2378,25 +2435,41 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         has_position_feedback = bed_type_has_position_feedback(bed_type, protocol_variant)
         report = CapabilityReport(position_feedback=has_position_feedback)
 
-        try:
-            selection = await select_adapter(self.hass, address, preferred_adapter)
-        except Exception as err:  # noqa: BLE001 - probe is best-effort
-            report.error = str(err) or err.__class__.__name__
-            return report
+        prediction = async_predict_path(self.hass, address, preferred_adapter)
+        report.predicted_path = prediction.chosen
 
-        device = selection.device
-        if device is None:
-            report.error = "device_not_found"
+        evidence, device = async_gate_connection(
+            self.hass,
+            address,
+            source=(
+                preferred_adapter
+                if preferred_adapter and preferred_adapter != ADAPTER_AUTO
+                else None
+            ),
+        )
+        report.freshness = evidence.status
+        report.rssi = evidence.rssi
+        if not evidence.is_fresh or device is None:
+            report.error = "not_advertising"
+            _LOGGER.debug(
+                "Skipping the capability probe for %s: %s", address, evidence.status
+            )
             return report
 
         report.device_found = True
-        report.source = selection.source
-        report.rssi = selection.rssi
-        report.via_proxy = bool(selection.source and "esphome" in selection.source.lower())
+        report.source = evidence.source or (
+            prediction.chosen.source if prediction.chosen else None
+        )
+        report.via_proxy = bool(
+            evidence.path is not None and not evidence.path.owns_host_bond
+        )
 
         client: BleakClient | None = None
         # Hold the address lock until the probe has fully released the client,
         # so its disconnect cannot abort a connect attempt started elsewhere.
+        # Everything for this client's lifetime stays in this one task: the
+        # address lock is reentrant per task, so a helper task would block
+        # rather than re-enter.
         try:
             async with async_get_connect_lock(self.hass, address):
                 try:
@@ -2408,6 +2481,17 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
                         timeout=_PROBE_TIMEOUT_SECONDS,
                     )
                     report.connected = bool(client.is_connected)
+                    # Record the real path straight after the connect, before
+                    # anything else can fail: it is the only moment the routed
+                    # source is known for *this* attempt.
+                    actual_source = client_source(client)
+                    if actual_source:
+                        report.source = actual_source
+                        report.actual_path = async_path_for_source(
+                            self.hass, actual_source, rssi=evidence.rssi
+                        )
+                        if report.actual_path is not None:
+                            report.via_proxy = not report.actual_path.owns_host_bond
                     await discover_services(client, address)
                     services = list(client.services) if client.services else []
                     report.service_count = len(services)
@@ -2435,10 +2519,22 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return report
 
-    @staticmethod
-    def _format_capabilities(report: CapabilityReport) -> str:
+    async def _format_capabilities(self, report: CapabilityReport) -> str:
         """Build the ✅/❌/⚠️/ℹ️ markdown checklist shown in verify_connection."""
         lines: list[str] = []
+
+        if report.freshness is not None and report.freshness is not FreshnessStatus.FRESH:
+            # Distinguished from a failed connection on purpose: the bed never
+            # answered a scan, so telling the user to check the bond or the
+            # adapter would send them after the wrong thing (#458).
+            lines.append(
+                "❌ This bed is not currently advertising, so no connection was attempted."
+            )
+            lines.append(
+                "Wake it (press a button on the remote), put it in pairing mode, or move it "
+                "closer to an adapter or proxy, then select **Retry**."
+            )
+            return "\n".join(lines)
 
         if not report.device_found:
             lines.append("❌ Device not found - it may be out of range or not advertising.")
@@ -2455,14 +2551,22 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
             )
             return "\n".join(lines)
 
-        connected_parts = ["✅ Connected"]
-        if report.source:
-            connected_parts.append(f"via {report.source}")
-        if report.via_proxy:
-            connected_parts.append("(ESPHome proxy)")
-        if report.rssi is not None:
-            connected_parts.append(f"(RSSI {report.rssi} dBm)")
-        lines.append(" ".join(connected_parts))
+        if report.actual_path is not None:
+            lines.append(
+                "✅ "
+                + await async_describe_actual(
+                    self.hass, report.actual_path, report.predicted_path
+                )
+            )
+        else:
+            connected_parts = ["✅ Connected"]
+            if report.source:
+                connected_parts.append(f"via {report.source}")
+            if report.via_proxy:
+                connected_parts.append("(Bluetooth proxy)")
+            if report.rssi is not None:
+                connected_parts.append(f"(RSSI {report.rssi} dBm)")
+            lines.append(" ".join(connected_parts))
 
         if report.service_count:
             services_word = "service" if report.service_count == 1 else "services"
@@ -2514,10 +2618,14 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
         Shown after the confirm/manual step for non-PIN/non-pairing beds. The
         Submit button always finishes setup - a failed probe is informational
         only and never blocks entry creation.
+
+        When the bed was not advertising, the form also offers Retry, which
+        re-runs the check in place. The user can wake the bed and try again
+        without losing everything they already filled in (#458).
         """
         assert self._pending_entry is not None
 
-        if user_input is not None:
+        if user_input is not None and user_input.get("action") != "retry":
             return self.async_create_entry(
                 title=self._pending_title or self._pending_entry.get(CONF_NAME, "Adjustable Bed"),
                 data=self._pending_entry,
@@ -2530,12 +2638,27 @@ class AdjustableBedConfigFlow(ConfigFlow, domain=DOMAIN):
             self._pending_entry.get(CONF_PROTOCOL_VARIANT),
         )
 
+        schema: dict[vol.Marker, Any] = {}
+        if report.freshness is not None and report.freshness is not FreshnessStatus.FRESH:
+            # "Finish" stays the default so Submit keeps meaning what it always
+            # meant here: setup is never blocked by a failed check. Retry is one
+            # click away for the common case of "let me go wake the bed first".
+            schema[vol.Required("action", default="finish")] = SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value="finish", label="Finish setup anyway"),
+                        SelectOptionDict(value="retry", label="Check again"),
+                    ],
+                    mode=SelectSelectorMode.LIST,
+                )
+            )
+
         return self.async_show_form(
             step_id="verify_connection",
-            data_schema=vol.Schema({}),
+            data_schema=vol.Schema(schema),
             description_placeholders={
                 "name": self._pending_entry.get(CONF_NAME) or self._pending_entry[CONF_ADDRESS],
-                "capabilities": self._format_capabilities(report),
+                "capabilities": await self._format_capabilities(report),
             },
         )
 

@@ -42,7 +42,7 @@
       },
       "bluetooth_confirm": {
         "title": "Confirm Adjustable Bed",
-        "description": "Do you want to set up {name} ({address})?\n{detection_note}\n\n{report_note}",
+        "description": "Do you want to set up {name} ({address})?\n{detection_note}\n\n{transport}\n\n{report_note}",
         "data": {
           "bed_type": "Bed type",
           "name": "Name",
@@ -76,7 +76,20 @@
           "disconnect_after_command": "Disconnect from the bed immediately after each command to free up the BLE connection for the physical remote. Recommended for beds that only allow one connection at a time.",
           "idle_disconnect_seconds": "How many seconds to wait before automatically disconnecting when idle (10-300). Lower values free up the connection faster for the physical remote, higher values reduce reconnection overhead.",
           "octo_pin": "PIN code for Octo bed authentication. Required to maintain connection. Leave empty if your bed doesn't require a PIN.",
-          "jensen_pin": "PIN code for Jensen bed authentication. Default PIN is 3060."
+          "jensen_pin": "PIN code for Jensen bed authentication. Default PIN is 3060.",
+          "transport_direct": "Direct Bluetooth",
+          "transport_proxy": "Bluetooth proxy",
+          "transport_unknown": "Bluetooth",
+          "transport_likely": "Likely connection: {kind} · {scanner}{signal}",
+          "transport_signal": " · {rssi} dBm",
+          "transport_none": "⚠️ No Bluetooth adapter or proxy can currently see this device. You can still finish setup; Home Assistant will connect when it appears.",
+          "transport_local_alternative": "A Bluetooth adapter on this Home Assistant host ({scanner}) can also see it, with a weaker signal.",
+          "transport_preferred_unavailable": "⚠️ The selected adapter ({adapter}) cannot currently see this device, so Home Assistant will choose a path automatically.",
+          "transport_not_guaranteed": "Home Assistant picks the path when it connects, so this is a prediction rather than a guarantee.",
+          "transport_proxy_pairing_warning": "⚠️ This bed needs Bluetooth pairing, and pairing over a proxy stores the bond on the proxy rather than on Home Assistant. If you later move the bed to a different proxy or to a Home Assistant adapter, you will have to pair again. Home Assistant also cannot remove a bond that lives on a proxy.",
+          "transport_all_busy": "⚠️ Every adapter that can see this device is currently out of free Bluetooth connections.",
+          "transport_actual": "Connected over: {kind} · {scanner}{signal}",
+          "transport_actual_differs": "Home Assistant used a different path than predicted ({predicted})."
         }
       },
       "manual": {
@@ -88,7 +101,7 @@
       },
       "manual_config": {
         "title": "Configure Bed - {name}",
-        "description": "Configure the bed at {address}.{setup_note}",
+        "description": "Configure the bed at {address}.{setup_note}\n\n{transport}",
         "data": {
           "bed_type": "Bed type",
           "protocol_variant": "Protocol variant",
@@ -243,7 +256,13 @@
       "verify_connection": {
         "title": "Verify Connection",
         "description": "Checked the connection to **{name}** before finishing setup:\n\n{capabilities}\n\nSelect **Submit** to finish. You can finish even if something failed - the integration will keep trying to connect afterwards.",
-        "submit": "Finish setup"
+        "submit": "Finish setup",
+        "data": {
+          "action": "What next"
+        },
+        "data_description": {
+          "action": "Retry checks the bed again without losing the settings you just entered."
+        }
       },
       "diagnostic": {
         "title": "Browse Unsupported BLE Devices",

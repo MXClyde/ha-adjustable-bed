@@ -42,7 +42,7 @@
       },
       "bluetooth_confirm": {
         "title": "Confirm Adjustable Bed",
-        "description": "Do you want to set up {name} ({address})?\n{detection_note}\n\n{report_note}",
+        "description": "Do you want to set up {name} ({address})?\n{detection_note}\n\n{transport}\n\n{report_note}",
         "data": {
           "bed_type": "Bed type",
           "name": "Name",
@@ -63,7 +63,7 @@
           "auto_detect_option": "Auto-detect (recommended)"
         },
         "data_description": {
-          "bed_type": "Auto-detected bed type. Change if detection was incorrect.",
+          "bed_type": "Auto-detected bed type. Change if detection was incorrect. Options are controller protocols, not mattress brands; example beds are shown in parentheses. See the Supported Actuators guide if unsure.",
           "motor_count": "Number of physical actuators. Malouf/Lucid beds use the separate actuator-layout setting below.",
           "malouf_layout": "Physical controls on the remote. This is independent of BLE protocol: Lucid L600 beds have shipped with multiple protocols.",
           "malouf_memory_slots": "Number of memory buttons on the physical remote. Auto exposes one for a two-motor L600-style layout and two for other layouts.",
@@ -76,7 +76,20 @@
           "disconnect_after_command": "Disconnect from the bed immediately after each command to free up the BLE connection for the physical remote. Recommended for beds that only allow one connection at a time.",
           "idle_disconnect_seconds": "How many seconds to wait before automatically disconnecting when idle (10-300). Lower values free up the connection faster for the physical remote, higher values reduce reconnection overhead.",
           "octo_pin": "PIN code for Octo bed authentication. Required to maintain connection. Leave empty if your bed doesn't require a PIN.",
-          "jensen_pin": "PIN code for Jensen bed authentication. Default PIN is 3060."
+          "jensen_pin": "PIN code for Jensen bed authentication. Default PIN is 3060.",
+          "transport_direct": "Direct Bluetooth",
+          "transport_proxy": "Bluetooth proxy",
+          "transport_unknown": "Bluetooth",
+          "transport_likely": "Likely connection: {kind} · {scanner}{signal}",
+          "transport_signal": " · {rssi} dBm",
+          "transport_none": "⚠️ No Bluetooth adapter or proxy can currently see this device. You can still finish setup; Home Assistant will connect when it appears.",
+          "transport_local_alternative": "A Bluetooth adapter on this Home Assistant host ({scanner}) can also see it, with a weaker signal.",
+          "transport_preferred_unavailable": "⚠️ The selected adapter ({adapter}) cannot currently see this device, so Home Assistant will choose a path automatically.",
+          "transport_not_guaranteed": "Home Assistant picks the path when it connects, so this is a prediction rather than a guarantee.",
+          "transport_proxy_pairing_warning": "⚠️ This bed needs Bluetooth pairing, and pairing over a proxy stores the bond on the proxy rather than on Home Assistant. If you later move the bed to a different proxy or to a Home Assistant adapter, you will have to pair again. Home Assistant also cannot remove a bond that lives on a proxy.",
+          "transport_all_busy": "⚠️ Every adapter that can see this device is currently out of free Bluetooth connections.",
+          "transport_actual": "Connected over: {kind} · {scanner}{signal}",
+          "transport_actual_differs": "Home Assistant used a different path than predicted ({predicted})."
         }
       },
       "manual": {
@@ -88,7 +101,7 @@
       },
       "manual_config": {
         "title": "Configure Bed - {name}",
-        "description": "Configure the bed at {address}.{setup_note}",
+        "description": "Configure the bed at {address}.{setup_note}\n\n{transport}",
         "data": {
           "bed_type": "Bed type",
           "protocol_variant": "Protocol variant",
@@ -105,6 +118,7 @@
           "idle_disconnect_seconds": "Idle disconnect timeout (seconds)"
         },
         "data_description": {
+          "bed_type": "Options are controller protocols, not mattress brands; example beds are shown in parentheses. See the Supported Actuators guide if unsure.",
           "protocol_variant": "Leave as 'auto' unless you know the specific protocol. Keeson: base (Member's Mark/Purple) or ksbt (KSBT03/KSBT04, including some Ergomotion Sync beds). Leggett: gen2 (most common) or okin. Richmat: auto-detected.",
           "motor_count": "Number of physical actuators. Malouf/Lucid beds use the separate actuator-layout setting below.",
           "malouf_layout": "Physical controls on the remote. This is independent of BLE protocol: Lucid L600 beds have shipped with multiple protocols.",
@@ -138,6 +152,7 @@
         },
         "data_description": {
           "address": "MAC address in format XX:XX:XX:XX:XX:XX (found in the bed's Bluetooth settings or on a label).",
+          "bed_type": "Options are controller protocols, not mattress brands; example beds are shown in parentheses. See the Supported Actuators guide if unsure.",
           "protocol_variant": "Leave as 'auto' unless you know the specific protocol. Keeson: base (Member's Mark/Purple) or ksbt (KSBT03/KSBT04, including some Ergomotion Sync beds). Leggett: gen2 (most common) or okin. Richmat: auto-detected.",
           "motor_count": "Number of physical actuators. Malouf/Lucid beds use the separate actuator-layout setting below.",
           "malouf_layout": "Physical controls on the remote. This is independent of BLE protocol: Lucid L600 beds have shipped with multiple protocols.",
@@ -241,7 +256,13 @@
       "verify_connection": {
         "title": "Verify Connection",
         "description": "Checked the connection to **{name}** before finishing setup:\n\n{capabilities}\n\nSelect **Submit** to finish. You can finish even if something failed - the integration will keep trying to connect afterwards.",
-        "submit": "Finish setup"
+        "submit": "Finish setup",
+        "data": {
+          "action": "What next"
+        },
+        "data_description": {
+          "action": "Retry checks the bed again without losing the settings you just entered."
+        }
       },
       "diagnostic": {
         "title": "Browse Unsupported BLE Devices",
@@ -854,6 +875,9 @@
     },
     "invalid_position_range": {
       "message": "Position {position} is out of range for motor \"{motor}\". Valid range: 0-{max_value}{unit}."
+    },
+    "multiple_device_targets_not_supported": {
+      "message": "Support bundle generation only supports one configured device at a time. Select a single device or use target_address for an unconfigured bed."
     }
   },
   "issues": {

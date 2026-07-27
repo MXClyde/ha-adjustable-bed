@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "bluetooth_confirm": {
+        "data_description": {
+          "transport_direct": "Direkte Bluetooth",
+          "transport_proxy": "Bluetooth-proxy",
+          "transport_unknown": "Bluetooth",
+          "transport_likely": "Sannsynlig tilkobling: {kind} · {scanner}{signal}",
+          "transport_signal": " · {rssi} dBm",
+          "transport_none": "⚠️ Ingen Bluetooth-adapter eller proxy ser denne enheten akkurat nå. Du kan likevel fullføre oppsettet; Home Assistant kobler til når den dukker opp.",
+          "transport_local_alternative": "En Bluetooth-adapter på denne Home Assistant-verten ({scanner}) ser den også, med svakere signal.",
+          "transport_preferred_unavailable": "⚠️ Den valgte adapteren ({adapter}) ser ikke denne enheten akkurat nå, så Home Assistant velger vei automatisk.",
+          "transport_not_guaranteed": "Home Assistant velger vei i det den kobler til, så dette er en antakelse og ingen garanti.",
+          "transport_proxy_pairing_warning": "⚠️ Denne sengen krever Bluetooth-paring, og paring via en proxy lagrer koblingen på proxyen i stedet for på Home Assistant. Flytter du senere sengen til en annen proxy eller til en adapter på Home Assistant, må du pare på nytt. Home Assistant kan heller ikke fjerne en kobling som ligger på en proxy.",
+          "transport_all_busy": "⚠️ Alle adaptere som ser denne enheten er tomme for ledige Bluetooth-tilkoblinger.",
+          "transport_actual": "Koblet til via: {kind} · {scanner}{signal}",
+          "transport_actual_differs": "Home Assistant brukte en annen vei enn antatt ({predicted})."
+        }
+      },
+      "verify_connection": {
+        "data": {
+          "action": "Hva nå"
+        },
+        "data_description": {
+          "action": "Prøv igjen sjekker sengen på nytt uten at du mister innstillingene du nettopp fylte ut."
+        }
+      }
+    }
+  }
+}
