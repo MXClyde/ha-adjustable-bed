@@ -412,7 +412,7 @@
       },
       "unpair": {
         "title": "Remove the Bluetooth bond",
-        "description": "This removes the Bluetooth bond that **{name}** ({address}) has with this Home Assistant host.\n\n**Bond stored on:** {transport}\n\nHome Assistant will disconnect from the bed first. Afterwards the bed will need pairing again before it can be controlled, and you may need to put it back into pairing mode to do that.\n\nThis does **not** delete the Adjustable Bed device or its settings. Select **Submit** to remove the bond, or go back to leave it alone."
+        "description": "This removes the Bluetooth bond that **{name}** ({address}) has with this Home Assistant host.\n\n**Bond stored on:** {transport}{provenance}\n\nHome Assistant will disconnect from the bed first. Afterwards the bed will need pairing again before it can be controlled, and you may need to put it back into pairing mode to do that.\n\nThis does **not** delete the Adjustable Bed device or its settings. Select **Submit** to remove the bond, or go back to leave it alone."
       },
       "unpair_result": {
         "title": "Bluetooth bond",
@@ -433,7 +433,8 @@
       "unpair_proxy_owned": "**{name}** is paired through a Bluetooth proxy ({transport}), not through this Home Assistant host, so Home Assistant cannot remove that bond. The bond lives on the proxy itself: clear it there (an ESPHome proxy forgets its bonds when it is reflashed or factory reset), or set the bed's preferred adapter to a Bluetooth adapter on this host and pair again.",
       "unpair_no_bond": "This Home Assistant host has no Bluetooth bond stored for **{name}** ({address}), so there is nothing to remove.",
       "unpair_bluez_unavailable": "Home Assistant could not read the Bluetooth bonds on this host, so it will not try to remove one. This usually means it has no local Bluetooth adapter, or no access to the system D-Bus.",
-      "unpair_ambiguous": "More than one Bluetooth adapter on this host is bonded to **{name}** ({address}), and Home Assistant cannot tell which one you mean. Set the bed's preferred adapter to the one you want to clear, then try again."
+      "unpair_ambiguous": "Home Assistant cannot tell which Bluetooth bond you mean for **{name}** ({address}). Either more than one adapter on this host is bonded to it, or the adapter it was paired through no longer holds a bond. Set the bed's preferred adapter to the one you want to clear, then try again.",
+      "unpair_changed": "The Bluetooth bonds on this host changed while the confirmation was open, so nothing was removed. Open **Remove the Bluetooth bond** again to see the current state and confirm from there."
     }
   },
   "entity": {
