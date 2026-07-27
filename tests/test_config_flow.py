@@ -4293,3 +4293,95 @@ async def test_a_confirmed_unpair_persists_without_the_result_screen(
         hass.config_entries.options.async_abort(progress["flow_id"])
 
     assert CONF_BLE_BOND_ESTABLISHED not in mock_config_entry.data
+
+
+async def test_a_detected_usable_bond_is_the_default_action(hass: HomeAssistant) -> None:
+    """Submitting the form unchanged must not re-pair on top of a good bond."""
+    flow = _pairing_flow(hass)
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+
+    with _patch_inventory(inventory), _patch_local_prediction():
+        result = await flow.async_step_manual_pairing(None)
+
+    key = next(iter(result["data_schema"].schema))
+    assert key.default() == "use_existing_bond"
+
+
+async def test_a_legacy_entry_can_unpair_the_adapter_it_is_pinned_to(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    """Without provenance, the route the bed will use answers "which adapter"."""
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        data={
+            **mock_config_entry.data,
+            CONF_BLE_BOND_ESTABLISHED: True,
+            CONF_PREFERRED_ADAPTER: "11:22:33:44:55:66",
+        },
+    )
+    # Two bonded adapters and no recorded owner: ambiguous unless the chosen
+    # route is allowed to pick.
+    inventory = LocalBondInventory(
+        status=BluezReadStatus.OK,
+        records=(
+            _bond_record(adapter_address="11:22:33:44:55:66"),
+            LocalBondRecord(
+                address=_BONDED_ADDRESS,
+                device_path="/org/bluez/hci1/dev_AA_BB_CC_DD_EE_FF",
+                adapter_path="/org/bluez/hci1",
+                adapter_address="22:33:44:55:66:77",
+                paired=True,
+                bonded=True,
+            ),
+        ),
+    )
+    with _patch_inventory(inventory), _patch_local_prediction("11:22:33:44:55:66", "hci0"):
+        result = await _open_unpair(hass, mock_config_entry.entry_id)
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "unpair"
+    assert result["description_placeholders"]["transport"] == "11:22:33:44:55:66"
+
+
+async def test_a_confirmed_removal_survives_a_cancelled_dialog(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    """Cancelling mid-removal must not strand the entry's bond markers.
+
+    BlueZ may already have accepted RemoveDevice when the user closes the
+    dialog, and an entry that still claims a bond makes every later connection
+    skip pairing.
+    """
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        data={**mock_config_entry.data, CONF_BLE_BOND_ESTABLISHED: True},
+    )
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+    removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=_bond_record())
+    inside = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_removal(_record: LocalBondRecord) -> BondRemovalResult:
+        inside.set()
+        await release.wait()
+        return removed
+
+    with (
+        _patch_inventory(inventory),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
+            _slow_removal,
+        ),
+    ):
+        confirm = await _open_unpair(hass, mock_config_entry.entry_id)
+        progress = await hass.config_entries.options.async_configure(
+            confirm["flow_id"], user_input={}
+        )
+        assert progress["type"] == FlowResultType.SHOW_PROGRESS
+        await inside.wait()
+        # The user closes the dialog while BlueZ is mid-removal.
+        hass.config_entries.options.async_abort(progress["flow_id"])
+        release.set()
+        await hass.async_block_till_done()
+
+    assert CONF_BLE_BOND_ESTABLISHED not in mock_config_entry.data
