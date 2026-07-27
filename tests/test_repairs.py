@@ -1470,3 +1470,49 @@ async def test_a_proxy_authentication_failure_still_gets_proxy_guidance(
         result = await flow.async_step_init()
 
     assert result["step_id"] == "proxy_bond"
+
+
+async def test_a_one_connection_bed_with_a_proxy_bond_still_gets_proxy_guidance(
+    hass: HomeAssistant,
+) -> None:
+    """Recovery eligibility answers KEEPS_FIRST_LINK before it looks at transport.
+
+    A Gen2 bed whose stale bond lives on a proxy would otherwise be sent to the
+    pairing form, which cannot reach the proxy's bond store and hits the same
+    authentication failure again.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_LEGGETT_GEN2,
+            CONF_BLE_BOND_ESTABLISHED: True,
+            CONF_BLE_BOND_CONTEXT: {
+                "version": 1,
+                "transport": "proxy",
+                "source": "bedroom-proxy",
+                "adapter": None,
+            },
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_gen2_proxy_entry",
+    )
+    entry.add_to_hass(hass)
+
+    flow = PairingRequiredRepairFlow(
+        TEST_ADDRESS,
+        TEST_NAME,
+        entry.entry_id,
+        issue_data={
+            "evidence_status": "auth_failed",
+            "evidence_transport": "proxy",
+            "evidence_source": "bedroom-proxy",
+        },
+    )
+    flow.hass = hass
+
+    result = await flow.async_step_init()
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "proxy_bond"

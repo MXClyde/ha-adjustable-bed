@@ -434,7 +434,7 @@ def _every_route_holds_bond(
     inventory: LocalBondInventory,
     record: LocalBondRecord,
 ) -> bool:
-    """Return True when every route that could connect holds ``record``.
+    """Return True when every route that may ever connect holds ``record``.
 
     ``prediction.chosen`` is advisory by design: Home Assistant re-ranks every
     connectable scanner inside ``connect()``, so a route is only certain when
@@ -442,11 +442,18 @@ def _every_route_holds_bond(
     that suppresses ``pair=True`` without ever connecting, so betting on the
     prediction costs an ordinary bed a failed authentication and a retry, and a
     bed that grants one connection per pairing window its whole window.
+
+    Every enumerated route counts, including one that cannot take a connection
+    at this instant. ``can_connect`` is free-slot state and nothing more: a
+    proxy that is out of slots now can have one free before the entry's first
+    connection, and certifying against that snapshot is the same bet on a
+    changing value. ``connectable`` is no better a filter, since the path
+    enumeration itself falls back to the non-connectable view for proxies that
+    misclassify a bed they can in fact reach.
     """
-    routes = tuple(path for path in prediction.paths if path.can_connect)
-    if not routes:
+    if not prediction.paths:
         return False
-    for path in routes:
+    for path in prediction.paths:
         if path.transport is not TransportClass.LOCAL:
             return False
         selection = select_local_bond(

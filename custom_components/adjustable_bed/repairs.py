@@ -366,15 +366,21 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
             )
         if self._offer.is_eligible:
             return await self.async_step_stale_bond_confirm()
-        if self._offer.eligibility == RecoveryEligibility.KEEPS_FIRST_LINK:
-            return await self.async_step_confirm()
         if evidence_is_proxy_auth_failure(self._issue_data) and self._proxy_bond_recorded():
             # A proxy carried an authentication failure *and* this entry records
             # a bond the proxy proved, so the suspect is that bond, and it lives
             # in a store this host cannot read. Nothing here can clear it, and
             # offering a host-side action would only look like it had. Without
             # both halves the bed is simply unbonded and keeps guided pairing.
+            #
+            # Checked ahead of KEEPS_FIRST_LINK deliberately. async_recovery_offer
+            # answers that first, without looking at the transport, so a bed
+            # granting one connection per pairing window would otherwise be sent
+            # to a pairing form that cannot reach the proxy's bond store and
+            # would hit the identical failure again.
             return await self.async_step_proxy_bond()
+        # Everything else, KEEPS_FIRST_LINK included, is a bed that simply needs
+        # pairing rather than a bond removed.
         return await self.async_step_confirm()
 
     async def async_step_proxy_bond(

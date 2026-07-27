@@ -582,6 +582,55 @@ class TestPairingPersistence:
         assert CONF_BLE_BOND_CONTEXT not in deferred["data"]
 
     @pytest.mark.parametrize("step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"])
+    async def test_a_bond_is_not_certified_against_a_momentarily_busy_route(
+        self, hass: HomeAssistant, step: str
+    ) -> None:
+        """A proxy with no free slot right now is still a possible bond owner.
+
+        ``can_connect`` is free-slot state and nothing else, so a proxy that is
+        out of slots while the form is drawn can have one free by the time the
+        entry makes its first connection. Certifying against that snapshot bets
+        on a value that changes, which is the whole reason the predicted path
+        cannot be trusted either.
+
+        On this branch the certifying short-circuit is the only path that
+        asserts a bond without connecting, so that is where the busy route has
+        to be counted. The ordinary action still connects and proves itself.
+        """
+        flow = self._new_pairing_flow(hass)
+        flow._manual_data[CONF_BED_TYPE] = BED_TYPE_LEGGETT_GEN2
+        inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+        bonded = ConnectionPath(
+            source="11:22:33:44:55:66", transport=TransportClass.LOCAL, adapter="hci0"
+        )
+        busy_proxy = ConnectionPath(
+            source="bedroom-proxy",
+            transport=TransportClass.PROXY,
+            can_connect=False,
+        )
+        contested = patch(
+            "custom_components.adjustable_bed.config_flow.async_predict_path",
+            return_value=PathPrediction(chosen=bonded, paths=(bonded, busy_proxy)),
+        )
+
+        # A bed that defers pairing cannot prove anything, so the action is
+        # withheld rather than offered as a duplicate of Pair now.
+        with _patch_inventory(inventory), contested:
+            result = await getattr(flow, step)(None)
+
+        options = (
+            result["data_schema"].schema[next(iter(result["data_schema"].schema))].config["options"]
+        )
+        assert "use_existing_bond" not in options
+        assert "route" in result["description_placeholders"]["bond_state"].lower()
+
+        # And submitting it anyway certifies nothing: the action matches no
+        # branch, so the form is redrawn rather than an entry created.
+        with _patch_inventory(inventory), contested, patch.object(flow, "_attempt_pairing"):
+            refused = await getattr(flow, step)({"action": "use_existing_bond"})
+        assert refused["type"] is FlowResultType.FORM
+
+    @pytest.mark.parametrize("step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"])
     async def test_a_one_connection_bed_cannot_replace_an_existing_bond(
         self, hass: HomeAssistant, step: str
     ) -> None:
