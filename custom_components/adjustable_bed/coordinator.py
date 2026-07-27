@@ -42,6 +42,14 @@ from .adapter import (
 )
 from .address_lock import async_get_connect_lock
 from .ble_auth import is_ble_authentication_error
+from .bluetooth_transport import ConnectionPath, async_path_for_source
+from .bond_verification import (
+    CONF_BLE_BOND_CONTEXT,
+    BondEvidence,
+    BondOwner,
+    BondVerificationStatus,
+    bond_owner_from_entry,
+)
 from .const import (
     ADAPTER_AUTO,
     BED_MOTOR_PULSE_DEFAULTS,
@@ -329,6 +337,11 @@ class AdjustableBedCoordinator:
         self._last_connected: datetime | None = None
         self._last_disconnected: datetime | None = None
         self._connection_source: str | None = None
+        # The structured path of the live link, and the evidence behind the last
+        # authentication failure. Both exist so stale-bond recovery can be
+        # scoped to the transport that actually saw the failure (issue #459).
+        self._connection_path: ConnectionPath | None = None
+        self._last_bond_evidence: BondEvidence | None = None
         self._connection_rssi: int | None = None
 
         # BLE Device Information Service data
@@ -930,6 +943,18 @@ class AdjustableBedCoordinator:
         self._record_bond_verification(
             "authentication_failed", err, attempt_details
         )
+        # Attribute the failure to a transport. A host bond and a proxy bond are
+        # separate state, so evidence carried by one says nothing about the
+        # other, and recovery must never act on the wrong one. Nothing
+        # destructive happens here: the marker is cleared and a repair is
+        # raised, and removing a real bond stays an explicit, confirmed action.
+        self._last_bond_evidence = BondEvidence(
+            status=BondVerificationStatus.AUTH_FAILED,
+            owner=BondOwner.from_path(self._connection_path),
+            operation="runtime_gatt_access",
+            observed_at=datetime.now(UTC).isoformat(),
+            error=str(err),
+        )
         # A definitive authentication failure invalidates any earlier decision
         # to skip a probe that timed out. The next paired connection should
         # verify the fresh bond again.
@@ -1255,6 +1280,31 @@ class AdjustableBedCoordinator:
             "transient_skip_next_attempt": self._skip_pair_next_attempt,
             "bond_probe_timed_out": self._bond_probe_timed_out,
             "last_bond_verification": dict(self._last_bond_verification),
+            # Everything #459 asks diagnostics to record about a bond: which
+            # path was predicted, which was used, who owns the bond, what the
+            # evidence was, and what was done about it.
+            "connection_path": (
+                {
+                    "source": self._connection_path.source,
+                    "transport": str(self._connection_path.transport),
+                    "scanner_name": self._connection_path.scanner_name,
+                    "adapter": self._connection_path.adapter,
+                }
+                if self._connection_path is not None
+                else None
+            ),
+            "bond_owner": bond_owner_from_entry(self.entry.data).as_dict(),
+            "bond_context": self.entry.data.get(CONF_BLE_BOND_CONTEXT),
+            "last_bond_evidence": (
+                self._last_bond_evidence.as_dict()
+                if self._last_bond_evidence is not None
+                else None
+            ),
+            "stale_host_bond_suspected": bool(
+                self._last_bond_evidence is not None
+                and self._last_bond_evidence.proves_stale_host_bond
+            ),
+            "recovery_action": "repair_issue_raised",
             "backend_reports": self._device_pairing_states(),
             "connection_attempts": pairing_attempts,
         }
@@ -2565,6 +2615,9 @@ class AdjustableBedCoordinator:
                 self._connecting = False
                 self._last_connected = datetime.now(UTC)
                 self._connection_source = actual_adapter
+                self._connection_path = async_path_for_source(
+                    self.hass, actual_adapter, rssi=adapter_result.rssi
+                )
                 self._connection_rssi = adapter_result.rssi
                 self._notify_connection_state_change(True)
                 self._connection_attempt_details.append(attempt_details)
@@ -3072,6 +3125,31 @@ class AdjustableBedCoordinator:
 
         async with self._lock:
             await self._async_disconnect_locked(reason)
+
+    async def async_prepare_for_transport_operation(self, operation: str) -> None:
+        """Take the bed fully out of use so a transport operation can proceed.
+
+        Removing or recreating a Bluetooth bond must not race a command or a
+        reconnect. Doing that safely means acquiring the same locks in the same
+        order the rest of the coordinator does - command lock, then connection
+        lock - because an unpair that grabbed the address lock first could
+        deadlock against a command that already holds the command lock and is
+        waiting for the address.
+
+        Callers get a bed that is disconnected, with its idle and reconnect
+        timers cancelled, and an ``_intentional_disconnect`` flag set so nothing
+        reconnects underneath them. A failure to reach that state raises, so the
+        caller can refuse to touch the bond rather than remove it blindly.
+        """
+        _LOGGER.info(
+            "Releasing %s for a %s operation", self._address, operation
+        )
+        async with self._command_lock, self._lock:
+            await self._async_disconnect_locked(f"transport_operation_{operation}")
+            if self._client is not None and self._client.is_connected:
+                raise RuntimeError(
+                    f"Could not release the Bluetooth connection to {self._address}"
+                )
 
     async def _async_disconnect_locked(self, reason: str = "intentional") -> None:
         """Disconnect from the bed. The caller MUST already hold ``self._lock``.
