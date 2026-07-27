@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 import voluptuous as vol
 from homeassistant.components.bluetooth import (
@@ -22,6 +22,7 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.const import __version__ as HA_VERSION
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.selector import (
     SelectOptionDict,
     SelectSelector,
@@ -233,6 +234,46 @@ def _classify_connection_failure(err: BaseException) -> OperationOutcome:
     if "timed out" in message or "timeout" in message:
         return OperationOutcome.TIMEOUT
     return OperationOutcome.CONNECTION_FAILED
+async def _async_translation(
+    hass: HomeAssistant, category: str, key: str, default: str
+) -> str:
+    """Return a translated string from a flow catalogue, or an English default.
+
+    ``category`` is ``config`` or ``options``: Home Assistant keeps them as
+    separate namespaces, and the options flow cannot read config keys.
+    """
+    try:
+        translations = await async_get_translations(
+            hass, hass.config.language, category, {DOMAIN}
+        )
+    except Exception:  # noqa: BLE001 - a missing translation must not block a flow
+        return default
+    return translations.get(f"component.{DOMAIN}.{category}.{key}", default)
+
+# English fallbacks for the pairing form's bond-state line. The shipped text
+# lives in strings.json; these only apply if a translation is missing.
+_BOND_STATE_FALLBACKS: Final[dict[str, str]] = {
+    "bond_state_proxy": (
+        "ℹ️ This bed will pair through a Bluetooth proxy, which keeps the bond "
+        "itself. Home Assistant cannot read or remove a bond stored on a proxy, "
+        "so it cannot tell you whether one already exists."
+    ),
+    "bond_state_unreadable": (
+        "ℹ️ Home Assistant could not read the Bluetooth bonds on this host, so it "
+        "cannot tell whether this bed is already paired."
+    ),
+    "bond_state_existing": (
+        "✅ This Home Assistant host already has a Bluetooth bond for this bed. "
+        "You can set it up using that bond, or remove it and pair again."
+    ),
+    "bond_state_multiple": (
+        "⚠️ More than one Bluetooth adapter on this host is bonded to this bed. "
+        "Pairing again will use whichever adapter Home Assistant connects through."
+    ),
+    "bond_state_none": (
+        "ℹ️ This Home Assistant host has no Bluetooth bond for this bed yet."
+    ),
+}
 
 
 class NotAdvertisingError(Exception):
@@ -526,10 +567,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
 
     async def _get_config_translation(self, key: str, default: str) -> str:
         """Return a config-flow translation with a safe English fallback."""
-        translations = await async_get_translations(
-            self.hass, self.hass.config.language, "config", {DOMAIN}
-        )
-        return translations.get(f"component.{DOMAIN}.config.{key}", default)
+        return await _async_translation(self.hass, "config", key, default)
 
     async def _async_transport_note(
         self,
@@ -2278,7 +2316,14 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             prediction.chosen is not None
             and prediction.chosen.transport is TransportClass.PROXY
         )
-        can_use_existing = existing is not None and not over_proxy
+        # "Not a proxy" is not the same as "provably the host". An unknown or
+        # absent path cannot show that the bond BlueZ is holding is the one this
+        # bed will actually use, so it is not offered as usable.
+        proven_local = (
+            prediction.chosen is not None
+            and prediction.chosen.transport is TransportClass.LOCAL
+        )
+        can_use_existing = existing is not None and proven_local and not over_proxy
 
         if user_input is not None:
             action = user_input.get("action")
@@ -2329,37 +2374,34 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     bed_type,
                     variant,
                 ),
-                "bond_state": self._bond_state_note(inventory, over_proxy, can_use_existing),
+                "bond_state": await self._async_bond_state_note(
+                    inventory, over_proxy, can_use_existing
+                ),
             },
         )
 
-    @staticmethod
-    def _bond_state_note(
-        inventory: LocalBondInventory, over_proxy: bool, can_use_existing: bool
+    async def _async_bond_state_note(
+        self, inventory: LocalBondInventory, over_proxy: bool, can_use_existing: bool
     ) -> str:
-        """Say what is already known about this bed's bond, if anything."""
+        """Say what is already known about this bed's bond, if anything.
+
+        Looked up rather than written inline: this is the central status on an
+        otherwise translated form, and building it in Python left Norwegian
+        users reading English exactly where it mattered most.
+        """
         if over_proxy:
-            return (
-                "ℹ️ This bed will pair through a Bluetooth proxy, which keeps the bond "
-                "itself. Home Assistant cannot read or remove a bond stored on a proxy, "
-                "so it cannot tell you whether one already exists."
-            )
-        if not inventory.readable:
-            return (
-                "ℹ️ Home Assistant could not read the Bluetooth bonds on this host, so it "
-                "cannot tell whether this bed is already paired."
-            )
-        if can_use_existing:
-            return (
-                "✅ This Home Assistant host already has a Bluetooth bond for this bed. "
-                "You can set it up using that bond, or remove it and pair again."
-            )
-        if len(inventory.bonded_records) > 1:
-            return (
-                "⚠️ More than one Bluetooth adapter on this host is bonded to this bed. "
-                "Pairing again will use whichever adapter Home Assistant connects through."
-            )
-        return "ℹ️ This Home Assistant host has no Bluetooth bond for this bed yet."
+            key = "bond_state_proxy"
+        elif not inventory.readable:
+            key = "bond_state_unreadable"
+        elif can_use_existing:
+            key = "bond_state_existing"
+        elif len(inventory.bonded_records) > 1:
+            key = "bond_state_multiple"
+        else:
+            key = "bond_state_none"
+        return await self._get_config_translation(
+            f"step.bluetooth_pairing.data_description.{key}", _BOND_STATE_FALLBACKS[key]
+        )
 
     async def async_step_bluetooth_pairing(
         self, user_input: dict[str, Any] | None = None
@@ -2731,13 +2773,15 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         )
 
         prediction = async_predict_path(self.hass, address, preferred_adapter)
-        source = (
-            preferred_adapter
-            if preferred_adapter
-            and preferred_adapter != ADAPTER_AUTO
-            and prediction.preferred_available
-            else None
-        )
+        pinned = bool(preferred_adapter and preferred_adapter != ADAPTER_AUTO)
+        if pinned and not prediction.preferred_available:
+            # Unlike the read-only probe, pairing writes a bond, and a bond
+            # belongs to whichever transport made it. Quietly pairing through
+            # some other adapter would store it somewhere the user did not
+            # choose, and the marker would then claim pairing is done while the
+            # selected adapter is still unauthenticated.
+            raise NotAdvertisingError(FreshnessStatus.SOURCE_UNAVAILABLE)
+        source = preferred_adapter if pinned else None
         # Someone who just put a bed into pairing mode is standing at the bed and
         # expects to wait, so this wait is longer than the setup probe's.
         evidence, device = await async_wait_for_advertisement(
@@ -2782,13 +2826,13 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             try:
                 # The routed transport is only knowable now, and it decides who
                 # owns any bond this attempt creates.
+                # Ownership has to come from the route actually taken. A
+                # prediction is explicitly not a guarantee, and recording one as
+                # the bond owner could persist "local" for a bond stored on a
+                # proxy, later authorizing removal of an unrelated host bond.
                 actual_source = client_source(client)
-                path = (
-                    async_path_for_source(self.hass, actual_source)
-                    if actual_source
-                    else prediction.chosen
-                )
-                self.async_report_path(path)
+                path = async_path_for_source(self.hass, actual_source) if actual_source else None
+                self.async_report_path(path or prediction.chosen)
 
                 if pair_after_service_discovery:
                     _LOGGER.info(
@@ -3338,6 +3382,11 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
         # The exact BlueZ record the user confirmed removing, captured at the
         # confirmation step so the removal cannot drift onto a different one.
         self._unpair_record: LocalBondRecord | None = None
+        # True once the unpair result form has been drawn, and once its state
+        # update has been applied. Both guard against Home Assistant replaying
+        # the confirmation's input into the result step.
+        self._unpair_result_shown: bool = False
+        self._unpair_state_applied: bool = False
 
     @staticmethod
     def _variant_for_bed_type(bed_type: str, data: dict[str, Any]) -> str:
@@ -3780,9 +3829,13 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 requested_variant,
             ):
                 # These markers describe the old protocol's authentication
-                # requirements and must not steer pairing for the new one.
+                # requirements and must not steer pairing for the new one. That
+                # includes the recorded owner: leaving stale proxy provenance
+                # behind would keep blocking Unpair after the new protocol has
+                # established a perfectly ordinary local bond.
                 new_data.pop(CONF_BLE_BOND_ESTABLISHED, None)
                 new_data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
+                new_data.pop(CONF_BLE_BOND_CONTEXT, None)
             # Record that the stored cadence is the user's choice rather than a
             # value the flow generated, so protocol migrations leave it alone.
             # The pulse fields are always present in this form, so saving it at
@@ -3837,6 +3890,24 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
         # bond the user has in mind is worse than no button.
         if owner.transport is TransportClass.PROXY:
             return self._async_abort_unpair("proxy_owned", name, address, owner)
+
+        if not owner.is_host:
+            # No recorded owner, which is every entry paired before provenance
+            # existed. The host's own BlueZ still holds a record for this exact
+            # address, so there is something concrete to remove, but if the bed
+            # is currently routing through a proxy then the bond that matters to
+            # the user lives there and this one is a leftover. Refuse rather
+            # than act on a guess about which the user means.
+            prediction = async_predict_path(
+                self.hass,
+                address,
+                self.config_entry.data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO),
+            )
+            if (
+                prediction.chosen is not None
+                and prediction.chosen.transport is TransportClass.PROXY
+            ):
+                return self._async_abort_unpair("proxy_owned", name, address, owner)
 
         selection = select_local_bond(
             inventory,
@@ -3922,7 +3993,11 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
 
         coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
         if coordinator is None:
-            return self._unpair_result(await async_remove_local_bond(record))
+            # No coordinator to quiesce, but the address still has to be held:
+            # a config or repair flow could otherwise connect to this bed while
+            # its bond is being removed.
+            async with async_get_connect_lock(self.hass, record.address):
+                return self._unpair_result(await async_remove_local_bond(record))
 
         # Hold the bed out of use for the whole transaction, through the
         # coordinator's own locking order. Releasing the locks before the
@@ -3938,6 +4013,23 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 outcome=OperationOutcome.UNPAIR_FAILED,
                 detail=str(err) or err.__class__.__name__,
             )
+
+    async def _async_unpair_outcome_note(self, succeeded: bool, detail: str | None) -> str:
+        """Describe the removal in the user's language."""
+        if succeeded:
+            return await _async_translation(
+                self.hass,
+                "options",
+                "step.unpair.data_description.outcome_removed",
+                "✅ The Bluetooth bond was removed and the removal was confirmed.",
+            )
+        template = await _async_translation(
+            self.hass,
+            "options",
+            "step.unpair.data_description.outcome_failed",
+            "❌ The bond was not removed ({reason}).",
+        )
+        return template.format(reason=detail or "unknown reason")
 
     @staticmethod
     def _unpair_result(result: BondRemovalResult) -> OperationResult:
@@ -3963,33 +4055,40 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
     async def async_step_unpair_result(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Report the outcome, and clear the bond marker only on success."""
+        """Report the outcome, and clear the bond marker only on success.
+
+        The state update happens the first time this step is entered, not when
+        the form is submitted. Home Assistant replays the caller's original
+        input through its progress-done loop, so a submission from the
+        confirmation form can arrive here before the form has been drawn; if
+        that were treated as acknowledgement, BlueZ would have removed the bond
+        while the entry still claimed to be bonded, and the coordinator would
+        then skip pairing and retry an unauthenticated connection forever.
+        """
         result = self.operation.result
         succeeded = result is not None and result.succeeded
 
-        if user_input is not None:
-            return self.async_create_entry(title="", data={})
-
-        if succeeded:
-            # The marker is cleared only now, after a confirmed removal. Clearing
-            # it on an unconfirmed result would leave the entry claiming to be
+        if succeeded and not self._unpair_state_applied:
+            # Applied once, as soon as a confirmed removal is known. Clearing on
+            # an unconfirmed result would leave the entry claiming to be
             # unbonded while the bond is still there.
+            self._unpair_state_applied = True
             data = dict(self.config_entry.data)
             data.pop(CONF_BLE_BOND_ESTABLISHED, None)
             data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
             data.pop(CONF_BLE_BOND_CONTEXT, None)
             self.hass.config_entries.async_update_entry(self.config_entry, data=data)
 
+        if user_input is not None and self._unpair_result_shown:
+            return self.async_create_entry(title="", data={})
+
         detail = result.detail if result is not None else None
+        self._unpair_result_shown = True
         return self.async_show_form(
             step_id="unpair_result",
             data_schema=vol.Schema({}),
             description_placeholders={
                 "name": self.config_entry.data.get(CONF_NAME) or self.config_entry.title,
-                "outcome": (
-                    "✅ The Bluetooth bond was removed and the removal was confirmed."
-                    if succeeded
-                    else f"❌ The bond was not removed ({detail or 'unknown reason'})."
-                ),
+                "outcome": await self._async_unpair_outcome_note(succeeded, detail),
             },
         )

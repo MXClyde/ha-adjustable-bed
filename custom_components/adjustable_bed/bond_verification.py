@@ -204,8 +204,32 @@ async def async_verify_authenticated_access(
     )
 
 
+def bond_context_matches(stored: Any, candidate: dict[str, Any]) -> bool:
+    """Return True when two contexts describe the same bond owner.
+
+    Compares only the identity of the owner. ``verified_at`` moves every time a
+    bond is re-proven, so comparing whole contexts would report a change on
+    every reconnect and rewrite the config entry for nothing.
+    """
+    if not isinstance(stored, dict):
+        return False
+    keys = ("version", "transport", "source", "adapter")
+    return all(stored.get(key) == candidate.get(key) for key in keys)
+
+
 def build_bond_context(evidence: BondEvidence) -> dict[str, Any]:
-    """Return the entry-data provenance record for a verified bond."""
+    """Return the entry-data provenance record for a verified bond.
+
+    Raises:
+        ValueError: the evidence does not prove a bond. Provenance is what later
+            authorizes a host-side removal, so recording it from an inconclusive
+            or unsupported observation would manufacture permission out of
+            something that established nothing.
+    """
+    if not evidence.proves_bond:
+        raise ValueError(
+            f"refusing to record bond provenance from {evidence.status} evidence"
+        )
     return {
         "version": BOND_CONTEXT_VERSION,
         "transport": str(evidence.owner.transport),
@@ -234,7 +258,9 @@ def bond_owner_from_entry(entry_data: dict[str, Any] | Any) -> BondOwner:
     transport = context.get("transport")
     try:
         transport_class = TransportClass(transport)
-    except ValueError:
+    except (ValueError, TypeError):
+        # TypeError covers an unhashable stored value; both mean the same thing
+        # here, and provenance that cannot be read must never read as local.
         transport_class = TransportClass.UNKNOWN
     return BondOwner(
         transport=transport_class,

@@ -180,6 +180,12 @@ def select_local_bond(
             return BondSelection(status=BondSelectionStatus.EXACT, record=matches[0])
         if len(matches) > 1:
             return BondSelection(status=BondSelectionStatus.AMBIGUOUS)
+        if any(record.adapter_address for record in bonded):
+            # The adapter this bond was made on is named and known, and it is
+            # not among the adapters currently holding one. Falling through to
+            # the interface-name match would let a different adapter's bond be
+            # selected on the strength of a looser identifier.
+            return BondSelection(status=BondSelectionStatus.UNKNOWN_OWNER)
 
     if owner_adapter:
         # Secondary: BlueZ adapter object paths end in the interface name.
@@ -445,7 +451,13 @@ async def async_remove_host_bond(
         if len(matching) == 1:
             return await async_remove_local_bond(matching[0])
         if not matching:
-            return BondRemovalResult(status=BondRemovalStatus.ALREADY_ABSENT)
+            # Nothing on the adapter that was named. That is not the same as
+            # "there is no bond": another adapter may still hold one, and a
+            # caller that cleared its marker here would be wrong.
+            return BondRemovalResult(
+                status=BondRemovalStatus.ALREADY_ABSENT,
+                error="no_bond_on_named_adapter" if bonded else None,
+            )
         return BondRemovalResult(
             status=BondRemovalStatus.AMBIGUOUS_OWNER, error="multiple_records_on_adapter"
         )
