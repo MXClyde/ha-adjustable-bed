@@ -321,6 +321,10 @@
       "setup_progress": {
         "title": "Checking the connection",
         "description": "Checking **{name}** ({address})…"
+      },
+      "pairing_progress": {
+        "title": "Pairing the bed",
+        "description": "Pairing **{name}** ({address})…"
       }
     },
     "progress": {

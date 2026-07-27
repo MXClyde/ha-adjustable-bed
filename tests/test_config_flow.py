@@ -198,6 +198,16 @@ async def _advance_progress(hass: HomeAssistant, result: Any) -> Any:
     raise AssertionError("the setup progress step never completed")
 
 
+async def _complete_direct_pairing_progress(
+    flow: AdjustableBedConfigFlow, result: Any
+) -> Any:
+    """Finish a pairing progress task for a directly instantiated flow."""
+    assert result["type"] is FlowResultType.SHOW_PROGRESS
+    await result["progress_task"]
+    result = await flow.async_step_pairing_progress()
+    assert result["type"] is FlowResultType.SHOW_PROGRESS_DONE
+    return await flow.async_step_pairing_result()
+
 
 class TestPairingInstructions:
     """Test bed-specific pairing guidance."""
@@ -343,12 +353,58 @@ class TestPairingPersistence:
             flow, "_attempt_pairing", new=AsyncMock(return_value=_verified_evidence())
         ):
             result = await flow.async_step_bluetooth_pairing({"action": "pair_now"})
+            result = await _complete_direct_pairing_progress(flow, result)
 
         assert result["type"] is FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_BLE_BOND_ESTABLISHED] is True
         # The marker records which transport owns the bond, so a later unpair
         # knows where to look.
         assert result["data"][CONF_BLE_BOND_CONTEXT]["transport"] == "local"
+
+    async def test_managed_pairing_uses_a_progress_view(
+        self,
+        hass: HomeAssistant,
+        mock_bluetooth_service_info_ambiguous_okin: MagicMock,
+        enable_custom_integrations,
+    ) -> None:
+        """A real managed flow must not run the BLE operation from its form."""
+        del enable_custom_integrations
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_BLUETOOTH},
+            data=mock_bluetooth_service_info_ambiguous_okin,
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={"bed_type_choice": BED_TYPE_OKIN_CST},
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_NAME: "My CST Bed",
+                CONF_MOTOR_COUNT: 2,
+                CONF_HAS_MASSAGE: False,
+                CONF_DISABLE_ANGLE_SENSING: True,
+                CONF_PREFERRED_ADAPTER: "auto",
+            },
+        )
+
+        with patch.object(
+            AdjustableBedConfigFlow,
+            "_attempt_pairing",
+            new=AsyncMock(return_value=_verified_evidence()),
+        ):
+            progress = await hass.config_entries.flow.async_configure(
+                result["flow_id"],
+                user_input={"action": "pair_now"},
+            )
+            assert progress["type"] is FlowResultType.SHOW_PROGRESS
+            assert progress["step_id"] == "pairing_progress"
+            assert progress["description_placeholders"]["name"] == "My CST Bed"
+            created = await _advance_progress(hass, progress)
+
+        assert created["type"] is FlowResultType.CREATE_ENTRY
+        assert created["data"][CONF_BLE_BOND_ESTABLISHED] is True
 
     @pytest.mark.parametrize(
         "step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"]
@@ -393,6 +449,8 @@ class TestPairingPersistence:
 
         assert result["type"] is FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_BLE_BOND_ESTABLISHED] is True
+        assert result["data"][CONF_BLE_BOND_CONTEXT]["source"] == "11:22:33:44:55:66"
+        assert result["data"][CONF_BLE_BOND_CONTEXT]["adapter"] == "hci0"
 
     @pytest.mark.parametrize(
         "step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"]
@@ -3738,6 +3796,33 @@ async def test_pairing_never_connects_to_a_bed_that_is_not_advertising(
     assert errors["base"] == "not_advertising"
 
 
+async def test_repairing_does_not_remove_a_bond_until_the_bed_is_advertising(
+    hass: HomeAssistant,
+) -> None:
+    """An unavailable bed must keep its previously working host bond."""
+    flow = _pairing_flow(hass)
+    flow._pairing_remove_record = _bond_record()
+    stale = AdvertisementEvidence(status=FreshnessStatus.STALE, age_seconds=600.0)
+    with (
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
+            AsyncMock(return_value=(stale, None)),
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
+            new=AsyncMock(),
+        ) as remove,
+        patch.object(flow, "_attempt_pairing") as attempt,
+    ):
+        errors: dict[str, str] = {}
+        result = await flow._async_handle_pair_now(errors)
+
+    remove.assert_not_awaited()
+    attempt.assert_not_called()
+    assert result is None
+    assert errors["base"] == "not_advertising"
+
+
 async def test_an_unauthenticated_link_is_not_recorded_as_a_bond(
     hass: HomeAssistant,
 ) -> None:
@@ -3826,6 +3911,11 @@ async def test_replacing_a_bond_that_cannot_be_removed_does_not_pair(
         status=BondRemovalStatus.VERIFICATION_FAILED, error="bond_still_present"
     )
     with (
+        patch.object(
+            flow,
+            "_async_resolve_pairing_device",
+            AsyncMock(return_value=(MagicMock(), PathPrediction(chosen=None, paths=()))),
+        ),
         patch(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
             AsyncMock(return_value=failed),

@@ -30,6 +30,10 @@
         "title": "Sjekker tilkoblingen",
         "description": "Sjekker **{name}** ({address})…"
       },
+      "pairing_progress": {
+        "title": "Parer sengen",
+        "description": "Parer **{name}** ({address})…"
+      },
       "bluetooth_pairing": {
         "data_description": {
           "bond_state_proxy": "ℹ️ Denne sengen pares via en Bluetooth-proxy, som beholder koblingen selv. Home Assistant kan verken lese eller fjerne en kobling som ligger på en proxy, og kan derfor ikke si om det allerede finnes en.",

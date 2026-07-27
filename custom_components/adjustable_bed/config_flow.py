@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Final
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Final
 
 import voluptuous as vol
 from homeassistant.components.bluetooth import (
@@ -62,6 +63,7 @@ from .bluetooth_freshness import (
 )
 from .bluetooth_transport import (
     ConnectionPath,
+    PathPrediction,
     TransportClass,
     async_describe_actual,
     async_describe_prediction,
@@ -194,6 +196,9 @@ from .validators import (
     is_valid_variant_for_bed_type,
     normalize_octo_pin,
 )
+
+if TYPE_CHECKING:
+    from bleak.backends.device import BLEDevice
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -423,17 +428,33 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             CONF_BLE_BOND_ESTABLISHED: True,
         }
 
-    def _create_entry_for_existing_bond(self) -> ConfigFlowResult:
+    def _create_entry_for_existing_bond(
+        self, record: LocalBondRecord
+    ) -> ConfigFlowResult:
         """Create an entry after the user confirms the adapter is already bonded."""
         assert self._manual_data is not None
+        assert record.has_bond
         _LOGGER.info(
             "User confirmed an existing BLE bond for %s via adapter %s",
             self._manual_data.get(CONF_ADDRESS),
             self._manual_data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO),
         )
+        entry_data = self._mark_ble_bond_established(self._manual_data)
+        entry_data[CONF_BLE_BOND_CONTEXT] = build_bond_context(
+            BondEvidence(
+                status=BondVerificationStatus.VERIFIED,
+                owner=BondOwner(
+                    transport=TransportClass.LOCAL,
+                    source=record.adapter_address,
+                    adapter=record.adapter_path.rsplit("/", 1)[-1] or None,
+                ),
+                operation="existing_bluez_bond",
+                observed_at=datetime.now(UTC).isoformat(),
+            )
+        )
         return self.async_create_entry(
             title=self._manual_data.get(CONF_NAME, "Adjustable Bed"),
-            data=self._mark_ble_bond_established(self._manual_data),
+            data=entry_data,
         )
 
     @staticmethod
@@ -504,6 +525,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         self._pairing_remove_record: LocalBondRecord | None = None
         # The evidence behind a verified bond, kept for logging and diagnostics.
         self._pairing_success_evidence: BondEvidence | None = None
+        # The form that launched the tracked pairing operation. Pairing is shared
+        # by Bluetooth discovery and manual setup, and failures return to the
+        # same form rather than silently switching flows.
+        self._pairing_step_id: str = "bluetooth_pairing"
         _LOGGER.debug("AdjustableBedConfigFlow initialized")
 
     def _set_device_title_placeholders(self, name: str | None, address: str) -> None:
@@ -995,7 +1020,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             if pulse_count_input is not None and pulse_count_input != "":
                 try:
                     motor_pulse_count = int(pulse_count_input)
-                except ValueError, TypeError:
+                except (ValueError, TypeError):
                     errors[CONF_MOTOR_PULSE_COUNT] = "invalid_number"
                     motor_pulse_count = pulse_defaults[0]
             else:
@@ -1005,7 +1030,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             if pulse_delay_input is not None and pulse_delay_input != "":
                 try:
                     motor_pulse_delay_ms = int(pulse_delay_input)
-                except ValueError, TypeError:
+                except (ValueError, TypeError):
                     errors[CONF_MOTOR_PULSE_DELAY_MS] = "invalid_number"
                     motor_pulse_delay_ms = pulse_defaults[1]
             else:
@@ -1715,7 +1740,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 motor_pulse_delay_ms = int(
                     user_input.get(CONF_MOTOR_PULSE_DELAY_MS) or pulse_defaults[1]
                 )
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 errors["base"] = "invalid_number"
 
             if not errors:
@@ -1953,7 +1978,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     motor_pulse_delay_ms = int(
                         user_input.get(CONF_MOTOR_PULSE_DELAY_MS) or pulse_defaults[1]
                     )
-                except ValueError, TypeError:
+                except (ValueError, TypeError):
                     errors["base"] = "invalid_number"
 
                 if not errors:
@@ -2244,7 +2269,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         return await self._async_malouf_step("bluetooth_malouf", user_input)
 
     async def _async_pairing_step(
-        self, step_id: str, user_input: dict[str, Any] | None
+        self,
+        step_id: str,
+        user_input: dict[str, Any] | None,
+        *,
+        errors: dict[str, str] | None = None,
     ) -> ConfigFlowResult:
         """Offer the pairing actions that actually apply to this bed's state.
 
@@ -2259,7 +2288,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         bed_type = self._manual_data.get(CONF_BED_TYPE)
         variant = self._manual_data.get(CONF_PROTOCOL_VARIANT)
 
-        errors: dict[str, str] = {}
+        errors = dict(errors or {})
         inventory = await async_read_local_bonds(address)
         prediction = async_predict_path(
             self.hass, address, self._manual_data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO)
@@ -2283,18 +2312,31 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
 
         if user_input is not None:
             action = user_input.get("action")
-            if action == "use_existing_bond" and can_use_existing:
-                return self._create_entry_for_existing_bond()
+            should_pair = False
+            if (
+                action == "use_existing_bond"
+                and can_use_existing
+                and existing is not None
+            ):
+                return self._create_entry_for_existing_bond(existing)
             if action == "remove_bond_and_pair" and can_use_existing and existing is not None:
                 self._pairing_remove_record = existing
-                result = await self._async_handle_pair_now(errors)
-                if result is not None:
-                    return result
+                should_pair = True
             elif action in ("pair_now", "retry"):
                 self._pairing_remove_record = None
-                result = await self._async_handle_pair_now(errors)
-                if result is not None:
-                    return result
+                should_pair = True
+
+            if should_pair:
+                if grants_one_connection_per_pairing_window(
+                    self._manual_data.get(CONF_BED_TYPE) or "",
+                    self._manual_data.get(CONF_PROTOCOL_VARIANT),
+                ):
+                    # This path deliberately performs no BLE work, so there is
+                    # no long operation to put behind a progress view.
+                    result = await self._async_handle_pair_now(errors)
+                    if result is not None:
+                        return result
+                return await self._async_start_pairing_operation(step_id, prediction)
 
         options = ["pair_now"]
         if can_use_existing:
@@ -2364,6 +2406,69 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         """Handle Bluetooth pairing for manually selected beds that require it."""
         return await self._async_pairing_step("manual_pairing", user_input)
 
+    async def _async_start_pairing_operation(
+        self, step_id: str, prediction: PathPrediction
+    ) -> ConfigFlowResult:
+        """Start pairing behind a tracked Home Assistant progress step."""
+        assert self._manual_data is not None
+        address = self._manual_data.get(CONF_ADDRESS, "")
+        name = self._manual_data.get(CONF_NAME, "Adjustable Bed")
+        self._pairing_step_id = step_id
+        self.async_begin_operation(
+            name=name,
+            address=address,
+            prediction=prediction,
+            action=SetupAction.LOCATING,
+            placeholders={"name": name, "address": address},
+        )
+        return await self.async_step_pairing_progress()
+
+    async def _async_pairing_worker(self) -> OperationResult:
+        """Run pairing in the progress task and preserve its form result."""
+        errors: dict[str, str] = {}
+        result = await self._async_handle_pair_now(errors)
+        if result is not None:
+            return OperationResult(
+                outcome=OperationOutcome.SUCCESS,
+                payload=(result, errors),
+            )
+
+        error = errors.get("base", "pairing_failed")
+        outcome = {
+            "not_advertising": OperationOutcome.NOT_ADVERTISING,
+            "pairing_not_supported": OperationOutcome.PAIRING_NOT_SUPPORTED,
+            "bond_verification_failed": OperationOutcome.BOND_VERIFICATION_FAILED,
+            "bond_removal_failed": OperationOutcome.UNPAIR_FAILED,
+        }.get(error, OperationOutcome.CONNECTION_FAILED)
+        return OperationResult(outcome=outcome, payload=(None, errors))
+
+    async def async_step_pairing_progress(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Run pairing as a cancellable, tracked background operation."""
+        return await self.async_run_operation_step(
+            step_id="pairing_progress",
+            worker=self._async_pairing_worker,
+            next_step_id="pairing_result",
+        )
+
+    async def async_step_pairing_result(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Create the entry on success or return to the originating form."""
+        operation_result = self.operation.result
+        if operation_result is not None and operation_result.payload is not None:
+            result, errors = operation_result.payload
+            if result is not None:
+                return result
+        else:
+            errors = {"base": "pairing_failed"}
+        return await self._async_pairing_step(
+            self._pairing_step_id,
+            None,
+            errors=errors,
+        )
+
     async def _async_handle_pair_now(
         self, errors: dict[str, str]
     ) -> ConfigFlowResult | None:
@@ -2392,22 +2497,32 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             )
             return self.async_create_entry(title=title, data=self._manual_data)
 
-        # Replacing an existing host bond is a separate, confirmed action: pair
-        # cannot silently delete one.
-        if self._pairing_remove_record is not None:
-            removal = await async_remove_local_bond(self._pairing_remove_record)
-            self._pairing_remove_record = None
-            if not removal.succeeded:
-                _LOGGER.warning(
-                    "Not pairing %s: the existing bond could not be removed (%s)",
-                    address,
-                    removal.error,
-                )
-                errors["base"] = "bond_removal_failed"
-                return None
-
         try:
-            evidence = await self._attempt_pairing(address)
+            device: BLEDevice | None = None
+            prediction: PathPrediction | None = None
+            remove_record = self._pairing_remove_record
+            self._pairing_remove_record = None
+            if remove_record is not None:
+                # Resolve the exact fresh device before the destructive step.
+                # Reusing it for the connection avoids deleting a working bond
+                # only to discover afterwards that the bed is unavailable.
+                device, prediction = await self._async_resolve_pairing_device(address)
+                removal = await async_remove_local_bond(remove_record)
+                if not removal.succeeded:
+                    _LOGGER.warning(
+                        "Not pairing %s: the existing bond could not be removed (%s)",
+                        address,
+                        removal.error,
+                    )
+                    errors["base"] = "bond_removal_failed"
+                    return None
+                evidence = await self._attempt_pairing(
+                    address,
+                    device=device,
+                    prediction=prediction,
+                )
+            else:
+                evidence = await self._attempt_pairing(address)
         except NotAdvertisingError as err:
             # A bed that never answered a scan is not a pairing failure, and
             # saying so would send the user after the wrong thing.
@@ -2451,7 +2566,43 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             )
         return self.async_create_entry(title=title, data=entry_data)
 
-    async def _attempt_pairing(self, address: str | None) -> BondEvidence:
+    async def _async_resolve_pairing_device(
+        self, address: str | None
+    ) -> tuple[BLEDevice, PathPrediction]:
+        """Wait for a fresh advertisement and return its connection target."""
+        if not address:
+            raise ValueError("No address provided for pairing")
+
+        preferred_adapter = ADAPTER_AUTO
+        if self._manual_data:
+            preferred_adapter = self._manual_data.get(
+                CONF_PREFERRED_ADAPTER, ADAPTER_AUTO
+            )
+        prediction = async_predict_path(self.hass, address, preferred_adapter)
+        pinned = bool(preferred_adapter and preferred_adapter != ADAPTER_AUTO)
+        if pinned and not prediction.preferred_available:
+            raise NotAdvertisingError(FreshnessStatus.SOURCE_UNAVAILABLE)
+        source = preferred_adapter if pinned else None
+
+        self.async_report_action(SetupAction.LOCATING)
+        evidence, device = await async_wait_for_advertisement(
+            self.hass,
+            address,
+            source=source,
+            wait_timeout=ADVERTISEMENT_WAIT_SECONDS,
+            on_progress=self.async_report_progress,
+        )
+        if not evidence.is_fresh or device is None:
+            raise NotAdvertisingError(evidence.status)
+        return device, prediction
+
+    async def _attempt_pairing(
+        self,
+        address: str | None,
+        *,
+        device: BLEDevice | None = None,
+        prediction: PathPrediction | None = None,
+    ) -> BondEvidence:
         """Pair using the protocol's required connection ordering, and verify it.
 
         Returns the evidence gathered, which is what the caller must judge: a
@@ -2484,27 +2635,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             preferred_adapter,
         )
 
-        prediction = async_predict_path(self.hass, address, preferred_adapter)
-        pinned = bool(preferred_adapter and preferred_adapter != ADAPTER_AUTO)
-        if pinned and not prediction.preferred_available:
-            # Unlike the read-only probe, pairing writes a bond, and a bond
-            # belongs to whichever transport made it. Quietly pairing through
-            # some other adapter would store it somewhere the user did not
-            # choose, and the marker would then claim pairing is done while the
-            # selected adapter is still unauthenticated.
-            raise NotAdvertisingError(FreshnessStatus.SOURCE_UNAVAILABLE)
-        source = preferred_adapter if pinned else None
-        # Someone who just put a bed into pairing mode is standing at the bed and
-        # expects to wait, so this wait is longer than the setup probe's.
-        evidence, device = await async_wait_for_advertisement(
-            self.hass,
-            address,
-            source=source,
-            wait_timeout=ADVERTISEMENT_WAIT_SECONDS,
-            on_progress=self.async_report_progress,
-        )
-        if not evidence.is_fresh or device is None:
-            raise NotAdvertisingError(evidence.status)
+        if device is None:
+            device, prediction = await self._async_resolve_pairing_device(address)
+        elif prediction is None:
+            prediction = async_predict_path(self.hass, address, preferred_adapter)
+        assert prediction is not None
 
         bed_type = self._manual_data.get(CONF_BED_TYPE) if self._manual_data else None
         protocol_variant = (
@@ -2533,6 +2668,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 pair=not pair_after_service_discovery,
                 use_services_cache=not pair_after_service_discovery,
             )
+            self.async_track_client(client)
             try:
                 # The routed transport is only knowable now, and it decides who
                 # owns any bond this attempt creates.
@@ -2568,6 +2704,8 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     _LOGGER.debug(
                         "Disconnect after pairing %s failed", address, exc_info=True
                     )
+                else:
+                    self.async_track_client(None)
 
     def _verification_possible(self) -> bool:
         """Return True only when a connectable scanner exists to probe through.
@@ -3477,7 +3615,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                     user_input[CONF_MOTOR_PULSE_DELAY_MS] = int(
                         user_input[CONF_MOTOR_PULSE_DELAY_MS] or pulse_defaults[1]
                     )
-            except ValueError, TypeError:
+            except (ValueError, TypeError):
                 return self.async_show_form(
                     step_id="configure",
                     data_schema=vol.Schema(schema_dict),
@@ -3494,7 +3632,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                             errors={CONF_BACK_MAX_ANGLE: "invalid_angle"},
                         )
                     user_input[CONF_BACK_MAX_ANGLE] = value
-                except ValueError, TypeError:
+                except (ValueError, TypeError):
                     return self.async_show_form(
                         step_id="configure",
                         data_schema=vol.Schema(schema_dict),
@@ -3510,7 +3648,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                             errors={CONF_LEGS_MAX_ANGLE: "invalid_angle"},
                         )
                     user_input[CONF_LEGS_MAX_ANGLE] = value
-                except ValueError, TypeError:
+                except (ValueError, TypeError):
                     return self.async_show_form(
                         step_id="configure",
                         data_schema=vol.Schema(schema_dict),
