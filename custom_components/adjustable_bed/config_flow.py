@@ -2870,7 +2870,9 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             path_reporter=self.async_report_path,
             client_tracker=self.async_track_client,
         )
-        if report.freshness is not None and report.freshness is not FreshnessStatus.FRESH:
+        if report.freshness is FreshnessStatus.DEVICE_UNRESOLVED:
+            outcome = OperationOutcome.DEVICE_UNRESOLVED
+        elif report.freshness is not None and report.freshness is not FreshnessStatus.FRESH:
             outcome = OperationOutcome.NOT_ADVERTISING
         elif not report.connected:
             outcome = OperationOutcome.CONNECTION_FAILED
@@ -2973,7 +2975,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         report.freshness = evidence.status
         report.rssi = evidence.rssi
         if not evidence.is_fresh or device is None:
-            report.error = "not_advertising"
+            # The gate reports an unresolvable device as its own status, so the
+            # error key distinguishes "the bed is silent" from "we briefly lost
+            # the handle to a bed that is advertising fine".
+            report.error = evidence.error_key
             _LOGGER.debug(
                 "Skipping the capability probe for %s: %s", address, evidence.status
             )
@@ -3070,6 +3075,20 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
     async def _format_capabilities(self, report: CapabilityReport) -> str:
         """Build the ✅/❌/⚠️/ℹ️ markdown checklist shown in verify_connection."""
         lines: list[str] = []
+
+        if report.freshness is FreshnessStatus.DEVICE_UNRESOLVED:
+            # The bed answered a scan, so "wake it up" would be wrong advice.
+            # Home Assistant simply had no connectable handle for it at that
+            # instant, which is what Check again is for.
+            lines.append(
+                "⚠️ This bed is advertising, but Home Assistant could not open a connection "
+                "to it just now, so no connection was attempted."
+            )
+            lines.append(
+                "This is usually momentary. Select **Check again**, or finish setup and let "
+                "the integration keep trying."
+            )
+            return "\n".join(lines)
 
         if report.freshness is not None and report.freshness is not FreshnessStatus.FRESH:
             # Distinguished from a failed connection on purpose: the bed never

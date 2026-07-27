@@ -308,6 +308,30 @@ class TestGateConnection:
         assert resolved is device
         resolve.assert_called_once()
 
+    async def test_fresh_evidence_without_a_device_is_not_reported_as_fresh(
+        self, hass: HomeAssistant
+    ) -> None:
+        """A resolution gap is its own status, never a silent bed.
+
+        Home Assistant's scanner view can change between the history check and
+        the device lookup. Reporting that as FRESH-with-no-device leaves the
+        caller to invent a reason, and the reason it used to invent was "this
+        bed is not advertising" - advice that sends the user to wake a bed that
+        is advertising perfectly well.
+        """
+        with (
+            _patch_last_service_info(_service_info(age=1.0)),
+            patch(f"{_FRESHNESS}.async_resolve_ble_device", return_value=None),
+        ):
+            evidence, resolved = async_gate_connection(hass, TEST_ADDRESS)
+        assert resolved is None
+        assert evidence.status is FreshnessStatus.DEVICE_UNRESOLVED
+        assert not evidence.is_fresh
+        assert evidence.error_key == "device_unresolved"
+        # The advertising evidence itself is still carried through.
+        assert evidence.age_seconds == pytest.approx(1.0)
+        assert evidence.rssi == -60
+
     async def test_stale_evidence_never_resolves_a_device(
         self, hass: HomeAssistant
     ) -> None:

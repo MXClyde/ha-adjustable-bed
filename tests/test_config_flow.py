@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from copy import copy
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,6 +27,9 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.adjustable_bed.bluetooth_freshness import (
     AdvertisementEvidence,
     FreshnessStatus,
+)
+from custom_components.adjustable_bed.bluetooth_freshness import (
+    _monotonic as freshness_monotonic,
 )
 from custom_components.adjustable_bed.bluetooth_transport import (
     ConnectionPath,
@@ -3271,6 +3275,75 @@ async def test_a_not_advertising_bed_offers_retry_and_still_allows_finishing(
         )
     assert created["type"] == FlowResultType.CREATE_ENTRY
     assert created["data"][CONF_ADDRESS] == mock_bluetooth_service_info.address
+
+
+async def test_an_advertising_bed_that_cannot_be_resolved_offers_retry(
+    hass: HomeAssistant,
+    mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+    enable_custom_integrations,
+) -> None:
+    """A resolution gap must be retryable, not reported as "device not found".
+
+    The bed is advertising, but Home Assistant's scanner view changes between
+    the freshness check and the device lookup, so no BLEDevice comes back. That
+    is the case that most deserves a Check again, and it used to be the one case
+    that did not get one: the report stayed FRESH with no device, which fell
+    through to the plain "device not found" branch and offered no retry action.
+
+    The real gate and wait helper run here (only the device resolution is
+    faked), so the assertions cover the whole path rather than a hand-built
+    report. The advertisement is timestamped against the gate's own clock, which
+    is left running so the bounded wait below can actually expire.
+    """
+    _freshness = "custom_components.adjustable_bed.bluetooth_freshness"
+    advertising = SimpleNamespace(
+        source="hci0",
+        rssi=-60,
+        time=freshness_monotonic() - 1.0,
+        address=mock_bluetooth_service_info.address,
+    )
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=mock_bluetooth_service_info
+    )
+    with (
+        patch.object(AdjustableBedConfigFlow, "_verification_possible", return_value=True),
+        patch("bleak_retry_connector.establish_connection") as connects,
+        patch(f"{_freshness}.async_path_for_source", return_value=None),
+        patch(
+            f"{_freshness}.bluetooth.async_last_service_info", return_value=advertising
+        ),
+        # The bed is advertising; only the handle to it is missing.
+        patch(f"{_freshness}.async_resolve_ble_device", return_value=None),
+        # Keep the built-in wait from holding the test for its full duration.
+        patch(
+            "custom_components.adjustable_bed.config_flow"
+            "._PROBE_ADVERTISEMENT_WAIT_SECONDS",
+            0.01,
+        ),
+    ):
+        progress = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={CONF_PREFERRED_ADAPTER: "auto"}
+        )
+        verify = await _advance_progress(hass, progress)
+        assert verify["step_id"] == "verify_connection"
+
+        caps = verify["description_placeholders"]["capabilities"]
+        assert "could not open a connection" in caps
+        assert "**Check again**" in caps
+        # The bed answered a scan, so neither of the old messages applies.
+        assert "not currently advertising" not in caps
+        assert "Device not found" not in caps
+        # Nothing may reach the BLE stack without a resolved device.
+        connects.assert_not_called()
+
+        # The retry affordance must actually be on the form.
+        assert "action" in {str(key) for key in verify["data_schema"].schema}
+
+        created = await hass.config_entries.flow.async_configure(
+            verify["flow_id"], user_input={"action": "finish"}
+        )
+    assert created["type"] == FlowResultType.CREATE_ENTRY
 
 
 async def test_abandoning_the_flow_mid_probe_leaves_no_connected_client(
