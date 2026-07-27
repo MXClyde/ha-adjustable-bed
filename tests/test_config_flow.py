@@ -91,6 +91,7 @@ from custom_components.adjustable_bed.const import (
     BEDS_WITH_POSITION_FEEDBACK,
     CONF_BACK_MAX_ANGLE,
     CONF_BED_TYPE,
+    CONF_BLE_BOND_ATTEMPTED_SOURCE,
     CONF_BLE_BOND_ESTABLISHED,
     CONF_BLE_BOND_MARKER_UNRELIABLE,
     CONF_DISABLE_ANGLE_SENSING,
@@ -5720,3 +5721,89 @@ async def test_a_reconnect_before_removal_still_replaces_the_bond(
 
     removal.assert_awaited_once()
     assert result.outcome is OperationOutcome.SUCCESS
+
+
+async def _unproven_pairing_entry(
+    hass: HomeAssistant, *, source: str | None
+) -> dict[str, Any]:
+    """Finish setup after a successful pair that nothing could verify."""
+    flow = _pairing_flow(hass)
+    flow._pairing_mode = "new"
+    unsupported = BondEvidence(
+        status=BondVerificationStatus.UNSUPPORTED,
+        owner=BondOwner(transport=TransportClass.LOCAL, source=source),
+        operation="pair_and_verify",
+        observed_at="2026-07-27T00:00:00+00:00",
+    )
+
+    flow.async_begin_operation(
+        name="Okimat",
+        address=flow._manual_data[CONF_ADDRESS],
+        prediction=PathPrediction(chosen=None, paths=()),
+        action=SetupAction.LOCATING,
+        placeholders={},
+    )
+    flow.operation.result = OperationResult(
+        outcome=OperationOutcome.SUCCESS, payload=unsupported
+    )
+    flow._pairing_result_shown = True
+    result = await flow.async_step_pairing_result({})
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    return dict(result["data"])
+
+
+async def test_an_unproven_bond_marker_is_scoped_to_the_route_that_paired(
+    hass: HomeAssistant,
+) -> None:
+    """The marker suppresses pair=True, so it may not speak for other routes.
+
+    With automatic routing the first real connection can be re-ranked onto an
+    adapter or proxy that was never bonded. A global marker would skip pairing
+    there and fail authentication on a link that only needed pairing.
+    """
+    data = await _unproven_pairing_entry(hass, source="11:22:33:44:55:66")
+
+    assert data[CONF_BLE_BOND_ESTABLISHED] is True
+    assert data[CONF_BLE_BOND_ATTEMPTED_SOURCE] == "11:22:33:44:55:66"
+    # Unproven state must never look like the provenance that authorizes
+    # removing a host bond.
+    assert CONF_BLE_BOND_CONTEXT not in data
+
+
+async def test_an_unproven_bond_with_no_known_route_records_no_marker(
+    hass: HomeAssistant,
+) -> None:
+    """Nothing to scope it to, so the bed simply pairs again on first connect."""
+    data = await _unproven_pairing_entry(hass, source=None)
+
+    assert data.get(CONF_BLE_BOND_ESTABLISHED) is not True
+    assert CONF_BLE_BOND_ATTEMPTED_SOURCE not in data
+    assert CONF_BLE_BOND_CONTEXT not in data
+
+
+async def test_a_proven_bond_records_provenance_and_no_route_scope(
+    hass: HomeAssistant,
+) -> None:
+    """Provenance names its own owner, so there is nothing left to scope."""
+    flow = _pairing_flow(hass)
+    flow._pairing_mode = "new"
+    flow._manual_data[CONF_BLE_BOND_ATTEMPTED_SOURCE] = "stale-source"
+
+    flow.async_begin_operation(
+        name="Okimat",
+        address=flow._manual_data[CONF_ADDRESS],
+        prediction=PathPrediction(chosen=None, paths=()),
+        action=SetupAction.LOCATING,
+        placeholders={},
+    )
+    flow.operation.result = OperationResult(
+        outcome=OperationOutcome.SUCCESS, payload=_verified_evidence()
+    )
+    flow._pairing_result_shown = True
+    result = await flow.async_step_pairing_result({})
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_BLE_BOND_ESTABLISHED] is True
+    assert CONF_BLE_BOND_CONTEXT in result["data"]
+    assert CONF_BLE_BOND_ATTEMPTED_SOURCE not in result["data"]

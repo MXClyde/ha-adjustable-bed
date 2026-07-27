@@ -1007,6 +1007,32 @@ async def test_a_reconnect_between_confirm_and_removal_does_not_block_recovery(
     assert not pinned.is_same_bond_as(replace(pinned, adapter_address="AA:00:00:00:00:01"))
 
 
+async def test_an_unidentified_adapter_never_authorizes_a_removal() -> None:
+    """Without both adapter MACs, only reusable identifiers are left.
+
+    ``hciN`` and the deterministic device path are inherited by whatever dongle
+    occupies the slot next, so a snapshot BlueZ took without an adapter address
+    cannot show that the bond still on that path is the one the user approved.
+    This method authorizes destroying a bond, so it fails closed.
+    """
+    identified = LocalBondRecord(
+        address=TEST_ADDRESS,
+        device_path="/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+        adapter_path="/org/bluez/hci0",
+        adapter_address="11:22:33:44:55:66",
+        paired=True,
+        bonded=True,
+    )
+    anonymous = replace(identified, adapter_address=None)
+
+    # Identical in every field BlueZ did publish, and still not a basis to act.
+    assert not identified.is_same_bond_as(anonymous)
+    assert not anonymous.is_same_bond_as(identified)
+    assert not anonymous.is_same_bond_as(replace(anonymous))
+    # The fully identified pair is unaffected.
+    assert identified.is_same_bond_as(replace(identified, connected=True))
+
+
 async def test_a_reverified_same_adapter_bond_keeps_its_provenance(
     hass: HomeAssistant,
 ) -> None:
@@ -1354,10 +1380,17 @@ async def test_a_proxy_pairing_failure_keeps_the_guided_pairing_retry(
     assert result["step_id"] == "confirm"
 
 
-async def test_a_proxy_authentication_failure_still_gets_proxy_guidance(
+async def test_an_unbonded_proxy_link_keeps_the_guided_pairing_retry(
     hass: HomeAssistant,
 ) -> None:
-    """Route plus a refused bond is what makes a proxy-held bond the suspect."""
+    """An auth failure over a proxy is what an unbonded bed looks like.
+
+    ``pair=True`` fails, the fallback connects without pairing, and the
+    auth-gated read then reports insufficient authentication. Nothing there says
+    a proxy bond exists, and the guidance would tell the user to reflash the
+    proxy: that erases every unrelated bond on it and still leaves this bed
+    unpaired.
+    """
     entry = MockConfigEntry(
         domain=DOMAIN,
         title=TEST_NAME,
@@ -1365,6 +1398,54 @@ async def test_a_proxy_authentication_failure_still_gets_proxy_guidance(
             CONF_ADDRESS: TEST_ADDRESS,
             CONF_NAME: TEST_NAME,
             CONF_BED_TYPE: BED_TYPE_OKIMAT,
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_unbonded_proxy_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(
+        TEST_ADDRESS,
+        TEST_NAME,
+        entry.entry_id,
+        issue_data={
+            "evidence_status": BondVerificationStatus.AUTH_FAILED.value,
+            "evidence_transport": TransportClass.PROXY.value,
+            "evidence_source": "proxy-source",
+        },
+    )
+    flow.hass = hass
+
+    with patch(
+        "custom_components.adjustable_bed.bond_recovery.async_read_local_bonds",
+        AsyncMock(return_value=_host_bond_inventory()),
+    ):
+        result = await flow.async_step_init()
+
+    assert result["step_id"] == "confirm"
+
+
+async def test_a_proxy_authentication_failure_still_gets_proxy_guidance(
+    hass: HomeAssistant,
+) -> None:
+    """A refused bond plus provenance proving a proxy made one is the suspect."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_OKIMAT,
+            CONF_BLE_BOND_ESTABLISHED: True,
+            # Only ever written from a verification that positively proved a
+            # bond, which is what makes this independent of the failure above.
+            CONF_BLE_BOND_CONTEXT: {
+                "version": 1,
+                "transport": TransportClass.PROXY.value,
+                "source": "proxy-source",
+                "adapter": None,
+                "verification": "runtime_authenticated_read",
+                "verified_at": "2026-07-27T00:00:00+00:00",
+            },
         },
         unique_id=TEST_ADDRESS,
         entry_id="repair_proxy_auth_failure_entry",

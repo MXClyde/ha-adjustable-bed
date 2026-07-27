@@ -110,6 +110,7 @@ from .const import (
     CB24_BED_SELECTION_DEFAULT,
     CONF_BACK_MAX_ANGLE,
     CONF_BED_TYPE,
+    CONF_BLE_BOND_ATTEMPTED_SOURCE,
     CONF_BLE_BOND_ESTABLISHED,
     CONF_BLE_BOND_MARKER_UNRELIABLE,
     CONF_CB24_BED_SELECTION,
@@ -3428,6 +3429,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 # to look.
                 entry_data = self._mark_ble_bond_established(entry_data)
                 entry_data[CONF_BLE_BOND_CONTEXT] = build_bond_context(evidence)
+                entry_data.pop(CONF_BLE_BOND_ATTEMPTED_SOURCE, None)
                 self._pairing_success_evidence = evidence
             elif succeeded and self._pairing_mode != "verify_existing":
                 # A bond was asked for and nothing contradicted it, but this
@@ -3437,7 +3439,20 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 # just paired, which over a proxy can return auth error 82 and
                 # wedge the connection, while the missing context means this
                 # cannot later authorize removing a host bond.
-                entry_data = self._mark_ble_bond_established(entry_data)
+                #
+                # The marker is scoped to the route that made the attempt. It is
+                # only credible there: automatic routing can put the first real
+                # connection on another adapter or proxy that was never bonded,
+                # and an unscoped marker would suppress pair=True on that link
+                # and turn a good setup into an authentication failure. Without
+                # a known route there is nothing to scope it to, so nothing is
+                # recorded and the bed simply pairs again on first connect.
+                attempted_source = (
+                    evidence.owner.source if isinstance(evidence, BondEvidence) else None
+                )
+                if attempted_source:
+                    entry_data = self._mark_ble_bond_established(entry_data)
+                    entry_data[CONF_BLE_BOND_ATTEMPTED_SOURCE] = attempted_source
                 entry_data.pop(CONF_BLE_BOND_CONTEXT, None)
             return self.async_create_entry(
                 title=self._manual_data.get(CONF_NAME, "Adjustable Bed"),
