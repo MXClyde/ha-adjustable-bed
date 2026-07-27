@@ -4926,6 +4926,42 @@ class TestBondProvenanceAndTransportGate:
         assert client.disconnect.await_count == 2
         await coordinator.async_shutdown()
 
+    async def test_the_gates_fallback_close_does_not_arm_a_reconnect(
+        self, hass: HomeAssistant, mock_config_entry
+    ) -> None:
+        """A reconnect queued here would recreate the bond being removed.
+
+        The teardown clears the intentional-disconnect flag on its way out, so
+        without this the fallback close reads as an unexpected drop, and the
+        five-second timer fires once the gate has released its locks.
+        """
+        from bleak.exc import BleakError
+
+        from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+
+        mock_config_entry.add_to_hass(hass)
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        client = MagicMock()
+        client.is_connected = True
+
+        async def disconnect() -> None:
+            if client.disconnect.await_count == 1:
+                # Bleak raised, but the OS link is still up.
+                raise BleakError("still connected")
+            client.is_connected = False
+            # Backends report the drop through the callback.
+            coordinator._on_disconnect(client)
+
+        client.disconnect = AsyncMock(side_effect=disconnect)
+        coordinator._client = client
+
+        async with coordinator.async_transport_operation("unpair"):
+            assert coordinator._reconnect_timer is None
+
+        assert coordinator._reconnect_timer is None
+
+        await coordinator.async_shutdown()
+
     async def test_the_transport_gate_closes_the_link_after_an_unexpected_error(
         self, hass: HomeAssistant, mock_config_entry
     ) -> None:
@@ -5023,6 +5059,27 @@ class TestBondProvenanceAndTransportGate:
         assert evidence.proves_bond
         assert evidence.owner.source == "AA:BB:CC:11:22:33"
         assert coordinator.pairing_diagnostics["recovery_action"] is None
+
+        await coordinator.async_shutdown()
+
+    async def test_a_claimed_repair_write_is_not_seen_as_an_options_change(
+        self, hass: HomeAssistant, mock_config_entry
+    ) -> None:
+        """The claim is what stops the update listener reloading the entry."""
+        from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+
+        mock_config_entry.add_to_hass(hass)
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        hass.data.setdefault(DOMAIN, {})[mock_config_entry.entry_id] = coordinator
+        try:
+            coordinator.begin_internal_bond_update(True)
+            hass.config_entries.async_update_entry(
+                mock_config_entry,
+                data={**mock_config_entry.data, CONF_BLE_BOND_ESTABLISHED: True},
+            )
+            assert coordinator.consume_internal_entry_update(mock_config_entry) is True
+        finally:
+            hass.data[DOMAIN].pop(mock_config_entry.entry_id, None)
 
         await coordinator.async_shutdown()
 

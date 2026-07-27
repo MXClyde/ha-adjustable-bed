@@ -42,6 +42,7 @@
           "bond_state_existing": "✅ Denne Home Assistant-verten har allerede en Bluetooth-kobling for denne sengen. Du kan sette opp med den koblingen, eller fjerne den og pare på nytt.",
           "bond_state_multiple": "⚠️ Mer enn én Bluetooth-adapter på denne verten er koblet til denne sengen. Parer du på nytt, brukes den adapteren Home Assistant kobler til gjennom.",
           "bond_state_none": "ℹ️ Denne Home Assistant-verten har ingen Bluetooth-kobling for denne sengen ennå.",
+          "bond_state_route_uncertain": "ℹ️ Denne Home Assistant-verten har en Bluetooth-kobling for denne sengen, men mer enn én adapter eller proxy kan ta tilkoblingen, og Home Assistant velger først når den kobler til. Å sette opp med den eksisterende koblingen ville forutsatt en rute som ikke kan garanteres, så par heller på nytt og la tilkoblingen registrere hvilken transport som faktisk eier koblingen.",
           "bond_state_mismatched": "ℹ️ Denne Home Assistant-verten har en Bluetooth-kobling for denne sengen, men på en annen adapter enn den denne tilkoblingen bruker. En kobling hører til én adapter, så den kan ikke brukes her. Par på nytt for å lage en kobling på denne adapteren, eller velg den adapteren som allerede har koblingen."
         }
       }

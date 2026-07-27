@@ -290,8 +290,43 @@ _BOND_STATE_FALLBACKS: Final[dict[str, str]] = {
         "to one adapter, so that one cannot be used here. Pair again to create a "
         "bond on this adapter, or select the bonded adapter instead."
     ),
+    "bond_state_route_uncertain": (
+        "ℹ️ This Home Assistant host has a Bluetooth bond for this bed, but more "
+        "than one adapter or proxy could take the connection, and Home Assistant "
+        "chooses which when it connects. Setting up with the existing bond would "
+        "assume a route it cannot guarantee, so pair again instead and let the "
+        "connection record which transport really owns the bond."
+    ),
     "bond_state_none": ("ℹ️ This Home Assistant host has no Bluetooth bond for this bed yet."),
 }
+
+
+def _every_route_holds_bond(
+    prediction: PathPrediction,
+    inventory: LocalBondInventory,
+    record: LocalBondRecord,
+) -> bool:
+    """Return True when every route that could connect holds ``record``.
+
+    ``prediction.chosen`` is advisory by design: Home Assistant re-ranks every
+    connectable scanner inside ``connect()``, so a route is only certain when
+    there is nothing else it could pick. Certifying a bond persists a marker
+    that suppresses ``pair=True`` without ever connecting, so betting on the
+    prediction costs an ordinary bed a failed authentication and a retry, and a
+    bed that grants one connection per pairing window its whole window.
+    """
+    routes = tuple(path for path in prediction.paths if path.can_connect)
+    if not routes:
+        return False
+    for path in routes:
+        if path.transport is not TransportClass.LOCAL:
+            return False
+        selection = select_local_bond(
+            inventory, owner_source=path.source, owner_adapter=path.adapter
+        )
+        if not selection.is_exact or selection.record != record:
+            return False
+    return True
 
 
 class NotAdvertisingError(Exception):
@@ -2706,6 +2741,17 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             and existing_selection.is_exact
             and existing_selection.record == existing
         )
+        # Using the existing bond asserts it without ever connecting, so it is
+        # only honest when no other route could win and turn that assertion
+        # false. That is the same rule the deferred-pairing path applies to a
+        # bed granting one connection per pairing window: never persist a bond
+        # this setup did not prove. Replacing is judged separately, because it
+        # connects and records the route it actually took.
+        can_certify_existing = (
+            can_use_existing
+            and existing is not None
+            and _every_route_holds_bond(prediction, inventory, existing)
+        )
         can_replace_existing = can_use_existing and not grants_one_connection_per_pairing_window(
             bed_type or "", variant
         )
@@ -2713,7 +2759,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         if user_input is not None:
             action = user_input.get("action")
             should_pair = False
-            if action == "use_existing_bond" and can_use_existing and existing is not None:
+            if action == "use_existing_bond" and can_certify_existing and existing is not None:
                 return self._create_entry_for_existing_bond(existing)
             if action == "remove_bond_and_pair" and can_replace_existing and existing is not None:
                 self._pairing_remove_record = existing
@@ -2735,11 +2781,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 return await self._async_start_pairing_operation(step_id, prediction)
 
         options = ["pair_now"]
-        if can_use_existing:
+        if can_certify_existing:
             options.append("use_existing_bond")
         if can_replace_existing:
             options.append("remove_bond_and_pair")
-        default_action = "use_existing_bond" if can_use_existing else "pair_now"
+        default_action = "use_existing_bond" if can_certify_existing else "pair_now"
 
         return self.async_show_form(
             step_id=step_id,
@@ -2765,13 +2811,21 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     variant,
                 ),
                 "bond_state": await self._async_bond_state_note(
-                    inventory, over_proxy, can_use_existing
+                    inventory,
+                    over_proxy,
+                    can_certify_existing,
+                    route_uncertain=can_use_existing and not can_certify_existing,
                 ),
             },
         )
 
     async def _async_bond_state_note(
-        self, inventory: LocalBondInventory, over_proxy: bool, can_use_existing: bool
+        self,
+        inventory: LocalBondInventory,
+        over_proxy: bool,
+        can_use_existing: bool,
+        *,
+        route_uncertain: bool = False,
     ) -> str:
         """Say what is already known about this bed's bond, if anything.
 
@@ -2785,6 +2839,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             key = "bond_state_unreadable"
         elif can_use_existing:
             key = "bond_state_existing"
+        elif route_uncertain:
+            # The bond is identified and sits on a route that could be used; it
+            # just is not the only route, so it cannot be asserted up front.
+            key = "bond_state_route_uncertain"
         elif len(inventory.bonded_records) > 1:
             key = "bond_state_multiple"
         elif inventory.bonded_records:
