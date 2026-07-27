@@ -266,7 +266,7 @@
           "bond_state": "What this Home Assistant host already knows about a bond for this bed.",
           "bond_state_proxy": "ℹ️ This bed will pair through a Bluetooth proxy, which keeps the bond itself. Home Assistant cannot read or remove a bond stored on a proxy, so it cannot tell you whether one already exists.",
           "bond_state_unreadable": "ℹ️ Home Assistant could not read the Bluetooth bonds on this host, so it cannot tell whether this bed is already paired.",
-          "bond_state_existing": "✅ This Home Assistant host already has a Bluetooth bond for this bed. You can set it up using that bond, or remove it and pair again.",
+          "bond_state_existing": "✅ This Home Assistant host already has a Bluetooth bond for this bed. The actions below reflect whether the selected adapter can use it and whether it can be replaced safely.",
           "bond_state_multiple": "⚠️ More than one Bluetooth adapter on this host is bonded to this bed. Pairing again will use whichever adapter Home Assistant connects through.",
           "bond_state_none": "ℹ️ This Home Assistant host has no Bluetooth bond for this bed yet."
         }
