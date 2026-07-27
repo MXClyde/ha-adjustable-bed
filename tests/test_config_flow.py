@@ -4552,6 +4552,7 @@ async def test_an_existing_bond_on_another_adapter_is_not_offered(
         result["data_schema"].schema[next(iter(result["data_schema"].schema))].config["options"]
     )
     assert options == ["pair_now"]
+    assert "already has a Bluetooth bond" in result["description_placeholders"]["bond_state"]
 
 
 async def test_verifying_an_existing_bond_probes_its_owning_adapter(
@@ -4624,3 +4625,130 @@ async def test_bond_replacement_completes_even_if_the_flow_goes_away(
         await asyncio.wait_for(paired.wait(), timeout=1)
 
     assert paired.is_set()
+
+
+async def test_replacement_confirmation_revalidates_the_exact_bond(
+    hass: HomeAssistant,
+) -> None:
+    """A stale confirmation must not authorize removing a changed record."""
+    flow = _pairing_flow(hass)
+    flow._pairing_origin_step = "manual_pairing"
+    flow._pairing_remove_record = _bond_record()
+    changed = LocalBondInventory(status=BluezReadStatus.OK)
+
+    with (
+        _patch_inventory(changed),
+        _patch_local_prediction(),
+        patch.object(flow, "_async_start_pairing_operation") as start,
+    ):
+        result = await flow.async_step_pairing_replace_confirm({})
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "manual_pairing"
+    assert flow._pairing_remove_record is None
+    start.assert_not_called()
+
+
+async def test_replacement_holds_the_address_lock_until_pairing_finishes(
+    hass: HomeAssistant,
+) -> None:
+    """No other connector may enter after removal and before the new bond."""
+    flow = _pairing_flow(hass)
+    locked = False
+
+    @contextlib.asynccontextmanager
+    async def address_lock(_hass: HomeAssistant, _address: str):
+        nonlocal locked
+        locked = True
+        try:
+            yield
+        finally:
+            locked = False
+
+    async def remove(_record: LocalBondRecord) -> BondRemovalResult:
+        assert locked
+        return BondRemovalResult(status=BondRemovalStatus.REMOVED)
+
+    async def pair(*_args: Any, **_kwargs: Any) -> BondEvidence:
+        assert locked
+        return _verified_evidence()
+
+    with (
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_get_connect_lock",
+            address_lock,
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
+            side_effect=remove,
+        ),
+        patch.object(flow, "_attempt_pairing", side_effect=pair),
+    ):
+        result = await flow._async_replace_bond(
+            flow._manual_data[CONF_ADDRESS], _bond_record()
+        )
+
+    assert result.outcome is OperationOutcome.SUCCESS
+    assert not locked
+
+
+async def test_rpc_failure_leaves_bond_removal_unconfirmed(
+    hass: HomeAssistant,
+) -> None:
+    """A lost D-Bus reply cannot prove whether RemoveDevice took effect."""
+    flow = _pairing_flow(hass)
+    uncertain = BondRemovalResult(
+        status=BondRemovalStatus.RPC_FAILED,
+        error="timed out",
+    )
+    with (
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
+            AsyncMock(return_value=uncertain),
+        ),
+        patch.object(flow, "_attempt_pairing") as attempt,
+    ):
+        result = await flow._async_replace_bond(
+            flow._manual_data[CONF_ADDRESS], _bond_record()
+        )
+
+    assert result.outcome is OperationOutcome.UNPAIR_UNCONFIRMED
+    attempt.assert_not_called()
+
+
+async def test_existing_bond_verification_rejects_a_rerouted_connection(
+    hass: HomeAssistant,
+) -> None:
+    """Advertisement selection alone cannot pin HA's eventual connection route."""
+    flow = _pairing_flow(hass)
+    flow._pairing_verify_source = "11:22:33:44:55:66"
+    client = MagicMock()
+    client.disconnect = AsyncMock()
+    verifier = AsyncMock()
+
+    with (
+        _patch_pairing_gate(),
+        patch(
+            "bleak_retry_connector.establish_connection",
+            AsyncMock(return_value=client),
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.client_source",
+            return_value="22:33:44:55:66:77",
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_path_for_source",
+            return_value=None,
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_verify_authenticated_access",
+            verifier,
+        ),
+    ):
+        result = await flow._async_pair_and_classify(
+            flow._manual_data[CONF_ADDRESS], "verify_existing"
+        )
+
+    assert result.outcome is OperationOutcome.BOND_VERIFICATION_INCONCLUSIVE
+    verifier.assert_not_awaited()
+    client.disconnect.assert_awaited_once()

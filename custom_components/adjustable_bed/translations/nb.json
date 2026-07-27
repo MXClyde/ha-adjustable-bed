@@ -71,7 +71,7 @@
         "data_description": {
           "bond_state_proxy": "ℹ️ Denne sengen pares via en Bluetooth-proxy, som beholder koblingen selv. Home Assistant kan verken lese eller fjerne en kobling som ligger på en proxy, og kan derfor ikke si om det allerede finnes en.",
           "bond_state_unreadable": "ℹ️ Home Assistant klarte ikke å lese Bluetooth-koblingene på denne verten, og kan derfor ikke si om sengen allerede er paret.",
-          "bond_state_existing": "✅ Denne Home Assistant-verten har allerede en Bluetooth-kobling for denne sengen. Du kan sette opp med den koblingen, eller fjerne den og pare på nytt.",
+          "bond_state_existing": "✅ Denne Home Assistant-verten har allerede en Bluetooth-kobling for denne sengen. Valgene nedenfor gjenspeiler om den valgte adapteren kan bruke koblingen, og om det er trygt å erstatte den.",
           "bond_state_multiple": "⚠️ Mer enn én Bluetooth-adapter på denne verten er koblet til denne sengen. Parer du på nytt, brukes den adapteren Home Assistant kobler til gjennom.",
           "bond_state_none": "ℹ️ Denne Home Assistant-verten har ingen Bluetooth-kobling for denne sengen ennå.",
           "bond_state_deferred": "ℹ️ Denne sengen gir omtrent én Bluetooth-tilkobling per paringsvindu, så Home Assistant overlater koblingen til den første tilkoblingen etter oppsettet i stedet for å bruke opp tilkoblingen her. Bruk «Fjern Bluetooth-koblingen» i enhetens innstillinger hvis en gammel kobling må erstattes."
