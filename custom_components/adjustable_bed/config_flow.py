@@ -459,6 +459,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         self._pairing_remove_record: LocalBondRecord | None = None
         # The evidence behind a verified bond, kept for logging and diagnostics.
         self._pairing_success_evidence: BondEvidence | None = None
+        # Which pairing form to return to on Retry, and whether the pairing
+        # result form has actually been rendered (see async_step_pairing_result).
+        self._pairing_origin_step: str | None = None
+        self._pairing_result_shown: bool = False
         _LOGGER.debug("AdjustableBedConfigFlow initialized")
 
     def _set_device_title_placeholders(self, name: str | None, address: str) -> None:
@@ -2235,17 +2239,32 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         if user_input is not None:
             action = user_input.get("action")
             if action == "use_existing_bond" and can_use_existing:
+                # No BLE work at all: this only records what the host already
+                # told us, so it stays inline.
                 return self._create_entry_for_existing_bond()
-            if action == "remove_bond_and_pair" and can_use_existing and existing is not None:
-                self._pairing_remove_record = existing
-                result = await self._async_handle_pair_now(errors)
-                if result is not None:
-                    return result
-            elif action in ("pair_now", "retry"):
-                self._pairing_remove_record = None
-                result = await self._async_handle_pair_now(errors)
-                if result is not None:
-                    return result
+            if action in ("pair_now", "retry", "remove_bond_and_pair"):
+                self._pairing_remove_record = (
+                    existing
+                    if action == "remove_bond_and_pair" and can_use_existing
+                    else None
+                )
+                deferred = self._async_deferred_pairing_entry()
+                if deferred is not None:
+                    return deferred
+                self._pairing_origin_step = step_id
+                self._pairing_result_shown = False
+                self.async_begin_operation(
+                    name=self._manual_data.get(CONF_NAME) or address,
+                    address=address,
+                    prediction=prediction,
+                    action=SetupAction.LOCATING,
+                    policy=ConnectionLifetimePolicy.ORDINARY,
+                    placeholders={
+                        "name": self._manual_data.get(CONF_NAME) or address,
+                        "address": address,
+                    },
+                )
+                return await self.async_step_pairing_progress()
 
         options = ["pair_now"]
         if can_use_existing:
@@ -2312,37 +2331,49 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         """Handle Bluetooth pairing for manually selected beds that require it."""
         return await self._async_pairing_step("manual_pairing", user_input)
 
-    async def _async_handle_pair_now(
-        self, errors: dict[str, str]
-    ) -> ConfigFlowResult | None:
-        """Run the "Pair Now" action for the two pairing steps.
+    def _async_deferred_pairing_entry(self) -> ConfigFlowResult | None:
+        """Create the entry now for beds that must not spend a connection.
 
-        Returns the created entry, or None when the caller should redisplay its
-        form with ``errors`` populated.
+        LP Comfort Connect grants roughly one usable BLE connection per power
+        cycle. Pairing here would open, bond and then close the connection the
+        box will not grant again, leaving ``async_setup_entry`` with nothing to
+        connect to (issue #385). Let the coordinator's first connection do
+        connect -> discover -> bond -> stay connected instead.
+
+        Checked before any operation starts, so ``KEEP_FIRST_LINK`` is enforced
+        ahead of anything that could open a link rather than inside it.
         """
         assert self._manual_data is not None
-        address = self._manual_data.get(CONF_ADDRESS)
-        title = self._manual_data.get(CONF_NAME, "Adjustable Bed")
-
-        if grants_one_connection_per_pairing_window(
+        if not grants_one_connection_per_pairing_window(
             self._manual_data.get(CONF_BED_TYPE) or "",
             self._manual_data.get(CONF_PROTOCOL_VARIANT),
         ):
-            # Pairing here would open, bond, and then close a connection that
-            # the box will not grant a second time, leaving async_setup_entry
-            # with nothing to connect to (issue #385). Create the entry without
-            # a bond marker and let the coordinator's first connection do
-            # connect -> discover -> bond -> stay connected.
-            _LOGGER.info(
-                "Deferring the BLE bond for %s to the first coordinator "
-                "connection: this bed grants one connection per pairing window",
-                address,
-            )
-            return self.async_create_entry(title=title, data=self._manual_data)
+            return None
+        _LOGGER.info(
+            "Deferring the BLE bond for %s to the first coordinator connection: "
+            "this bed grants one connection per pairing window",
+            self._manual_data.get(CONF_ADDRESS),
+        )
+        return self.async_create_entry(
+            title=self._manual_data.get(CONF_NAME, "Adjustable Bed"),
+            data=self._manual_data,
+        )
+
+    async def _async_pairing_worker(self) -> OperationResult:
+        """Remove a replaced bond if asked, pair, and verify - as one operation.
+
+        Returns a typed outcome rather than a bare bool so the result step can
+        give advice that fits what actually happened. A bed that never answered
+        a scan and a bed whose link stayed unauthenticated need different
+        advice, and #461 forbids presenting the first as a pairing failure.
+        """
+        assert self._manual_data is not None
+        address = self._manual_data.get(CONF_ADDRESS)
 
         # Replacing an existing host bond is a separate, confirmed action: pair
         # cannot silently delete one.
         if self._pairing_remove_record is not None:
+            self.async_report_action(SetupAction.UNPAIRING)
             removal = await async_remove_local_bond(self._pairing_remove_record)
             self._pairing_remove_record = None
             if not removal.succeeded:
@@ -2351,53 +2382,168 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     address,
                     removal.error,
                 )
-                errors["base"] = "bond_removal_failed"
-                return None
+                return OperationResult(
+                    outcome=OperationOutcome.UNPAIR_FAILED,
+                    detail=removal.error or str(removal.status),
+                )
 
         try:
             evidence = await self._attempt_pairing(address)
         except NotAdvertisingError as err:
-            # A bed that never answered a scan is not a pairing failure, and
-            # saying so would send the user after the wrong thing.
             _LOGGER.info("Not pairing %s: %s", address, err.status)
-            errors["base"] = "not_advertising"
-            return None
+            return OperationResult(
+                outcome=OperationOutcome.NOT_ADVERTISING, detail=str(err.status)
+            )
         except (NotImplementedError, TypeError) as err:
             # NotImplementedError: ESPHome < 2024.3.0 doesn't support pairing
             # TypeError: older bleak-retry-connector doesn't have pair kwarg
             _LOGGER.warning("Pairing not supported: %s", err)
-            errors["base"] = "pairing_not_supported"
-            return None
-        except Exception as err:
+            return OperationResult(
+                outcome=OperationOutcome.PAIRING_NOT_SUPPORTED,
+                detail=str(err) or err.__class__.__name__,
+            )
+        except Exception as err:  # noqa: BLE001 - any other failure is a connect failure
             _LOGGER.warning("Pairing failed for %s: %s", address, err)
-            errors["base"] = "pairing_failed"
-            return None
+            return OperationResult(
+                outcome=OperationOutcome.CONNECTION_FAILED,
+                detail=str(err) or err.__class__.__name__,
+            )
 
         if evidence.status is BondVerificationStatus.AUTH_FAILED:
             # The link came up but is still unauthenticated, which is the one
             # outcome that says the bond really did not form.
-            errors["base"] = "bond_verification_failed"
-            return None
-
-        entry_data = dict(self._manual_data)
-        if evidence.proves_bond:
-            # Only a positively verified bond writes the marker, and it records
-            # which transport owns it so a later unpair knows where to look.
-            entry_data = self._mark_ble_bond_established(entry_data)
-            entry_data[CONF_BLE_BOND_CONTEXT] = build_bond_context(evidence)
-            self._pairing_success_evidence = evidence
-        else:
-            # UNSUPPORTED or INCONCLUSIVE: pairing was requested and nothing
-            # contradicted it, but there is no proof. Leave the marker unset so
-            # the coordinator's first connection asks to pair again rather than
-            # skipping it on our say-so.
-            _LOGGER.info(
-                "Pairing for %s completed without proof of a bond (%s); the "
-                "coordinator will request pairing again on its first connection",
-                address,
-                evidence.status,
+            return OperationResult(
+                outcome=OperationOutcome.BOND_VERIFICATION_FAILED,
+                detail=evidence.error,
+                payload=evidence,
             )
-        return self.async_create_entry(title=title, data=entry_data)
+        return OperationResult(outcome=OperationOutcome.SUCCESS, payload=evidence)
+
+    async def async_step_pairing_progress(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Pair behind a live progress view instead of freezing the form.
+
+        Pairing is the slowest thing setup does - it waits for the bed to
+        advertise, connects, bonds and then verifies - so it is exactly the
+        operation #457 means when it says no attempt may leave the previous form
+        apparently frozen.
+        """
+        return await self.async_run_operation_step(
+            step_id="pairing_progress",
+            worker=self._async_pairing_worker,
+            next_step_id="pairing_result",
+        )
+
+    async def async_step_pairing_result(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Acknowledge what pairing achieved, and let the user act on it.
+
+        Like ``verify_connection``, this accepts input only once it has rendered
+        its own form: the flow manager replays the caller's original input
+        through its progress-done loop, and that must never be read as
+        confirmation of a result the user has not seen.
+        """
+        assert self._manual_data is not None
+        result = self.operation.result
+        evidence = result.payload if result is not None else None
+        succeeded = result is not None and result.succeeded
+
+        if user_input is not None and self._pairing_result_shown:
+            if user_input.get("action") == "retry":
+                self._pairing_result_shown = False
+                return await self._async_pairing_step(
+                    self._pairing_origin_step or "bluetooth_pairing", None
+                )
+            entry_data = dict(self._manual_data)
+            if isinstance(evidence, BondEvidence) and evidence.proves_bond:
+                # Only a positively verified bond writes the marker, and it
+                # records which transport owns it so a later unpair knows where
+                # to look.
+                entry_data = self._mark_ble_bond_established(entry_data)
+                entry_data[CONF_BLE_BOND_CONTEXT] = build_bond_context(evidence)
+                self._pairing_success_evidence = evidence
+            return self.async_create_entry(
+                title=self._manual_data.get(CONF_NAME, "Adjustable Bed"),
+                data=entry_data,
+            )
+
+        schema: dict[vol.Marker, Any] = {}
+        if not succeeded:
+            schema[vol.Required("action", default="retry")] = SelectSelector(
+                SelectSelectorConfig(
+                    options=["retry", "finish"],
+                    mode=SelectSelectorMode.LIST,
+                    translation_key="pairing_result_action",
+                )
+            )
+
+        self._pairing_result_shown = True
+        return self.async_show_form(
+            step_id="pairing_result",
+            data_schema=vol.Schema(schema),
+            description_placeholders={
+                "name": self._manual_data.get(CONF_NAME, "Unknown"),
+                "outcome": await self._async_pairing_outcome_note(result, evidence),
+            },
+        )
+
+    async def _async_pairing_outcome_note(
+        self, result: OperationResult | None, evidence: Any
+    ) -> str:
+        """Describe what pairing achieved, and over which transport."""
+        if result is None:
+            return "❌ Pairing did not run. Select **Try again**."
+
+        if result.succeeded and isinstance(evidence, BondEvidence):
+            if evidence.proves_bond:
+                owner = evidence.owner
+                where = owner.source or str(owner.transport)
+                if owner.transport is TransportClass.PROXY:
+                    return (
+                        f"✅ Paired, and the bond was confirmed. It is stored on the "
+                        f"Bluetooth proxy **{where}**, not on Home Assistant, so "
+                        "moving this bed to a different proxy will mean pairing again."
+                    )
+                return (
+                    f"✅ Paired, and the bond was confirmed. It is stored on this "
+                    f"Home Assistant host (**{where}**)."
+                )
+            # Nothing contradicted the pairing, but nothing proved it either.
+            return (
+                "⚠️ Pairing completed, but this bed gives Home Assistant no way to "
+                "confirm the bond. Setup will finish; the integration will ask to "
+                "pair again on its first connection rather than assume it worked."
+            )
+
+        notes = {
+            OperationOutcome.NOT_ADVERTISING: (
+                "❌ The bed is not advertising, so no connection was attempted. Put it "
+                "into pairing mode or move it closer to an adapter or proxy, then "
+                "select **Try again**."
+            ),
+            OperationOutcome.BOND_VERIFICATION_FAILED: (
+                "❌ The bed connected, but the link is still unauthenticated, so the "
+                "bond did not form. Put the bed back into pairing mode and select "
+                "**Try again**."
+            ),
+            OperationOutcome.PAIRING_NOT_SUPPORTED: (
+                "❌ This Bluetooth adapter or proxy cannot pair. ESPHome proxies need "
+                "ESPHome 2024.3.0 or newer; otherwise pair through a Bluetooth adapter "
+                "on the Home Assistant host."
+            ),
+            OperationOutcome.UNPAIR_FAILED: (
+                "❌ The existing bond could not be removed, so pairing was not "
+                "attempted and the old bond is still in place."
+            ),
+            OperationOutcome.CANCELLED: "❌ Pairing was cancelled.",
+        }
+        return notes.get(
+            result.outcome,
+            "❌ Could not pair. Another app or the bed's own remote may be holding the "
+            "bed's connection, or it may be out of range. Select **Try again**.",
+        )
 
     async def _attempt_pairing(self, address: str | None) -> BondEvidence:
         """Pair using the protocol's required connection ordering, and verify it.

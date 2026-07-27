@@ -130,6 +130,7 @@ from custom_components.adjustable_bed.kaidi_protocol import (
     KAIDI_ADV_TYPE_BROADCAST,
     KaidiAdvertisement,
 )
+from custom_components.adjustable_bed.setup_operation import OperationOutcome
 
 
 def test_skips_setup_connection_probe_for_pairing_window_beds() -> None:
@@ -312,10 +313,15 @@ class TestPairingPersistence:
         """Pair Now should persist that the bed is already bonded."""
         flow = self._new_pairing_flow(hass)
 
-        with patch.object(
-            flow, "_attempt_pairing", new=AsyncMock(return_value=_verified_evidence())
+        with (
+            patch.object(
+                flow, "_attempt_pairing", new=AsyncMock(return_value=_verified_evidence())
+            ),
+            _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK)),
         ):
-            result = await flow.async_step_bluetooth_pairing({"action": "pair_now"})
+            progress = await flow.async_step_bluetooth_pairing({"action": "pair_now"})
+            assert progress["type"] is FlowResultType.SHOW_PROGRESS
+            result = await _finish_pairing(hass, flow)
 
         assert result["type"] is FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_BLE_BOND_ESTABLISHED] is True
@@ -340,7 +346,10 @@ class TestPairingPersistence:
         flow._manual_data[CONF_BED_TYPE] = BED_TYPE_LEGGETT_GEN2
 
         attempt_pairing = AsyncMock(return_value=_verified_evidence())
-        with patch.object(flow, "_attempt_pairing", new=attempt_pairing):
+        with (
+            patch.object(flow, "_attempt_pairing", new=attempt_pairing),
+            _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK)),
+        ):
             result = await getattr(flow, step)({"action": "pair_now"})
 
         assert result["type"] is FlowResultType.CREATE_ENTRY
@@ -3619,6 +3628,23 @@ async def test_a_bed_that_cannot_be_released_is_not_unpaired(
 # ---------------------------------------------------------------------------
 
 
+async def _finish_pairing(hass: HomeAssistant, flow: Any) -> Any:
+    """Drive a started pairing operation through to its result form and submit."""
+    await hass.async_block_till_done()
+    await flow.async_step_pairing_progress()
+    result = await flow.async_step_pairing_result()
+    assert result["type"] is FlowResultType.FORM
+    return await flow.async_step_pairing_result({"action": "finish"})
+
+
+async def _run_pairing(hass: HomeAssistant, flow: Any) -> Any:
+    """Start pairing from the form and drive it to the created entry."""
+    with _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK)):
+        progress = await flow.async_step_bluetooth_pairing({"action": "pair_now"})
+        assert progress["type"] is FlowResultType.SHOW_PROGRESS
+        return await _finish_pairing(hass, flow)
+
+
 def _pairing_flow(hass: HomeAssistant) -> AdjustableBedConfigFlow:
     flow = AdjustableBedConfigFlow()
     flow.hass = hass
@@ -3648,13 +3674,11 @@ async def test_pairing_never_connects_to_a_bed_that_is_not_advertising(
         ),
         patch("bleak_retry_connector.establish_connection") as connects,
     ):
-        errors: dict[str, str] = {}
-        result = await flow._async_handle_pair_now(errors)
+        result = await flow._async_pairing_worker()
 
     connects.assert_not_called()
-    assert result is None
     # Not a pairing failure: saying so would send the user after the wrong thing.
-    assert errors["base"] == "not_advertising"
+    assert result.outcome is OperationOutcome.NOT_ADVERTISING
 
 
 async def test_an_unauthenticated_link_is_not_recorded_as_a_bond(
@@ -3670,11 +3694,9 @@ async def test_an_unauthenticated_link_is_not_recorded_as_a_bond(
         error="Insufficient authentication",
     )
     with patch.object(flow, "_attempt_pairing", AsyncMock(return_value=failed)):
-        errors: dict[str, str] = {}
-        result = await flow._async_handle_pair_now(errors)
+        result = await flow._async_pairing_worker()
 
-    assert result is None
-    assert errors["base"] == "bond_verification_failed"
+    assert result.outcome is OperationOutcome.BOND_VERIFICATION_FAILED
 
 
 async def test_an_unprovable_bond_does_not_write_the_marker(
@@ -3693,7 +3715,7 @@ async def test_an_unprovable_bond_does_not_write_the_marker(
         observed_at="2026-07-27T00:00:00+00:00",
     )
     with patch.object(flow, "_attempt_pairing", AsyncMock(return_value=unsupported)):
-        result = await flow._async_handle_pair_now({})
+        result = await _run_pairing(hass, flow)
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"].get(CONF_BLE_BOND_ESTABLISHED) is not True
@@ -3713,7 +3735,7 @@ async def test_an_inconclusive_probe_does_not_write_the_marker(
         error="timeout",
     )
     with patch.object(flow, "_attempt_pairing", AsyncMock(return_value=inconclusive)):
-        result = await flow._async_handle_pair_now({})
+        result = await _run_pairing(hass, flow)
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"].get(CONF_BLE_BOND_ESTABLISHED) is not True
@@ -3729,7 +3751,7 @@ async def test_a_verified_bond_over_a_proxy_records_the_proxy_as_owner(
         "_attempt_pairing",
         AsyncMock(return_value=_verified_evidence(TransportClass.PROXY)),
     ):
-        result = await flow._async_handle_pair_now({})
+        result = await _run_pairing(hass, flow)
 
     assert result["data"][CONF_BLE_BOND_ESTABLISHED] is True
     assert result["data"][CONF_BLE_BOND_CONTEXT]["transport"] == "proxy"
@@ -3751,12 +3773,10 @@ async def test_replacing_a_bond_that_cannot_be_removed_does_not_pair(
         ),
         patch.object(flow, "_attempt_pairing") as attempt,
     ):
-        errors: dict[str, str] = {}
-        result = await flow._async_handle_pair_now(errors)
+        result = await flow._async_pairing_worker()
 
     attempt.assert_not_called()
-    assert result is None
-    assert errors["base"] == "bond_removal_failed"
+    assert result.outcome is OperationOutcome.UNPAIR_FAILED
 
 
 async def test_a_one_connection_bed_defers_pairing_without_removing_a_bond(
@@ -3776,10 +3796,97 @@ async def test_a_one_connection_bed_defers_pairing_without_removing_a_bond(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond"
         ) as removal,
         patch.object(flow, "_attempt_pairing") as attempt,
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK)),
     ):
-        result = await flow._async_handle_pair_now({})
+        result = await flow.async_step_bluetooth_pairing({"action": "pair_now"})
 
     removal.assert_not_called()
     attempt.assert_not_called()
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"].get(CONF_BLE_BOND_ESTABLISHED) is not True
+
+
+async def test_pair_now_immediately_shows_a_progress_view(
+    hass: HomeAssistant,
+) -> None:
+    """Pairing is the slowest thing setup does, so it must not freeze the form."""
+    flow = _pairing_flow(hass)
+    with (
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK)),
+        patch.object(
+            flow, "_attempt_pairing", AsyncMock(return_value=_verified_evidence())
+        ),
+    ):
+        result = await flow.async_step_bluetooth_pairing({"action": "pair_now"})
+
+    assert result["type"] is FlowResultType.SHOW_PROGRESS
+    assert result["step_id"] == "pairing_progress"
+    await hass.async_block_till_done()
+
+
+async def test_a_verified_pairing_result_names_the_transport(
+    hass: HomeAssistant,
+) -> None:
+    """#461 wants a visible confirmation, and it has to say where the bond went."""
+    flow = _pairing_flow(hass)
+    with (
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK)),
+        patch.object(
+            flow,
+            "_attempt_pairing",
+            AsyncMock(return_value=_verified_evidence(TransportClass.PROXY)),
+        ),
+    ):
+        await flow.async_step_bluetooth_pairing({"action": "pair_now"})
+        await hass.async_block_till_done()
+        await flow.async_step_pairing_progress()
+        result = await flow.async_step_pairing_result()
+
+    outcome = result["description_placeholders"]["outcome"]
+    assert "confirmed" in outcome
+    assert "proxy" in outcome.lower()
+    assert "hci0" in outcome
+
+
+async def test_each_pairing_failure_gets_its_own_advice(
+    hass: HomeAssistant,
+) -> None:
+    """A bed that never answered a scan needs different advice from a failed bond."""
+    flow = _pairing_flow(hass)
+    stale = AdvertisementEvidence(status=FreshnessStatus.STALE, age_seconds=600.0)
+    with (
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK)),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
+            AsyncMock(return_value=(stale, None)),
+        ),
+    ):
+        await flow.async_step_bluetooth_pairing({"action": "pair_now"})
+        await hass.async_block_till_done()
+        await flow.async_step_pairing_progress()
+        result = await flow.async_step_pairing_result()
+
+    assert "not advertising" in result["description_placeholders"]["outcome"]
+    # A failure offers a way forward rather than a dead end.
+    assert result["data_schema"].schema
+
+
+async def test_a_replayed_submission_cannot_confirm_a_pairing_result(
+    hass: HomeAssistant,
+) -> None:
+    """The flow manager replays the caller's input through its progress-done loop."""
+    flow = _pairing_flow(hass)
+    with (
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK)),
+        patch.object(
+            flow, "_attempt_pairing", AsyncMock(return_value=_verified_evidence())
+        ),
+    ):
+        await flow.async_step_bluetooth_pairing({"action": "pair_now"})
+        await hass.async_block_till_done()
+        await flow.async_step_pairing_progress()
+        # The original submission arriving before the result form was drawn.
+        replayed = await flow.async_step_pairing_result({"action": "pair_now"})
+
+    assert replayed["type"] is FlowResultType.FORM
+    assert replayed["step_id"] == "pairing_result"

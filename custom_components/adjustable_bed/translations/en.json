@@ -311,6 +311,20 @@
       "setup_progress": {
         "title": "Checking the connection",
         "description": "Checking **{name}** ({address})…"
+      },
+      "pairing_progress": {
+        "title": "Pairing",
+        "description": "Pairing with **{name}** ({address})…"
+      },
+      "pairing_result": {
+        "title": "Pairing result",
+        "description": "**{name}**\n\n{outcome}",
+        "data": {
+          "action": "What next"
+        },
+        "data_description": {
+          "action": "Try again keeps the bed type, adapter and protocol settings you already chose."
+        }
       }
     },
     "progress": {
@@ -974,6 +988,12 @@
         "pair_now": "Pair now",
         "use_existing_bond": "Set up using the existing bond",
         "remove_bond_and_pair": "Remove the existing bond and pair again"
+      }
+    },
+    "pairing_result_action": {
+      "options": {
+        "retry": "Try again",
+        "finish": "Finish setup without pairing"
       }
     }
   }

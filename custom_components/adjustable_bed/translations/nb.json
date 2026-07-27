@@ -29,6 +29,20 @@
       "setup_progress": {
         "title": "Sjekker tilkoblingen",
         "description": "Sjekker **{name}** ({address})…"
+      },
+      "pairing_progress": {
+        "title": "Parer",
+        "description": "Parer med **{name}** ({address})…"
+      },
+      "pairing_result": {
+        "title": "Resultat av paring",
+        "description": "**{name}**\n\n{outcome}",
+        "data": {
+          "action": "Hva nå"
+        },
+        "data_description": {
+          "action": "Prøv igjen beholder sengetypen, adapteren og protokollinnstillingene du allerede valgte."
+        }
       }
     },
     "progress": {
@@ -59,6 +73,12 @@
         "pair_now": "Par nå",
         "use_existing_bond": "Sett opp med den eksisterende koblingen",
         "remove_bond_and_pair": "Fjern den eksisterende koblingen og par på nytt"
+      }
+    },
+    "pairing_result_action": {
+      "options": {
+        "retry": "Prøv igjen",
+        "finish": "Fullfør oppsettet uten paring"
       }
     }
   },
