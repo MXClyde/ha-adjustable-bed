@@ -105,6 +105,18 @@ class TestFreshnessStatus:
             evidence = async_check_advertisement(hass, TEST_ADDRESS)
         assert evidence.status is FreshnessStatus.FRESH
 
+    async def test_required_newer_advertisement_rejects_cached_history(
+        self, hass: HomeAssistant
+    ) -> None:
+        with _patch_last_service_info(_service_info(age=1.0)):
+            evidence = async_check_advertisement(
+                hass,
+                TEST_ADDRESS,
+                seen_after=NOW,
+            )
+        assert evidence.status is FreshnessStatus.BEFORE_REQUIRED_TIME
+        assert not evidence.is_fresh
+
     async def test_missing_history_is_missing(self, hass: HomeAssistant) -> None:
         with _patch_last_service_info(None):
             evidence = async_check_advertisement(hass, TEST_ADDRESS)

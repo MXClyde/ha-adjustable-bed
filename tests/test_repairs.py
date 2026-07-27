@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from dataclasses import replace
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -17,6 +20,11 @@ from homeassistant.helpers.issue_registry import IssueSeverity
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.adjustable_bed.bluetooth_bond import (
+    BluezReadStatus,
+    LocalBondInventory,
+    LocalBondRecord,
+)
 from custom_components.adjustable_bed.bluetooth_transport import (
     ConnectionPath,
     TransportClass,
@@ -29,8 +37,10 @@ from custom_components.adjustable_bed.bond_verification import (
 )
 from custom_components.adjustable_bed.const import (
     BED_TYPE_LEGGETT_GEN2,
+    BED_TYPE_OKIMAT,
     CONF_BED_TYPE,
     CONF_BLE_BOND_ESTABLISHED,
+    CONF_BLE_BOND_MARKER_UNRELIABLE,
     CONF_PAIR_ID,
     CONF_PAIR_MEMBER_ADDRESSES,
     DOMAIN,
@@ -48,6 +58,10 @@ from custom_components.adjustable_bed.repairs import (
     async_refresh_combine_beds_issue,
     async_setup_combine_beds_issue,
     async_track_combine_beds_issue,
+)
+from custom_components.adjustable_bed.setup_operation import (
+    OperationOutcome,
+    OperationResult,
 )
 
 from .conftest import TEST_ADDRESS, TEST_NAME
@@ -394,6 +408,36 @@ async def test_confirm_step_shows_form_first(hass: HomeAssistant) -> None:
     assert result["description_placeholders"]["address"] == TEST_ADDRESS
 
 
+async def test_one_link_proxy_failure_keeps_the_guided_pairing_flow(
+    hass: HomeAssistant,
+) -> None:
+    """A live coordinator can safely pair the one link already held via a proxy."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_LEGGETT_GEN2,
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_gen2_proxy_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(
+        TEST_ADDRESS,
+        TEST_NAME,
+        entry.entry_id,
+        issue_data={"evidence_transport": "proxy", "evidence_source": "proxy-source"},
+    )
+    flow.hass = hass
+
+    result = await flow.async_step_init()
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "confirm"
+
+
 async def test_confirm_step_resolves_on_successful_pair(hass: HomeAssistant) -> None:
     """Submitting the form resolves the issue when pairing succeeds."""
     flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, None)
@@ -415,6 +459,191 @@ async def test_confirm_step_aborts_on_failed_pair(hass: HomeAssistant) -> None:
 
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "pairing_failed"
+
+
+async def test_stale_recovery_stops_when_the_issue_was_cleared(
+    hass: HomeAssistant,
+) -> None:
+    """An open confirmation cannot act after its evidence-bearing issue is gone."""
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, None)
+    flow.hass = hass
+    flow._offer = MagicMock()
+
+    with patch(
+        "custom_components.adjustable_bed.repairs.async_recover_local_bond"
+    ) as recover:
+        result = await flow._async_recovery_worker()
+
+    assert result.outcome is OperationOutcome.UNPAIR_FAILED
+    assert result.detail == "pairing_issue_no_longer_exists"
+    recover.assert_not_called()
+
+
+def _verified_local_bond() -> BondEvidence:
+    return BondEvidence(
+        status=BondVerificationStatus.VERIFIED,
+        owner=BondOwner(
+            transport=TransportClass.LOCAL,
+            source="11:22:33:44:55:66",
+            adapter="hci0",
+        ),
+        operation="stale_bond_recovery",
+        observed_at="2026-07-27T00:00:00+00:00",
+    )
+
+
+async def test_recovery_persistence_relies_on_the_loaded_entry_listener(
+    hass: HomeAssistant,
+) -> None:
+    """A loaded entry's update listener must be the only reload source."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: "okimat",
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="loaded_recovery_entry",
+    )
+    entry.add_to_hass(hass)
+    coordinator = MagicMock()
+    coordinator.consume_internal_entry_update.return_value = False
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    async def reload_listener(
+        _hass: HomeAssistant, updated_entry: MockConfigEntry
+    ) -> None:
+        await hass.config_entries.async_reload(updated_entry.entry_id)
+
+    entry.add_update_listener(reload_listener)
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, entry.entry_id)
+    flow.hass = hass
+    result = OperationResult(
+        outcome=OperationOutcome.SUCCESS,
+        payload=_verified_local_bond(),
+    )
+
+    with patch.object(
+        hass.config_entries, "async_reload", new=AsyncMock()
+    ) as mock_reload:
+        await flow._async_persist_recovered_bond(result)
+        await hass.async_block_till_done()
+
+    mock_reload.assert_awaited_once_with(entry.entry_id)
+
+
+async def test_recovery_persistence_reloads_an_unloaded_entry(
+    hass: HomeAssistant,
+) -> None:
+    """A setup-retry entry has no update listener, so persistence reloads it."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: "okimat",
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="unloaded_recovery_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, entry.entry_id)
+    flow.hass = hass
+    result = OperationResult(
+        outcome=OperationOutcome.SUCCESS,
+        payload=_verified_local_bond(),
+    )
+
+    with patch.object(
+        hass.config_entries, "async_reload", new=AsyncMock()
+    ) as mock_reload:
+        await flow._async_persist_recovered_bond(result)
+
+    mock_reload.assert_awaited_once_with(entry.entry_id)
+
+
+async def test_a_removed_bond_stops_being_recorded_even_when_recovery_fails(
+    hass: HomeAssistant,
+) -> None:
+    """The marker for a bond that is provably gone must go with it.
+
+    The repair stays open, and the entry would otherwise still claim a bond, so
+    the next connection would skip pair=True on an unbonded device and repeat
+    the authentication failure this repair was raised for.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: "okimat",
+            CONF_BLE_BOND_ESTABLISHED: True,
+            CONF_BLE_BOND_MARKER_UNRELIABLE: True,
+            CONF_BLE_BOND_CONTEXT: {
+                "version": 1,
+                "transport": "local",
+                "source": "11:22:33:44:55:66",
+                "adapter": "hci0",
+            },
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="failed_recovery_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, entry.entry_id)
+    flow.hass = hass
+
+    await flow._async_clear_removed_bond()
+
+    assert CONF_BLE_BOND_ESTABLISHED not in entry.data
+    assert CONF_BLE_BOND_CONTEXT not in entry.data
+    assert CONF_BLE_BOND_MARKER_UNRELIABLE not in entry.data
+
+
+def test_pairing_repair_translations_cover_every_progress_and_result() -> None:
+    """The Repairs namespace must localize phases and terminal guidance."""
+    root = Path(__file__).parents[1] / "custom_components/adjustable_bed"
+    required_progress = {
+        "locating",
+        "connecting",
+        "pairing",
+        "verifying_bond",
+        "disconnecting",
+        "unpairing",
+    }
+    # Every step id this flow can render. A step with no strings shows the user
+    # an untitled, undescribed dialog for the whole time it is on screen.
+    required_steps = {
+        "confirm",
+        "proxy_bond",
+        "stale_bond_confirm",
+        "stale_bond_progress",
+        "stale_bond_result",
+    }
+    required_results = {
+        "recovery_success",
+        "recovery_not_run",
+        "recovery_not_advertising",
+        "recovery_unpair_failed",
+        "recovery_unpair_unconfirmed",
+        "recovery_failed_unchanged",
+        "recovery_partial",
+    }
+    for relative in ("strings.json", "translations/en.json", "translations/nb.json"):
+        data = json.loads((root / relative).read_text())
+        pairing = data["issues"]["pairing_required"]
+        flow = pairing["fix_flow"]
+        assert required_progress <= flow["progress"].keys()
+        assert required_results <= flow["abort"].keys()
+        assert "title" in pairing
+        assert required_steps <= flow["step"].keys()
+        assert "pairing_failed" in flow["abort"]
+        for step in required_steps:
+            assert flow["step"][step].keys() >= {"title", "description"}
 
 
 async def test_try_pair_returns_false_when_device_not_in_range(hass: HomeAssistant) -> None:
@@ -741,6 +970,69 @@ async def test_try_pair_returns_false_on_auth_error(hass: HomeAssistant) -> None
     client.disconnect.assert_awaited_once()
 
 
+async def test_a_reconnect_between_confirm_and_removal_does_not_block_recovery(
+    hass: HomeAssistant,
+) -> None:
+    """Volatile fields change while the dialog is open; identity does not.
+
+    Comparing whole records made a bed that merely connected look like a
+    different bond, and refused a removal the user had already approved for
+    exactly this one.
+    """
+    pinned = LocalBondRecord(
+        address=TEST_ADDRESS,
+        device_path="/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+        adapter_path="/org/bluez/hci0",
+        adapter_address="11:22:33:44:55:66",
+        paired=True,
+        bonded=True,
+        connected=False,
+        trusted=False,
+    )
+    reconnected = replace(pinned, connected=True, trusted=True)
+
+    assert pinned.is_same_bond_as(reconnected)
+    # A bond that is actually gone is still a different answer.
+    assert not pinned.is_same_bond_as(replace(pinned, paired=False, bonded=False))
+    # So is one on another adapter.
+    assert not pinned.is_same_bond_as(
+        replace(
+            pinned,
+            adapter_path="/org/bluez/hci1",
+            device_path="/org/bluez/hci1/dev_AA_BB_CC_DD_EE_FF",
+        )
+    )
+    # Replacing the dongle reuses hci0, and with it every path in this record.
+    # The bond the user approved was the one on the adapter that is now gone.
+    assert not pinned.is_same_bond_as(replace(pinned, adapter_address="AA:00:00:00:00:01"))
+
+
+async def test_an_unidentified_adapter_never_authorizes_a_removal() -> None:
+    """Without both adapter MACs, only reusable identifiers are left.
+
+    ``hciN`` and the deterministic device path are inherited by whatever dongle
+    occupies the slot next, so a snapshot BlueZ took without an adapter address
+    cannot show that the bond still on that path is the one the user approved.
+    This method authorizes destroying a bond, so it fails closed.
+    """
+    identified = LocalBondRecord(
+        address=TEST_ADDRESS,
+        device_path="/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+        adapter_path="/org/bluez/hci0",
+        adapter_address="11:22:33:44:55:66",
+        paired=True,
+        bonded=True,
+    )
+    anonymous = replace(identified, adapter_address=None)
+
+    # Identical in every field BlueZ did publish, and still not a basis to act.
+    assert not identified.is_same_bond_as(anonymous)
+    assert not anonymous.is_same_bond_as(identified)
+    assert not anonymous.is_same_bond_as(replace(anonymous))
+    # The fully identified pair is unaffected.
+    assert identified.is_same_bond_as(replace(identified, connected=True))
+
+
 async def test_a_reverified_same_adapter_bond_keeps_its_provenance(
     hass: HomeAssistant,
 ) -> None:
@@ -943,3 +1235,284 @@ async def test_an_unproven_coordinator_repair_drops_the_old_provenance(
         hass.data[DOMAIN].pop(entry.entry_id, None)
 
     assert CONF_BLE_BOND_CONTEXT not in entry.data
+
+
+def _stale_bond_issue_data() -> dict[str, str]:
+    """Issue data whose evidence points squarely at this host's BlueZ."""
+    return {
+        "address": TEST_ADDRESS,
+        "name": TEST_NAME,
+        "evidence_status": BondVerificationStatus.AUTH_FAILED.value,
+        "evidence_transport": TransportClass.LOCAL.value,
+        "evidence_source": "11:22:33:44:55:66",
+        "evidence_adapter": "hci0",
+    }
+
+
+def _host_bond_inventory() -> LocalBondInventory:
+    """One unambiguous host bond for the bed under test."""
+    return LocalBondInventory(
+        status=BluezReadStatus.OK,
+        records=(
+            LocalBondRecord(
+                address=TEST_ADDRESS,
+                device_path="/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+                adapter_path="/org/bluez/hci0",
+                adapter_address="11:22:33:44:55:66",
+                paired=True,
+                bonded=True,
+            ),
+        ),
+    )
+
+
+async def test_a_standalone_bed_with_host_evidence_is_offered_recovery(
+    hass: HomeAssistant,
+) -> None:
+    """The control case for the combined-pair refusal below."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_OKIMAT,
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_single_stale_bond_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(
+        TEST_ADDRESS, TEST_NAME, entry.entry_id, issue_data=_stale_bond_issue_data()
+    )
+    flow.hass = hass
+
+    with patch(
+        "custom_components.adjustable_bed.bond_recovery.async_read_local_bonds",
+        AsyncMock(return_value=_host_bond_inventory()),
+    ):
+        result = await flow.async_step_init()
+
+    assert result["step_id"] == "stale_bond_confirm"
+
+
+async def test_a_combined_pair_is_never_offered_stale_bond_recovery(
+    hass: HomeAssistant,
+) -> None:
+    """A pair keeps each side's address and bond state on a child descriptor.
+
+    Recovery writes its markers at entry level and drives the sequence through
+    the entry's coordinator, and a combined pair has neither: the parent
+    coordinator exposes no per-side transport, and no child ever reads a
+    top-level bond marker. Offering the destructive branch here would remove a
+    real host bond and then report success for state nothing consumes, so the
+    guided pairing branch is used instead.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_OKIMAT,
+            CONF_PAIR_ID: "pair_abc123",
+            CONF_PAIR_MEMBER_ADDRESSES: [TEST_ADDRESS, "AA:BB:CC:DD:EE:01"],
+        },
+        unique_id="pair_abc123",
+        entry_id="repair_combined_pair_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(
+        TEST_ADDRESS, TEST_NAME, entry.entry_id, issue_data=_stale_bond_issue_data()
+    )
+    flow.hass = hass
+
+    read_bonds = AsyncMock(return_value=_host_bond_inventory())
+    with patch(
+        "custom_components.adjustable_bed.bond_recovery.async_read_local_bonds",
+        read_bonds,
+    ):
+        result = await flow.async_step_init()
+
+    assert result["step_id"] == "confirm"
+    # The host's bond store is never even consulted for a pair.
+    read_bonds.assert_not_awaited()
+
+
+async def test_a_proxy_pairing_failure_keeps_the_guided_pairing_retry(
+    hass: HomeAssistant,
+) -> None:
+    """Naming the route is not evidence that the route holds a stale bond.
+
+    An ordinary pairing failure over a proxy records the proxy as the transport
+    too. Routing every one of those to the read-only proxy guidance left users
+    whose bed simply failed to pair with an abort and no way to try again.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_OKIMAT,
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_proxy_pairing_failure_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(
+        TEST_ADDRESS,
+        TEST_NAME,
+        entry.entry_id,
+        issue_data={
+            "evidence_status": BondVerificationStatus.INCONCLUSIVE.value,
+            "evidence_transport": TransportClass.PROXY.value,
+            "evidence_source": "proxy-source",
+        },
+    )
+    flow.hass = hass
+
+    with patch(
+        "custom_components.adjustable_bed.bond_recovery.async_read_local_bonds",
+        AsyncMock(return_value=_host_bond_inventory()),
+    ):
+        result = await flow.async_step_init()
+
+    assert result["step_id"] == "confirm"
+
+
+async def test_an_unbonded_proxy_link_keeps_the_guided_pairing_retry(
+    hass: HomeAssistant,
+) -> None:
+    """An auth failure over a proxy is what an unbonded bed looks like.
+
+    ``pair=True`` fails, the fallback connects without pairing, and the
+    auth-gated read then reports insufficient authentication. Nothing there says
+    a proxy bond exists, and the guidance would tell the user to reflash the
+    proxy: that erases every unrelated bond on it and still leaves this bed
+    unpaired.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_OKIMAT,
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_unbonded_proxy_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(
+        TEST_ADDRESS,
+        TEST_NAME,
+        entry.entry_id,
+        issue_data={
+            "evidence_status": BondVerificationStatus.AUTH_FAILED.value,
+            "evidence_transport": TransportClass.PROXY.value,
+            "evidence_source": "proxy-source",
+        },
+    )
+    flow.hass = hass
+
+    with patch(
+        "custom_components.adjustable_bed.bond_recovery.async_read_local_bonds",
+        AsyncMock(return_value=_host_bond_inventory()),
+    ):
+        result = await flow.async_step_init()
+
+    assert result["step_id"] == "confirm"
+
+
+async def test_a_proxy_authentication_failure_still_gets_proxy_guidance(
+    hass: HomeAssistant,
+) -> None:
+    """A refused bond plus provenance proving a proxy made one is the suspect."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_OKIMAT,
+            CONF_BLE_BOND_ESTABLISHED: True,
+            # Only ever written from a verification that positively proved a
+            # bond, which is what makes this independent of the failure above.
+            CONF_BLE_BOND_CONTEXT: {
+                "version": 1,
+                "transport": TransportClass.PROXY.value,
+                "source": "proxy-source",
+                "adapter": None,
+                "verification": "runtime_authenticated_read",
+                "verified_at": "2026-07-27T00:00:00+00:00",
+            },
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_proxy_auth_failure_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(
+        TEST_ADDRESS,
+        TEST_NAME,
+        entry.entry_id,
+        issue_data={
+            "evidence_status": BondVerificationStatus.AUTH_FAILED.value,
+            "evidence_transport": TransportClass.PROXY.value,
+            "evidence_source": "proxy-source",
+        },
+    )
+    flow.hass = hass
+
+    with patch(
+        "custom_components.adjustable_bed.bond_recovery.async_read_local_bonds",
+        AsyncMock(return_value=_host_bond_inventory()),
+    ):
+        result = await flow.async_step_init()
+
+    assert result["step_id"] == "proxy_bond"
+
+
+async def test_a_one_connection_bed_with_a_proxy_bond_still_gets_proxy_guidance(
+    hass: HomeAssistant,
+) -> None:
+    """Recovery eligibility answers KEEPS_FIRST_LINK before it looks at transport.
+
+    A Gen2 bed whose stale bond lives on a proxy would otherwise be sent to the
+    pairing form, which cannot reach the proxy's bond store and hits the same
+    authentication failure again.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_LEGGETT_GEN2,
+            CONF_BLE_BOND_ESTABLISHED: True,
+            CONF_BLE_BOND_CONTEXT: {
+                "version": 1,
+                "transport": "proxy",
+                "source": "bedroom-proxy",
+                "adapter": None,
+            },
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_gen2_proxy_entry",
+    )
+    entry.add_to_hass(hass)
+
+    flow = PairingRequiredRepairFlow(
+        TEST_ADDRESS,
+        TEST_NAME,
+        entry.entry_id,
+        issue_data={
+            "evidence_status": "auth_failed",
+            "evidence_transport": "proxy",
+            "evidence_source": "bedroom-proxy",
+        },
+    )
+    flow.hass = hass
+
+    result = await flow.async_step_init()
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "proxy_bond"

@@ -37,6 +37,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from .bluetooth_freshness import advertisement_time_marker
+
 _LOGGER = logging.getLogger(__name__)
 
 _BLUEZ_SERVICE = "org.bluez"
@@ -91,6 +93,32 @@ class LocalBondRecord:
     def has_bond(self) -> bool:
         """Return True only when BlueZ positively reports a bond."""
         return self.paired or self.bonded
+
+    def is_same_bond_as(self, other: LocalBondRecord) -> bool:
+        """Return True when two reads describe the same BlueZ bond.
+
+        Identity is the device object, the adapter holding it, and that
+        adapter's own MAC. Both reads must name the MAC, because every other
+        field here is reusable: swapping a host dongle can hand ``hci0``, and
+        with it this bed's deterministic device path, to different hardware than
+        the one named in the confirmation the user approved. A record whose
+        adapter address BlueZ did not publish cannot rule that out, so it never
+        answers True - this method exists to authorize destroying a bond, and
+        "probably the same one" is not a basis for that.
+
+        Whole-dataclass equality would instead also compare ``connected`` and
+        ``trusted``, which change while a confirmation dialog is open and would
+        refuse a removal the user already approved for exactly this bond.
+        """
+        if self.adapter_address is None or other.adapter_address is None:
+            return False
+        return (
+            self.adapter_address.upper() == other.adapter_address.upper()
+            and self.device_path == other.device_path
+            and self.adapter_path == other.adapter_path
+            and self.address.upper() == other.address.upper()
+            and self.has_bond == other.has_bond
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,11 +250,27 @@ class BondRemovalResult:
     status: BondRemovalStatus
     record: LocalBondRecord | None = None
     error: str | None = None
+    removed_at: float | None = None
 
     @property
     def succeeded(self) -> bool:
         """Return True only for a removal that was carried out and confirmed."""
         return self.status is BondRemovalStatus.REMOVED
+
+    @property
+    def is_unconfirmed(self) -> bool:
+        """Return True when the bond may or may not have survived.
+
+        A refused RPC and a verification that could not be read say nothing
+        about whether the bond is still there, which is a different thing to
+        tell the user than BlueZ still reporting one: "nothing changed" would
+        send them back to remove a bond that may already be gone, when what
+        they actually need is to pair a replacement.
+        """
+        return self.status is BondRemovalStatus.RPC_FAILED or (
+            self.status is BondRemovalStatus.VERIFICATION_FAILED
+            and self.error != "bond_still_present"
+        )
 
 
 async def _async_managed_objects() -> dict[str, Any] | None:
@@ -374,6 +418,10 @@ async def async_remove_local_bond(record: LocalBondRecord) -> BondRemovalResult:
                     body=[record.device_path],
                 )
             )
+            # Capture the cutoff as soon as RemoveDevice completes. The object
+            # tree verification below can overlap a new advertisement whose
+            # recreated Device1 object is already safe to reconnect through.
+            removed_at = advertisement_time_marker()
     except Exception as err:  # noqa: BLE001 - any failure means "not removed"
         _LOGGER.warning("Could not remove the host bond for %s: %s", record.address, err)
         return BondRemovalResult(
@@ -417,7 +465,11 @@ async def async_remove_local_bond(record: LocalBondRecord) -> BondRemovalResult:
             )
 
     _LOGGER.info("Removed the host Bluetooth bond for %s", record.address)
-    return BondRemovalResult(status=BondRemovalStatus.REMOVED, record=record)
+    return BondRemovalResult(
+        status=BondRemovalStatus.REMOVED,
+        record=record,
+        removed_at=removed_at,
+    )
 
 
 async def async_remove_host_bond(

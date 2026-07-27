@@ -95,6 +95,7 @@ class FreshnessStatus(StrEnum):
     RSSI_INVALID = "rssi_invalid"
     INVALID_TIMESTAMP = "invalid_timestamp"
     SOURCE_UNAVAILABLE = "source_unavailable"
+    BEFORE_REQUIRED_TIME = "before_required_time"
     DEVICE_UNRESOLVED = "device_unresolved"
 
 
@@ -155,6 +156,11 @@ def _coerce_age(raw_time: Any) -> float | None:
         # clock than ours; treat it as unproven rather than as brand new.
         return None
     return age
+
+
+def advertisement_time_marker() -> float:
+    """Return a marker comparable with advertisement timestamps."""
+    return _monotonic()
 
 
 @callback
@@ -273,12 +279,17 @@ def async_check_advertisement(
     *,
     source: str | None = None,
     max_age: float = MAX_ADVERTISEMENT_AGE_SECONDS,
+    seen_after: float | None = None,
 ) -> AdvertisementEvidence:
     """Return whether ``address`` has recent, valid connectable advertising.
 
     ``source`` restricts the check to one scanner, so a preferred adapter that
     can no longer hear the bed is reported as not advertising even while another
     proxy still sees it.
+
+    ``seen_after`` additionally requires a newer scanner timestamp. This is
+    useful after BlueZ removes a device object, when otherwise-fresh history
+    still points at the object that was just invalidated.
     """
     normalized = address.upper()
     if source:
@@ -330,6 +341,15 @@ def async_check_advertisement(
             path=path,
         )
 
+    if seen_after is not None and float(sighting.seen_at) <= seen_after:
+        return AdvertisementEvidence(
+            status=FreshnessStatus.BEFORE_REQUIRED_TIME,
+            age_seconds=age,
+            rssi=rssi,
+            source=info_source or source,
+            path=path,
+        )
+
     if rssi is not None and rssi <= RSSI_INVALIDATED:
         _LOGGER.debug(
             "Advertisement for %s carries an invalidated RSSI (%s dBm)", address, rssi
@@ -370,6 +390,7 @@ def async_gate_connection(
     *,
     source: str | None = None,
     max_age: float = MAX_ADVERTISEMENT_AGE_SECONDS,
+    seen_after: float | None = None,
 ) -> tuple[AdvertisementEvidence, BLEDevice | None]:
     """Check freshness and, only if it passes, resolve a current BLEDevice.
 
@@ -382,7 +403,13 @@ def async_gate_connection(
     reason for the failure. That is exactly how a momentary resolution gap ends
     up presented as "this bed is not advertising".
     """
-    evidence = async_check_advertisement(hass, address, source=source, max_age=max_age)
+    evidence = async_check_advertisement(
+        hass,
+        address,
+        source=source,
+        max_age=max_age,
+        seen_after=seen_after,
+    )
     if not evidence.is_fresh:
         return evidence, None
     device = async_resolve_ble_device(hass, address, evidence.source or source)
@@ -397,6 +424,7 @@ async def async_wait_for_advertisement(
     *,
     source: str | None = None,
     max_age: float = MAX_ADVERTISEMENT_AGE_SECONDS,
+    seen_after: float | None = None,
     wait_timeout: float = ADVERTISEMENT_WAIT_SECONDS,
     poll_interval: float = 1.0,
     on_progress: Callable[[float], None] | None = None,
@@ -411,8 +439,17 @@ async def async_wait_for_advertisement(
     ``on_progress`` receives the fraction of the wait elapsed. It is the only
     honest determinate progress in the whole setup path: the duration really is
     known in advance, unlike a BLE connect.
+
+    When ``seen_after`` is provided, cached history at or before that marker is
+    ignored until a later advertisement arrives.
     """
-    evidence, device = async_gate_connection(hass, address, source=source, max_age=max_age)
+    evidence, device = async_gate_connection(
+        hass,
+        address,
+        source=source,
+        max_age=max_age,
+        seen_after=seen_after,
+    )
     if evidence.is_fresh and device is not None:
         return evidence, device
 
@@ -429,7 +466,13 @@ async def async_wait_for_advertisement(
             with contextlib.suppress(Exception):
                 on_progress(min(1.0, max(0.0, elapsed / wait_timeout)))
         await asyncio.sleep(min(poll_interval, remaining))
-        evidence, device = async_gate_connection(hass, address, source=source, max_age=max_age)
+        evidence, device = async_gate_connection(
+            hass,
+            address,
+            source=source,
+            max_age=max_age,
+            seen_after=seen_after,
+        )
         if evidence.is_fresh and device is not None:
             if on_progress is not None:
                 with contextlib.suppress(Exception):

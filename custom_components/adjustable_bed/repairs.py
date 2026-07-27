@@ -1,10 +1,12 @@
 """Repair issues and fix flows for the Adjustable Bed integration.
 
 Surfaces the Dual Bed combine suggestion and a guided fix for the
-``pairing_required`` issue: the latter walks the user through putting the base
+``pairing_required`` issue. The latter walks the user through putting the base
 into Bluetooth pairing mode, follows the controller-specific connection/bond
 ordering, and verifies the bond by reading an auth-gated characteristic before
-resolving the issue.
+resolving the issue. It also offers to replace a bond this host is still
+holding but the bed no longer honours, whenever the evidence points at the
+host.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 from homeassistant.components import bluetooth
-from homeassistant.components.repairs import RepairsFlow
+from homeassistant.components.repairs import RepairsFlow, repairs_flow_manager
 from homeassistant.config_entries import SOURCE_USER, ConfigEntry
 from homeassistant.const import CONF_ADDRESS, EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import CoreState, Event, HomeAssistant, callback
@@ -25,14 +27,20 @@ from homeassistant.helpers.issue_registry import (
     async_create_issue,
     async_delete_issue,
 )
+from homeassistant.helpers.issue_registry import async_get as async_get_issue_registry
+from homeassistant.helpers.translation import async_get_translations
 
 from .adapter import get_discovered_service_info
 from .address_lock import async_get_connect_lock
 from .ble_auth import is_ble_authentication_error
-from .bluetooth_transport import (
-    TransportClass,
-    async_path_for_source,
-    client_source,
+from .bluetooth_transport import TransportClass, async_path_for_source, client_source
+from .bond_recovery import (
+    RecoveryEligibility,
+    RecoveryOffer,
+    async_recover_local_bond,
+    async_recovery_offer,
+    evidence_is_proxy_auth_failure,
+    recovery_context,
 )
 from .bond_verification import (
     CONF_BLE_BOND_CONTEXT,
@@ -40,21 +48,30 @@ from .bond_verification import (
     BondOwner,
     BondVerificationStatus,
     bond_context_matches,
+    bond_owner_from_entry,
     build_bond_context,
 )
 from .const import (
     ADAPTER_AUTO,
     CONF_BED_TYPE,
     CONF_BLE_BOND_ESTABLISHED,
+    CONF_BLE_BOND_MARKER_UNRELIABLE,
     CONF_PREFERRED_ADAPTER,
     CONF_PROTOCOL_VARIANT,
     DEVICE_INFO_CHARS,
     DOMAIN,
     grants_one_connection_per_pairing_window,
 )
+from .pairing import is_paired
 from .pairing_candidates import (
     active_pairing_candidates,
     build_pair_selection_schema,
+)
+from .setup_operation import (
+    BluetoothOperationMixin,
+    OperationOutcome,
+    OperationResult,
+    SetupAction,
 )
 
 if TYPE_CHECKING:
@@ -199,27 +216,87 @@ class CombineBedsRepairFlow(RepairsFlow):
         return self.async_abort(reason=result.get("reason") or "pairing_flow_failed")
 
 
-class PairingRequiredRepairFlow(RepairsFlow):
-    """Guided flow to (re-)pair a bed that requires Bluetooth bonding."""
+class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
+    """Guided flow to (re-)pair a bed that requires Bluetooth bonding.
+
+    Two branches. The ordinary one puts the bed back into pairing mode and bonds
+    it. The other replaces a bond this host is still holding but the bed no
+    longer honours, and it is offered only when the evidence that raised this
+    repair actually points at the host (issue #459).
+    """
 
     def __init__(
         self,
         address: str,
         name: str,
         entry_id: str | None,
+        issue_data: dict[str, Any] | None = None,
         evidence: BondEvidence | None = None,
     ) -> None:
         """Store the target bed details from the issue data."""
         self._address = address
         self._name = name
         self._entry_id = entry_id
+        self._issue_data = dict(issue_data or {})
+        # The same evidence as ``_issue_data``, already parsed. Kept so a repair
+        # can record what the pre-repair state was without re-deriving it.
         self._evidence = evidence
+        self._offer: RecoveryOffer | None = None
+        self._result_shown = False
+
+    def _async_flow_manager(self) -> Any:
+        """Repairs flows are driven by their own manager, not the config one."""
+        return repairs_flow_manager(self.hass)
+
+    def _entry(self) -> ConfigEntry | None:
+        """Return the config entry this repair belongs to, if it still exists."""
+        if self._entry_id is None:
+            return None
+        return self.hass.config_entries.async_get_entry(self._entry_id)
+
+    def _bed_type(self) -> tuple[str | None, str | None]:
+        """Return the bed type and protocol variant for this bed."""
+        entry = self._entry()
+        if entry is None:
+            return None, None
+        return entry.data.get(CONF_BED_TYPE), entry.data.get(CONF_PROTOCOL_VARIANT)
+
+    def _is_combined_pair(self) -> bool:
+        """Return True when this repair belongs to a combined Dual Bed entry.
+
+        A combined pair is one entry with two sides, and each side keeps its own
+        address and bond state on a child descriptor. Nothing recovery needs is
+        at the top level: the bond markers it writes would land where no child
+        coordinator reads them, and the parent coordinator has no per-side
+        transport to serialize the remove-reconnect-pair sequence against.
+        Recovery is refused rather than performed into the void; the guided
+        pairing branch still applies.
+        """
+        entry = self._entry()
+        return entry is not None and is_paired(entry.data)
+
+    def _proxy_bond_recorded(self) -> bool:
+        """Return True when this entry records a bond that a proxy made.
+
+        An authentication failure carried by a proxy is not by itself evidence
+        that the proxy holds a bond. The coordinator reports exactly the same
+        evidence for a bed that is simply not bonded: ``pair=True`` fails, the
+        fallback connects without pairing, and the auth-gated read then reports
+        insufficient authentication. Sending that user to read-only guidance
+        tells them to factory-reset or reflash a proxy, which erases every
+        unrelated bond on it and still leaves this bed unpaired.
+
+        Provenance is the independent signal, because it is only ever written
+        from a verification that positively proved a bond.
+        """
+        entry = self._entry()
+        if entry is None or not entry.data.get(CONF_BLE_BOND_ESTABLISHED):
+            return False
+        return bond_owner_from_entry(entry.data).transport is TransportClass.PROXY
 
     def _paired_entry_data(self, verified_owner: BondOwner | None) -> dict[str, Any] | None:
         """Return entry data for a repaired bond without stale ownership."""
-        if self._entry_id is None:
-            return None
-        entry = self.hass.config_entries.async_get_entry(self._entry_id)
+        entry = self._entry()
         if entry is None:
             return None
 
@@ -256,9 +333,7 @@ class PairingRequiredRepairFlow(RepairsFlow):
 
     def _persist_repaired_bond(self, verified_owner: BondOwner | None) -> None:
         """Persist a successful repair and its freshly verified owner."""
-        if self._entry_id is None:
-            return
-        entry = self.hass.config_entries.async_get_entry(self._entry_id)
+        entry = self._entry()
         data = self._paired_entry_data(verified_owner)
         if entry is None or data is None or data == dict(entry.data):
             return
@@ -275,8 +350,242 @@ class PairingRequiredRepairFlow(RepairsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Entry point — show pairing instructions and a confirm button."""
+        """Entry point — offer the branch that fits the evidence."""
+        bed_type, variant = self._bed_type()
+        if self._is_combined_pair():
+            self._offer = RecoveryOffer(
+                eligibility=RecoveryEligibility.COMBINED_PAIR
+            )
+        else:
+            self._offer = await async_recovery_offer(
+                self.hass,
+                address=self._address,
+                issue_data=self._issue_data,
+                bed_type=bed_type,
+                protocol_variant=variant,
+            )
+        if self._offer.is_eligible:
+            return await self.async_step_stale_bond_confirm()
+        if evidence_is_proxy_auth_failure(self._issue_data) and self._proxy_bond_recorded():
+            # A proxy carried an authentication failure *and* this entry records
+            # a bond the proxy proved, so the suspect is that bond, and it lives
+            # in a store this host cannot read. Nothing here can clear it, and
+            # offering a host-side action would only look like it had. Without
+            # both halves the bed is simply unbonded and keeps guided pairing.
+            #
+            # Checked ahead of KEEPS_FIRST_LINK deliberately. async_recovery_offer
+            # answers that first, without looking at the transport, so a bed
+            # granting one connection per pairing window would otherwise be sent
+            # to a pairing form that cannot reach the proxy's bond store and
+            # would hit the identical failure again.
+            return await self.async_step_proxy_bond()
+        # Everything else, KEEPS_FIRST_LINK included, is a bed that simply needs
+        # pairing rather than a bond removed.
         return await self.async_step_confirm()
+
+    async def async_step_proxy_bond(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Explain a proxy-owned bond rather than pretending to fix it."""
+        if user_input is not None:
+            return self.async_abort(reason="proxy_bond_guidance")
+        return self.async_show_form(
+            step_id="proxy_bond",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "name": self._name,
+                "address": self._address,
+                "transport": self._issue_data.get("evidence_source") or "a Bluetooth proxy",
+            },
+        )
+
+    async def async_step_stale_bond_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Confirm replacing a host bond the bed no longer honours."""
+        offer = self._offer
+        record = offer.record if offer is not None else None
+        # ``is_eligible`` already implies a record; naming it keeps that
+        # guarantee visible to the type checker rather than only at runtime.
+        if offer is None or not offer.is_eligible or record is None:
+            return await self.async_step_confirm()
+
+        if user_input is not None:
+            self._result_shown = False
+            self.async_begin_operation(
+                name=self._name,
+                address=self._address,
+                action=SetupAction.LOCATING,
+                placeholders={"name": self._name, "address": self._address},
+            )
+            return await self.async_step_stale_bond_progress()
+
+        return self.async_show_form(
+            step_id="stale_bond_confirm",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "name": self._name,
+                "address": self._address,
+                "transport": record.adapter_address or record.adapter_path,
+            },
+        )
+
+    async def _async_recovery_worker(self) -> OperationResult:
+        """Remove the stale host bond and make a verified new one."""
+        previous_offer = self._offer
+        assert previous_offer is not None
+        bed_type, variant = self._bed_type()
+        entry = self._entry()
+        issue_id = f"pairing_required_{self._address.replace(':', '_').lower()}"
+        issue = async_get_issue_registry(self.hass).async_get_issue(DOMAIN, issue_id)
+        if issue is None:
+            return OperationResult(
+                outcome=OperationOutcome.UNPAIR_FAILED,
+                detail="pairing_issue_no_longer_exists",
+            )
+        current_offer = await async_recovery_offer(
+            self.hass,
+            address=self._address,
+            issue_data=dict(issue.data or {}),
+            bed_type=bed_type,
+            protocol_variant=variant,
+        )
+        if (
+            not current_offer.is_eligible
+            or current_offer.record is None
+            or previous_offer.record is None
+            or not current_offer.record.is_same_bond_as(previous_offer.record)
+            or current_offer.owner != previous_offer.owner
+        ):
+            return OperationResult(
+                outcome=OperationOutcome.UNPAIR_FAILED,
+                detail="pairing_evidence_changed",
+            )
+        self._offer = current_offer
+
+        coordinator = (
+            self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
+            if entry is not None
+            else None
+        )
+        return await async_recover_local_bond(
+            self.hass,
+            address=self._address,
+            name=self._name,
+            offer=current_offer,
+            bed_type=bed_type,
+            protocol_variant=variant,
+            transport_operation=(
+                coordinator.async_transport_operation
+                if coordinator is not None
+                else None
+            ),
+            on_verified=self._async_persist_recovered_bond,
+            on_bond_removed=self._async_clear_removed_bond,
+            report_action=self.async_report_action,
+            report_progress=self.async_report_progress,
+            report_path=self.async_report_path,
+        )
+
+    async def async_step_stale_bond_progress(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Run the recovery behind a live progress view."""
+        return await self.async_run_operation_step(
+            step_id="stale_bond_progress",
+            worker=self._async_recovery_worker,
+            next_step_id="stale_bond_result",
+        )
+
+    async def async_step_stale_bond_result(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Resolve the repair only when the new bond was actually proven."""
+        result = self.operation.result
+        succeeded = result is not None and result.succeeded
+
+        if user_input is not None and self._result_shown:
+            if succeeded:
+                return self.async_create_entry(title="", data={})
+            return self.async_abort(reason="stale_bond_recovery_failed")
+
+        self._result_shown = True
+        return self.async_show_form(
+            step_id="stale_bond_result",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "name": self._name,
+                "outcome": await self._async_recovery_note(result, succeeded),
+            },
+        )
+
+    async def _async_recovery_note(
+        self, result: OperationResult | None, succeeded: bool
+    ) -> str:
+        """Return the localized description of what recovery achieved."""
+        if succeeded:
+            note_key = "recovery_success"
+        elif result is None or result.outcome is OperationOutcome.CANCELLED:
+            note_key = "recovery_not_run"
+        elif result.outcome is OperationOutcome.NOT_ADVERTISING:
+            note_key = "recovery_not_advertising"
+        elif result.outcome is OperationOutcome.BOND_VERIFICATION_FAILED and (
+            result.detail != "authentication_state_unconfirmed"
+        ):
+            note_key = "recovery_partial"
+        elif result.outcome is OperationOutcome.UNPAIR_UNCONFIRMED:
+            note_key = "recovery_unpair_unconfirmed"
+        elif result.outcome is OperationOutcome.UNPAIR_FAILED:
+            note_key = "recovery_unpair_failed"
+        else:
+            note_key = "recovery_failed_unchanged"
+
+        translations = await async_get_translations(
+            self.hass,
+            self.hass.config.language,
+            "issues",
+            integrations={DOMAIN},
+        )
+        return translations.get(
+            f"component.{DOMAIN}.issues.pairing_required.fix_flow.abort.{note_key}",
+            note_key,
+        )
+
+    async def _async_persist_recovered_bond(self, result: OperationResult | None) -> None:
+        """Record the new bond and its owner, then ensure the entry reloads."""
+        entry = self._entry()
+        if entry is None or result is None or result.payload is None:
+            return
+        coordinator = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        data = {
+            **entry.data,
+            CONF_BLE_BOND_ESTABLISHED: True,
+            CONF_BLE_BOND_CONTEXT: recovery_context(result.payload),
+        }
+        data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
+        self.hass.config_entries.async_update_entry(entry, data=data)
+        if coordinator is None:
+            # A loaded entry has an update listener which schedules the reload.
+            # Setup-retry entries have no listener yet, so reload those here.
+            await self.hass.config_entries.async_reload(entry.entry_id)
+
+    async def _async_clear_removed_bond(self) -> None:
+        """Drop the marker and provenance for a bond that was just removed.
+
+        Only ever called once removal was confirmed and the replacement was not.
+        The repair stays open, so no reload is forced here: what matters is that
+        the entry no longer claims a bond, so the next connection asks to pair
+        instead of repeating the authentication failure on an unbonded device.
+        """
+        entry = self._entry()
+        if entry is None:
+            return
+        data = dict(entry.data)
+        data.pop(CONF_BLE_BOND_ESTABLISHED, None)
+        data.pop(CONF_BLE_BOND_CONTEXT, None)
+        data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
+        if data != dict(entry.data):
+            self.hass.config_entries.async_update_entry(entry, data=data)
 
     async def async_step_confirm(
         self, user_input: dict[str, Any] | None = None
@@ -573,5 +882,6 @@ async def async_create_fix_flow(
         address=payload.get("address", ""),
         name=payload.get("name", "your bed"),
         entry_id=payload.get("entry_id"),
+        issue_data=payload,
         evidence=evidence,
     )

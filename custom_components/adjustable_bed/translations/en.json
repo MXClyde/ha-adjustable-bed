@@ -364,7 +364,7 @@
           "outcome_existing_verified_local": "✅ The existing bond works. It is stored on this Home Assistant host ({transport}), and setup will use it as it is.",
           "outcome_existing_verified_proxy": "✅ The existing bond works. It is stored on the Bluetooth proxy {transport}, so moving this bed to a different proxy will mean pairing again.",
           "outcome_existing_verified_unknown": "✅ The existing bond works, but Home Assistant could not tell which adapter or proxy carried the check, so it does not know where the bond is stored.",
-          "outcome_unproven": "⚠️ Pairing completed, but this bed gives Home Assistant no way to confirm the bond. Setup will finish; the integration will ask to pair again on its first connection rather than assume it worked.",
+          "outcome_unproven": "⚠️ Pairing completed, but this bed gives Home Assistant no way to confirm the bond. Setup will finish and record that pairing happened, so the first connection does not try to pair on top of it. If the bond did not really form, Home Assistant will raise a repair asking you to pair again.",
           "outcome_not_advertising": "❌ The bed is not advertising, so no connection was attempted. Put it into pairing mode or move it closer to an adapter or proxy, then select **Try again**.",
           "outcome_auth_failed": "❌ The bed connected, but the link is still unauthenticated, so the bond did not form. Put the bed back into pairing mode and select **Try again**.",
           "outcome_inconclusive": "⚠️ Home Assistant could not confirm the existing bond either way: the check timed out or the bed does not answer it. The bond may well be fine. You can try again, or pair from scratch if the bed does not respond afterwards.",
@@ -1974,10 +1974,43 @@
           "confirm": {
             "title": "Pair your adjustable bed",
             "description": "**{name}** ({address}) requires a Bluetooth bond before it can be controlled.\n\n1. Put the bed into pairing mode. **OKIN bases** (Okimat, Okin CST, Nectar OKIN-*, Mattress Firm 900-O): power-cycle the control box — unplug it for ~30 seconds, then plug it back in (the light blinks blue, then turns green); they have no Bluetooth pairing button. **Leggett & Platt Smart Bed (LP Comfort Connect)**: unplug the bed's power cord, remove any batteries from the power supply, then plug it back in — wait for a chime and a pulsing blue light under the bed. **Other beds**: hold the pairing button on the control box or remote until its light blinks.\n2. While the bed is in pairing mode, promptly press **Submit** to pair.\n\nPairing happens on your Home Assistant host or Bluetooth proxy — not your phone. ESPHome proxies must run ESPHome 2024.3.0 or newer.\n\nIf pairing keeps failing and the log names `AuthenticationFailed` or `AuthenticationRejected`, the bond is failing at the authentication stage rather than timing out, and retrying unchanged rarely helps. One common cause is stored pairing keys that no longer match: the bed still stores a pairing for the adapter you are connecting from, while that adapter no longer has the matching key. Clearing only one side does not help in that case.\n\nRemove the stored pairing on the adapter that connects to the bed: on a Home Assistant host that is `bluetoothctl remove {address}`; if you connect through an ESPHome Bluetooth proxy the bond is stored on the proxy and has to be cleared there. Then clear the bed's own stored pairings the way its manufacturer documents, and pair again."
+          },
+          "proxy_bond": {
+            "title": "The bond is stored on a Bluetooth proxy",
+            "description": "**{name}** ({address}) last failed to authenticate through **{transport}**, which is a Bluetooth proxy rather than this Home Assistant host.\n\nA proxy keeps its own Bluetooth bonds, and Home Assistant can neither read nor remove them, so there is nothing this repair can safely change.\n\nTo clear it: reflash or factory reset the proxy, which makes it forget its bonds, then put the bed into pairing mode so it bonds again. Alternatively set this bed's preferred adapter to a Bluetooth adapter on the Home Assistant host and pair there, where the bond can be managed."
+          },
+          "stale_bond_confirm": {
+            "title": "Replace a bond the bed no longer accepts",
+            "description": "**{name}** ({address}) connects, but every encrypted read is refused. That is what happens when this host still holds a Bluetooth bond the bed itself has forgotten, usually after the bed was reset or paired with something else.\n\n**Bond stored on:** {transport}\n\nContinuing removes that bond and creates a new one. Home Assistant checks the bed is reachable before removing anything, so a sleeping bed will not be left without a bond, and the new bond is only recorded once it has been confirmed to work.\n\nPut the bed into pairing mode, then select **Submit**."
+          },
+          "stale_bond_progress": {
+            "title": "Replacing the bond",
+            "description": "Replacing the Bluetooth bond for **{name}** ({address})…"
+          },
+          "stale_bond_result": {
+            "title": "Bond recovery",
+            "description": "**{name}**\n\n{outcome}"
           }
         },
+        "progress": {
+          "locating": "Looking for the bed…",
+          "connecting": "Connecting over Bluetooth…",
+          "pairing": "Pairing with the bed…",
+          "verifying_bond": "Verifying the Bluetooth bond…",
+          "disconnecting": "Disconnecting…",
+          "unpairing": "Removing the Bluetooth bond…"
+        },
         "abort": {
-          "pairing_failed": "Pairing didn't complete. Put the bed back into pairing mode (OKIN bases: unplug the control box ~30s, then plug it back in; Leggett & Platt Smart Bed: unplug the bed and remove the power-supply batteries, then plug it back in and wait for the chime and pulsing blue light; other beds: hold the pairing button), make sure it is in range of your Home Assistant adapter or an ESPHome proxy on 2024.3.0+, then run this repair again. If the log names `AuthenticationFailed` or `AuthenticationRejected`, the bond failed to authenticate. If it keeps happening, clear the stored pairing both on the adapter you connect from and on the bed itself, then try again."
+          "pairing_failed": "Pairing didn't complete. Put the bed back into pairing mode (OKIN bases: unplug the control box ~30s, then plug it back in; Leggett & Platt Smart Bed: unplug the bed and remove the power-supply batteries, then plug it back in and wait for the chime and pulsing blue light; other beds: hold the pairing button), make sure it is in range of your Home Assistant adapter or an ESPHome proxy on 2024.3.0+, then run this repair again. If the log names `AuthenticationFailed` or `AuthenticationRejected`, the bond failed to authenticate. If it keeps happening, clear the stored pairing both on the adapter you connect from and on the bed itself, then try again.",
+          "proxy_bond_guidance": "Nothing was changed. The Bluetooth bond for this bed is stored on a proxy, where Home Assistant cannot reach it.",
+          "stale_bond_recovery_failed": "The bond could not be recovered, so this repair stays open. Put the bed into pairing mode and run it again.",
+          "recovery_success": "✅ The Bluetooth bond was confirmed. The bed should respond normally now.",
+          "recovery_not_run": "❌ The recovery did not run.",
+          "recovery_not_advertising": "❌ The bed is not advertising, so nothing was changed and the old bond is still in place. Put the bed into pairing mode and run this repair again.",
+          "recovery_unpair_failed": "❌ The old bond could not be removed, so nothing else was attempted.",
+          "recovery_unpair_unconfirmed": "❌ Removing the old bond could not be confirmed, so it may or may not still be there and no new one was made. Put the bed into pairing mode and run this repair again.",
+          "recovery_failed_unchanged": "❌ The existing bond could not be checked safely, so nothing was changed. Make sure the bed is in range and run this repair again.",
+          "recovery_partial": "❌ The old bond was removed but the new one could not be confirmed, so this repair stays open. Put the bed into pairing mode and run it again."
         }
       }
     },

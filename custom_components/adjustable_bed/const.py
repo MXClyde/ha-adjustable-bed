@@ -83,12 +83,22 @@ CONF_BLE_BOND_MARKER_UNRELIABLE: Final = "ble_bond_marker_unreliable"
 # bond_verification so the pure paired-bed helpers can carry bond state across
 # a split without importing the Bluetooth stack.
 CONF_BLE_BOND_CONTEXT: Final = "ble_bond_context"
+# The scanner source that made a pairing attempt this integration could not
+# prove, because the protocol offers no authentication-gated read. It scopes
+# CONF_BLE_BOND_ESTABLISHED to that one route: with automatic routing a later
+# connection can be re-ranked onto an adapter or proxy that was never bonded,
+# and an unscoped marker suppresses pair=True there, failing authentication on a
+# link that only needed pairing. Deliberately NOT stored in
+# CONF_BLE_BOND_CONTEXT, which is built solely from positive proof and is what
+# authorizes removing a host bond; nothing unproven may ever look like that.
+CONF_BLE_BOND_ATTEMPTED_SOURCE: Final = "ble_bond_attempted_source"
 # Bond state belongs to one BLE address, not to a config entry: whatever a side
 # proved or removed while it was part of a paired bed stays true afterwards.
 RUNTIME_BOND_KEYS: Final = (
     CONF_BLE_BOND_ESTABLISHED,
     CONF_BLE_BOND_MARKER_UNRELIABLE,
     CONF_BLE_BOND_CONTEXT,
+    CONF_BLE_BOND_ATTEMPTED_SOURCE,
 )
 # Provenance for the motor pulse settings: True once the user has saved them from
 # the options flow. Legacy config flows persisted generated defaults into entry

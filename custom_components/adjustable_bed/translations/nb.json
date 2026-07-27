@@ -50,7 +50,7 @@
           "outcome_existing_verified_local": "✅ Den eksisterende koblingen virker. Den er lagret på denne Home Assistant-verten ({transport}), og oppsettet bruker den som den er.",
           "outcome_existing_verified_proxy": "✅ Den eksisterende koblingen virker. Den er lagret på Bluetooth-proxyen {transport}, så flytter du sengen til en annen proxy må du pare på nytt.",
           "outcome_existing_verified_unknown": "✅ Den eksisterende koblingen virker, men Home Assistant klarte ikke å se hvilken adapter eller proxy som bar sjekken, og vet derfor ikke hvor koblingen er lagret.",
-          "outcome_unproven": "⚠️ Paringen ble fullført, men denne sengen gir Home Assistant ingen måte å bekrefte koblingen på. Oppsettet fullføres; integrasjonen ber om paring igjen ved første tilkobling i stedet for å anta at det gikk bra.",
+          "outcome_unproven": "⚠️ Paringen ble fullført, men denne sengen gir Home Assistant ingen måte å bekrefte koblingen på. Oppsettet fullføres og noterer at paringen skjedde, slik at den første tilkoblingen ikke prøver å pare oppå den. Hvis koblingen likevel ikke ble opprettet, lager Home Assistant en reparasjon som ber deg pare på nytt.",
           "outcome_not_advertising": "❌ Sengen sender ikke ut Bluetooth-signal, så ingen tilkobling ble forsøkt. Sett den i paremodus eller flytt den nærmere en adapter eller proxy, og velg **Prøv igjen**.",
           "outcome_auth_failed": "❌ Sengen koblet til, men forbindelsen er fortsatt uautentisert, så koblingen ble ikke opprettet. Sett sengen i paremodus igjen og velg **Prøv igjen**.",
           "outcome_inconclusive": "⚠️ Home Assistant fikk ikke bekreftet den eksisterende koblingen i noen retning: sjekken gikk ut på tid, eller sengen svarer ikke på den. Koblingen kan godt være i orden. Du kan prøve igjen, eller pare fra bunnen av hvis sengen ikke svarer etterpå.",
@@ -151,6 +151,55 @@
       "remove_bond_bluez_unavailable": "Home Assistant klarte ikke å lese Bluetooth-koblingene på denne verten, og prøver derfor ikke å fjerne noen. Det betyr som regel at verten mangler en lokal Bluetooth-adapter, eller ikke har tilgang til system-D-Bus.",
       "remove_bond_ambiguous": "Home Assistant kan ikke vite hvilken Bluetooth-kobling du mener for **{name}** ({address}). Enten er mer enn én adapter på denne verten koblet til den, eller så har ikke adapteren den ble paret gjennom noen kobling lenger. Sett sengens foretrukne adapter til den du vil rydde, og prøv igjen.",
       "remove_bond_changed": "Bluetooth-koblingene på denne verten endret seg mens bekreftelsen sto åpen, så ingenting ble fjernet. Åpne **Fjern Bluetooth-koblingen** på nytt for å se gjeldende tilstand og bekrefte derfra."
+    }
+  },
+  "issues": {
+    "pairing_required": {
+      "title": "Bluetooth-paring kreves for {name}",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Par den justerbare sengen",
+            "description": "**{name}** ({address}) trenger en Bluetooth-kobling før den kan styres.\n\n1. Sett sengen i paremodus. **OKIN-baser** (Okimat, Okin CST, Nectar OKIN-*, Mattress Firm 900-O): slå kontrollboksen av og på ved å trekke ut kontakten i omtrent 30 sekunder og sette den inn igjen (lyset blinker blått og blir deretter grønt). De har ingen Bluetooth-pareknapp. **Leggett & Platt Smart Bed (LP Comfort Connect)**: trekk ut sengens strømledning, fjern eventuelle batterier fra strømforsyningen, og koble deretter til igjen. Vent på en lyd og et pulserende blått lys under sengen. **Andre senger**: hold inne pareknappen på kontrollboksen eller fjernkontrollen til lyset blinker.\n2. Trykk **Send inn** mens sengen er i paremodus for å pare.\n\nParingen skjer på Home Assistant-verten eller Bluetooth-proxyen, ikke på telefonen. ESPHome-proxyer må bruke ESPHome 2024.3.0 eller nyere."
+          },
+          "proxy_bond": {
+            "title": "Koblingen er lagret på en Bluetooth-proxy",
+            "description": "**{name}** ({address}) klarte sist ikke å autentisere via **{transport}**, som er en Bluetooth-proxy og ikke denne Home Assistant-verten.\n\nEn proxy har sine egne Bluetooth-koblinger, og Home Assistant kan verken lese eller fjerne dem, så det er ingenting denne reparasjonen trygt kan endre.\n\nSlik rydder du opp: flash proxyen på nytt eller tilbakestill den, slik at den glemmer koblingene sine, og sett så sengen i paremodus så den pares igjen. Alternativt kan du sette sengens foretrukne adapter til en Bluetooth-adapter på Home Assistant-verten og pare der, hvor koblingen kan administreres."
+          },
+          "stale_bond_confirm": {
+            "title": "Erstatt en kobling sengen ikke lenger godtar",
+            "description": "**{name}** ({address}) kobler til, men alle krypterte lesinger avvises. Det er det som skjer når denne verten fortsatt har en Bluetooth-kobling som sengen selv har glemt, gjerne etter at sengen er tilbakestilt eller paret med noe annet.\n\n**Koblingen er lagret på:** {transport}\n\nFortsetter du, fjernes den koblingen og en ny opprettes. Home Assistant sjekker at sengen er tilgjengelig før noe fjernes, så en sovende seng blir ikke stående uten kobling, og den nye koblingen lagres først når den er bekreftet å virke.\n\nSett sengen i paremodus, og velg så **Send inn**."
+          },
+          "stale_bond_progress": {
+            "title": "Erstatter koblingen",
+            "description": "Erstatter Bluetooth-koblingen for **{name}** ({address})\u2026"
+          },
+          "stale_bond_result": {
+            "title": "Gjenoppretting av kobling",
+            "description": "**{name}**\n\n{outcome}"
+          }
+        },
+        "progress": {
+          "locating": "Leter etter sengen…",
+          "connecting": "Kobler til over Bluetooth…",
+          "pairing": "Parer med sengen…",
+          "verifying_bond": "Bekrefter Bluetooth-koblingen…",
+          "disconnecting": "Kobler fra…",
+          "unpairing": "Fjerner Bluetooth-koblingen…"
+        },
+        "abort": {
+          "pairing_failed": "Paringen ble ikke fullført. Sett sengen i paremodus igjen (OKIN-baser: trekk ut kontakten til kontrollboksen i omtrent 30 sekunder og sett den inn igjen; Leggett & Platt Smart Bed: trekk ut sengens strømledning, fjern batteriene fra strømforsyningen, koble til igjen og vent på lyden og det pulserende blå lyset; andre senger: hold inne pareknappen), kontroller at sengen er innenfor rekkevidde av Home Assistant-adapteren eller en ESPHome-proxy med 2024.3.0 eller nyere, og kjør deretter reparasjonen på nytt.",
+          "proxy_bond_guidance": "Ingenting ble endret. Bluetooth-koblingen for denne sengen ligger på en proxy, der Home Assistant ikke når den.",
+          "stale_bond_recovery_failed": "Koblingen kunne ikke gjenopprettes, så denne reparasjonen forblir åpen. Sett sengen i paremodus og kjør den på nytt.",
+          "recovery_success": "✅ Bluetooth-koblingen ble bekreftet. Sengen skal nå reagere normalt.",
+          "recovery_not_run": "❌ Gjenopprettingen ble ikke kjørt.",
+          "recovery_not_advertising": "❌ Sengen sender ikke ut Bluetooth-signal, så ingenting ble endret og den gamle koblingen er fortsatt lagret. Sett sengen i paremodus og kjør reparasjonen på nytt.",
+          "recovery_unpair_failed": "❌ Den gamle koblingen kunne ikke fjernes, så ingenting annet ble forsøkt.",
+          "recovery_unpair_unconfirmed": "❌ Fjerningen av den gamle koblingen kunne ikke bekreftes, så den kan fortsatt ligge der, og ingen ny ble opprettet. Sett sengen i paremodus og kjør denne reparasjonen på nytt.",
+          "recovery_failed_unchanged": "❌ Den eksisterende koblingen kunne ikke kontrolleres på en trygg måte, så ingenting ble endret. Kontroller at sengen er innenfor rekkevidde, og kjør reparasjonen på nytt.",
+          "recovery_partial": "❌ Den gamle koblingen ble fjernet, men den nye kunne ikke bekreftes. Reparasjonen forblir derfor åpen. Sett sengen i paremodus og kjør den på nytt."
+        }
+      }
     }
   }
 }

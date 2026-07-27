@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 from copy import copy
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -90,6 +91,7 @@ from custom_components.adjustable_bed.const import (
     BEDS_WITH_POSITION_FEEDBACK,
     CONF_BACK_MAX_ANGLE,
     CONF_BED_TYPE,
+    CONF_BLE_BOND_ATTEMPTED_SOURCE,
     CONF_BLE_BOND_ESTABLISHED,
     CONF_BLE_BOND_MARKER_UNRELIABLE,
     CONF_DISABLE_ANGLE_SENSING,
@@ -140,6 +142,7 @@ from custom_components.adjustable_bed.kaidi_protocol import (
 from custom_components.adjustable_bed.setup_operation import (
     OperationOutcome,
     OperationResult,
+    SetupAction,
 )
 
 
@@ -737,10 +740,10 @@ class TestPairingPersistence:
             ) as mock_establish,
         ):
             evidence = await flow._attempt_pairing(flow._manual_data[CONF_ADDRESS])
-        # A MagicMock client makes the auth-gated read non-awaitable, so
-        # verification lands in its generic-error branch. Pin that rather than
-        # "not AUTH_FAILED", which would keep passing if verification broke.
-        assert evidence.status is BondVerificationStatus.INCONCLUSIVE
+        # This protocol has no evidence-backed Device Information verifier.
+        # Pairing still runs after service discovery, but an unrelated read
+        # must not be presented as proof that the resulting bond works.
+        assert evidence.status is BondVerificationStatus.UNSUPPORTED
 
         assert events == ["connect", "pair", "disconnect"]
         # The keyword is omitted rather than passed False: this bed bonds after
@@ -4181,13 +4184,15 @@ async def test_an_unauthenticated_link_is_not_recorded_as_a_bond(
     assert result.outcome is OperationOutcome.BOND_VERIFICATION_FAILED
 
 
-async def test_an_unprovable_bond_does_not_write_the_marker(
+async def test_an_unprovable_bond_records_pairing_without_ownership(
     hass: HomeAssistant,
 ) -> None:
-    """No evidence-backed verifier means no claim of a bond.
+    """Most pairing-required protocols have no bond-gated read to prove this.
 
-    Setup still completes; the coordinator asks to pair on its first connection
-    rather than skipping it on our say-so.
+    The marker still has to be written, or the coordinator pairs again on its
+    first connection - and re-pairing an already-bonded proxy device can return
+    auth error 82 and wedge the link. The provenance is what stays absent: an
+    unproven owner must never authorize removing a host bond.
     """
     flow = _pairing_flow(hass)
     unsupported = BondEvidence(
@@ -4200,14 +4205,18 @@ async def test_an_unprovable_bond_does_not_write_the_marker(
         result = await _run_pairing(hass, flow)
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"].get(CONF_BLE_BOND_ESTABLISHED) is not True
+    assert result["data"][CONF_BLE_BOND_ESTABLISHED] is True
     assert CONF_BLE_BOND_CONTEXT not in result["data"]
 
 
-async def test_an_inconclusive_probe_does_not_write_the_marker(
+async def test_an_inconclusive_probe_records_pairing_without_ownership(
     hass: HomeAssistant,
 ) -> None:
-    """A timeout or a missing characteristic proves nothing either way."""
+    """A timeout or a missing characteristic proves nothing either way.
+
+    Nothing contradicted the pairing, so the same rule applies as for a protocol
+    with no verifier at all: record that it happened, claim no owner.
+    """
     flow = _pairing_flow(hass)
     inconclusive = BondEvidence(
         status=BondVerificationStatus.INCONCLUSIVE,
@@ -4220,7 +4229,8 @@ async def test_an_inconclusive_probe_does_not_write_the_marker(
         result = await _run_pairing(hass, flow)
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"].get(CONF_BLE_BOND_ESTABLISHED) is not True
+    assert result["data"][CONF_BLE_BOND_ESTABLISHED] is True
+    assert CONF_BLE_BOND_CONTEXT not in result["data"]
 
 
 async def test_a_verified_bond_over_a_proxy_records_the_proxy_as_owner(
@@ -5370,6 +5380,40 @@ async def test_existing_bond_verification_rejects_a_rerouted_connection(
     client.disconnect.assert_awaited_once()
 
 
+async def test_verifying_an_existing_bond_never_invents_a_marker(
+    hass: HomeAssistant,
+) -> None:
+    """Verification mode asks for no bond, so an unproven result claims nothing.
+
+    Only a mode that actually requested a bond may record that one happened.
+    """
+    flow = _pairing_flow(hass)
+    flow._pairing_mode = "verify_existing"
+    unsupported = BondEvidence(
+        status=BondVerificationStatus.UNSUPPORTED,
+        owner=BondOwner(transport=TransportClass.LOCAL, source="hci0"),
+        operation="verify_existing_bond",
+        observed_at="2026-07-27T00:00:00+00:00",
+    )
+
+    flow.async_begin_operation(
+        name="Paired Okimat",
+        address=flow._manual_data[CONF_ADDRESS],
+        prediction=PathPrediction(chosen=None, paths=()),
+        action=SetupAction.LOCATING,
+        placeholders={},
+    )
+    flow.operation.result = OperationResult(
+        outcome=OperationOutcome.SUCCESS, payload=unsupported
+    )
+    flow._pairing_result_shown = True
+    result = await flow.async_step_pairing_result({})
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"].get(CONF_BLE_BOND_ESTABLISHED) is not True
+    assert CONF_BLE_BOND_CONTEXT not in result["data"]
+
+
 async def test_verification_falls_back_to_the_matched_route_source(
     hass: HomeAssistant,
 ) -> None:
@@ -5669,3 +5713,146 @@ async def test_an_interrupted_disconnect_leaves_the_probe_client_tracked(
         )
 
     assert tracked == [client]
+
+
+async def test_a_reconnect_while_confirming_still_authorizes_the_replacement(
+    hass: HomeAssistant,
+) -> None:
+    """``connected``/``trusted`` flip on their own while the dialog is open.
+
+    Whole-record equality read that as "a different bond", threw away the
+    approval the user had just given and bounced them back to the pairing form.
+    Identity is the device object and its adapter, not the bed's link state.
+    """
+    flow = _pairing_flow(hass)
+    flow._pairing_origin_step = "manual_pairing"
+    record = _bond_record()
+    flow._pairing_remove_record = record
+    reconnected = LocalBondInventory(
+        status=BluezReadStatus.OK,
+        records=(replace(record, connected=True, trusted=True),),
+    )
+
+    with (
+        _patch_inventory(reconnected),
+        _patch_local_prediction(),
+        patch.object(flow, "_async_start_pairing_operation") as start,
+    ):
+        await flow.async_step_pairing_replace_confirm({})
+
+    start.assert_called_once()
+    assert flow._pairing_remove_record == record
+
+
+async def test_a_reconnect_before_removal_still_replaces_the_bond(
+    hass: HomeAssistant,
+) -> None:
+    """The worker re-reads under the lock and must reach the same verdict."""
+    flow = _pairing_flow(hass)
+    address = flow._manual_data[CONF_ADDRESS]
+    record = _bond_record()
+    reconnected = LocalBondInventory(
+        status=BluezReadStatus.OK,
+        records=(replace(record, connected=True, trusted=True),),
+    )
+
+    with (
+        _patch_inventory(reconnected),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
+            AsyncMock(return_value=BondRemovalResult(status=BondRemovalStatus.REMOVED)),
+        ) as removal,
+        patch.object(
+            flow, "_attempt_pairing", AsyncMock(return_value=_verified_evidence())
+        ),
+    ):
+        result = await flow._async_replace_bond(address, record)
+
+    removal.assert_awaited_once()
+    assert result.outcome is OperationOutcome.SUCCESS
+
+
+async def _unproven_pairing_entry(
+    hass: HomeAssistant, *, source: str | None
+) -> dict[str, Any]:
+    """Finish setup after a successful pair that nothing could verify."""
+    flow = _pairing_flow(hass)
+    flow._pairing_mode = "new"
+    unsupported = BondEvidence(
+        status=BondVerificationStatus.UNSUPPORTED,
+        owner=BondOwner(transport=TransportClass.LOCAL, source=source),
+        operation="pair_and_verify",
+        observed_at="2026-07-27T00:00:00+00:00",
+    )
+
+    flow.async_begin_operation(
+        name="Okimat",
+        address=flow._manual_data[CONF_ADDRESS],
+        prediction=PathPrediction(chosen=None, paths=()),
+        action=SetupAction.LOCATING,
+        placeholders={},
+    )
+    flow.operation.result = OperationResult(
+        outcome=OperationOutcome.SUCCESS, payload=unsupported
+    )
+    flow._pairing_result_shown = True
+    result = await flow.async_step_pairing_result({})
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    return dict(result["data"])
+
+
+async def test_an_unproven_bond_marker_is_scoped_to_the_route_that_paired(
+    hass: HomeAssistant,
+) -> None:
+    """The marker suppresses pair=True, so it may not speak for other routes.
+
+    With automatic routing the first real connection can be re-ranked onto an
+    adapter or proxy that was never bonded. A global marker would skip pairing
+    there and fail authentication on a link that only needed pairing.
+    """
+    data = await _unproven_pairing_entry(hass, source="11:22:33:44:55:66")
+
+    assert data[CONF_BLE_BOND_ESTABLISHED] is True
+    assert data[CONF_BLE_BOND_ATTEMPTED_SOURCE] == "11:22:33:44:55:66"
+    # Unproven state must never look like the provenance that authorizes
+    # removing a host bond.
+    assert CONF_BLE_BOND_CONTEXT not in data
+
+
+async def test_an_unproven_bond_with_no_known_route_records_no_marker(
+    hass: HomeAssistant,
+) -> None:
+    """Nothing to scope it to, so the bed simply pairs again on first connect."""
+    data = await _unproven_pairing_entry(hass, source=None)
+
+    assert data.get(CONF_BLE_BOND_ESTABLISHED) is not True
+    assert CONF_BLE_BOND_ATTEMPTED_SOURCE not in data
+    assert CONF_BLE_BOND_CONTEXT not in data
+
+
+async def test_a_proven_bond_records_provenance_and_no_route_scope(
+    hass: HomeAssistant,
+) -> None:
+    """Provenance names its own owner, so there is nothing left to scope."""
+    flow = _pairing_flow(hass)
+    flow._pairing_mode = "new"
+    flow._manual_data[CONF_BLE_BOND_ATTEMPTED_SOURCE] = "stale-source"
+
+    flow.async_begin_operation(
+        name="Okimat",
+        address=flow._manual_data[CONF_ADDRESS],
+        prediction=PathPrediction(chosen=None, paths=()),
+        action=SetupAction.LOCATING,
+        placeholders={},
+    )
+    flow.operation.result = OperationResult(
+        outcome=OperationOutcome.SUCCESS, payload=_verified_evidence()
+    )
+    flow._pairing_result_shown = True
+    result = await flow.async_step_pairing_result({})
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_BLE_BOND_ESTABLISHED] is True
+    assert CONF_BLE_BOND_CONTEXT in result["data"]
+    assert CONF_BLE_BOND_ATTEMPTED_SOURCE not in result["data"]

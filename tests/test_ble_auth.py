@@ -89,6 +89,10 @@ def test_shared_repair_text_prescribes_no_bed_specific_reset() -> None:
 
     Recovery steps inferred from one bed must not be presented to unrelated
     beds as though they were verified for those protocols.
+
+    Scoped to the steps every protocol sees. ``proxy_bond`` is shown only when
+    the entry records a bond a proxy proved, and it prescribes resetting that
+    ESPHome proxy rather than any bed, so it is not this rule's concern.
     """
     import json
     from pathlib import Path
@@ -97,10 +101,24 @@ def test_shared_repair_text_prescribes_no_bed_specific_reset() -> None:
         Path("custom_components/adjustable_bed/strings.json").read_text()
     )
     flow = strings["issues"]["pairing_required"]["fix_flow"]
-    blob = json.dumps(flow).lower()
+    shared = json.dumps(
+        {
+            "confirm": flow["step"]["confirm"],
+            "abort": {
+                key: value
+                for key, value in flow["abort"].items()
+                if key != "proxy_bond_guidance"
+            },
+        }
+    ).lower()
 
-    assert "factory reset" not in blob
-    assert "dwipe" not in blob
+    assert "factory reset" not in shared
+    assert "dwipe" not in shared
+
+    # And the proxy step still says nothing bed-specific.
+    proxy = json.dumps(flow["step"]["proxy_bond"]).lower()
+    assert "dwipe" not in proxy
+    assert "reset the proxy" in proxy
 
 
 def test_repair_text_does_not_assert_an_unproven_cause() -> None:

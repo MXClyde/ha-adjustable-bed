@@ -176,6 +176,7 @@ class TestRemovingOneBond:
     async def test_a_confirmed_removal_succeeds(self) -> None:
         with (
             self._patch_bus(),
+            patch(f"{_BOND}.advertisement_time_marker", return_value=123.0),
             patch(
                 f"{_BOND}._async_managed_objects",
                 AsyncMock(return_value=_objects(devices=[])),
@@ -184,6 +185,7 @@ class TestRemovingOneBond:
             result = await async_remove_local_bond(self._record())
         assert result.status is BondRemovalStatus.REMOVED
         assert result.succeeded
+        assert result.removed_at == 123.0
 
     async def test_a_still_paired_device_is_a_failure(self) -> None:
         """BlueZ accepting the call is not evidence that the bond went away."""

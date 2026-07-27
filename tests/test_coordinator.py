@@ -37,6 +37,8 @@ from custom_components.adjustable_bed.const import (
     BED_TYPE_SLEEP_NUMBER_MCR,
     BED_TYPE_SLEEPYS_BOX25,
     CONF_BED_TYPE,
+    CONF_BLE_BOND_ATTEMPTED_SOURCE,
+    CONF_BLE_BOND_CONTEXT,
     CONF_BLE_BOND_ESTABLISHED,
     CONF_BLE_BOND_MARKER_UNRELIABLE,
     CONF_DISABLE_ANGLE_SENSING,
@@ -5234,3 +5236,130 @@ class TestBondProvenanceAndTransportGate:
         assert CONF_BLE_BOND_CONTEXT not in mock_config_entry.data
 
         await coordinator.async_shutdown()
+
+
+class TestUnverifiedBondMarkerScope:
+    """A bond nothing could prove is only credible on the route that made it.
+
+    Setup can pair through one adapter or proxy while automatic routing puts the
+    coordinator's first real connection on another that was never bonded. An
+    unscoped marker suppresses pair=True there, so a setup that actually worked
+    ends as an authentication failure and a repair (issue #459).
+    """
+
+    def _coordinator(
+        self, hass: HomeAssistant, **extra_data: object
+    ) -> AdjustableBedCoordinator:
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title=TEST_NAME,
+            data={
+                CONF_ADDRESS: TEST_ADDRESS,
+                CONF_NAME: TEST_NAME,
+                CONF_BED_TYPE: BED_TYPE_LEGGETT_OKIN,
+                CONF_MOTOR_COUNT: 2,
+                CONF_HAS_MASSAGE: False,
+                CONF_DISABLE_ANGLE_SENSING: True,
+                CONF_PREFERRED_ADAPTER: "auto",
+                CONF_BLE_BOND_ESTABLISHED: True,
+                **extra_data,
+            },
+            unique_id=TEST_ADDRESS,
+            entry_id="unverified_bond_scope_test",
+        )
+        entry.add_to_hass(hass)
+        return AdjustableBedCoordinator(hass, entry)
+
+    @staticmethod
+    def _device() -> MagicMock:
+        device = MagicMock()
+        device.details = {}
+        return device
+
+    async def test_the_route_that_paired_still_skips_pairing(
+        self, hass: HomeAssistant
+    ) -> None:
+        """The auth-error-82 protection has to survive the scoping."""
+        coordinator = self._coordinator(
+            hass, ble_bond_attempted_source="11:22:33:44:55:66"
+        )
+        details: dict[str, Any] = {}
+
+        _, use_pairing, _ = coordinator._prepare_pairing_attempt(
+            self._device(), details, source="11:22:33:44:55:66"
+        )
+
+        assert use_pairing is False
+        assert details["decision"] == "bond_marker_present"
+        assert details["bond_marker_out_of_scope"] is False
+
+    async def test_another_route_pairs_instead_of_trusting_the_marker(
+        self, hass: HomeAssistant
+    ) -> None:
+        """Re-ranked onto a transport that was never bonded, so pair there."""
+        coordinator = self._coordinator(
+            hass, ble_bond_attempted_source="11:22:33:44:55:66"
+        )
+        details: dict[str, Any] = {}
+
+        _, use_pairing, _ = coordinator._prepare_pairing_attempt(
+            self._device(), details, source="esp32-proxy-livingroom"
+        )
+
+        assert use_pairing is True
+        assert details["decision"] == "bond_marker_other_transport"
+        assert details["bond_marker_out_of_scope"] is True
+
+    async def test_an_unknown_route_does_not_trust_a_scoped_marker(
+        self, hass: HomeAssistant
+    ) -> None:
+        """Cannot show it is the same route, so it is not treated as one."""
+        coordinator = self._coordinator(
+            hass, ble_bond_attempted_source="11:22:33:44:55:66"
+        )
+        details: dict[str, Any] = {}
+
+        _, use_pairing, _ = coordinator._prepare_pairing_attempt(
+            self._device(), details, source=None
+        )
+
+        assert use_pairing is True
+        assert details["bond_marker_out_of_scope"] is True
+
+    async def test_an_entry_without_a_scope_is_unchanged(
+        self, hass: HomeAssistant
+    ) -> None:
+        """A proven bond, or one written before scoping existed, is global."""
+        coordinator = self._coordinator(hass)
+        details: dict[str, Any] = {}
+
+        _, use_pairing, _ = coordinator._prepare_pairing_attempt(
+            self._device(), details, source="some-other-source"
+        )
+
+        assert use_pairing is False
+        assert details["decision"] == "bond_marker_present"
+        assert details["bond_marker_out_of_scope"] is False
+
+    async def test_proving_the_bond_drops_the_route_scope(
+        self, hass: HomeAssistant
+    ) -> None:
+        """Provenance names its own owner, so the unproven scope is spent."""
+        coordinator = self._coordinator(
+            hass, ble_bond_attempted_source="11:22:33:44:55:66"
+        )
+
+        coordinator._persist_bond_flags(
+            established=True,
+            context={
+                "version": 1,
+                "transport": "local",
+                "source": "11:22:33:44:55:66",
+                "adapter": "hci0",
+                "verification": "runtime_authenticated_read",
+                "verified_at": "2026-07-27T00:00:00+00:00",
+            },
+        )
+
+        assert CONF_BLE_BOND_ATTEMPTED_SOURCE not in coordinator.entry.data
+        assert CONF_BLE_BOND_CONTEXT in coordinator.entry.data

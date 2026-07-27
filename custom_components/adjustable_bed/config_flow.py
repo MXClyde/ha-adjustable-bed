@@ -51,7 +51,6 @@ from .adapter import (
 from .address_lock import async_get_connect_lock
 from .bluetooth_bond import (
     BondRemovalResult,
-    BondRemovalStatus,
     BondSelectionStatus,
     LocalBondInventory,
     LocalBondRecord,
@@ -111,6 +110,7 @@ from .const import (
     CB24_BED_SELECTION_DEFAULT,
     CONF_BACK_MAX_ANGLE,
     CONF_BED_TYPE,
+    CONF_BLE_BOND_ATTEMPTED_SOURCE,
     CONF_BLE_BOND_ESTABLISHED,
     CONF_BLE_BOND_MARKER_UNRELIABLE,
     CONF_CB24_BED_SELECTION,
@@ -360,8 +360,10 @@ _PAIRING_OUTCOME_FALLBACKS: Final[dict[str, str]] = {
     ),
     "unproven": (
         "⚠️ Pairing completed, but this bed gives Home Assistant no way to "
-        "confirm the bond. Setup will finish; the integration will ask to pair "
-        "again on its first connection rather than assume it worked."
+        "confirm the bond. Setup will finish and record that pairing happened, "
+        "so the first connection does not try to pair on top of it. If the bond "
+        "did not really form, Home Assistant will raise a repair asking you to "
+        "pair again."
     ),
     "not_advertising": (
         "❌ The bed is not advertising, so no connection was attempted. Put it "
@@ -3120,10 +3122,13 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         if user_input is not None:
             address = self._manual_data.get(CONF_ADDRESS, "")
             current = await async_read_local_bonds(address)
-            if current.sole_bond != record:
+            current_record = current.sole_bond
+            if current_record is None or not current_record.is_same_bond_as(record):
                 # The confirmation named one exact BlueZ record. If it changed
                 # while the dialog was open, never apply that stale approval to
                 # whatever now occupies the same deterministic object path.
+                # Identity, not equality: a bed that merely reconnects flips
+                # ``connected``/``trusted`` and is still the approved bond.
                 self._pairing_remove_record = None
                 return await self._async_pairing_step(
                     self._pairing_origin_step or "bluetooth_pairing", None
@@ -3289,7 +3294,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     outcome=OperationOutcome.UNPAIR_UNCONFIRMED,
                     detail="bond_unreadable_before_removal",
                 )
-            if current.sole_bond != record:
+            current_record = current.sole_bond
+            # Identity, not equality: ``connected``/``trusted`` change on their
+            # own between the confirmation and this worker, and a bed that just
+            # reconnected is still the bond the user approved removing.
+            if current_record is None or not current_record.is_same_bond_as(record):
                 if current.bonded_records:
                     _LOGGER.warning(
                         "Not replacing the bond for %s: the confirmed BlueZ record changed",
@@ -3316,14 +3325,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     address,
                     removal.error,
                 )
-                unconfirmed = removal.status is BondRemovalStatus.RPC_FAILED or (
-                    removal.status is BondRemovalStatus.VERIFICATION_FAILED
-                    and removal.error != "bond_still_present"
-                )
                 return OperationResult(
                     outcome=(
                         OperationOutcome.UNPAIR_UNCONFIRMED
-                        if unconfirmed
+                        if removal.is_unconfirmed
                         else OperationOutcome.UNPAIR_FAILED
                     ),
                     detail=removal.error or str(removal.status),
@@ -3426,12 +3431,36 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 )
             entry_data = dict(self._manual_data)
             if isinstance(evidence, BondEvidence) and evidence.proves_bond:
-                # Only a positively verified bond writes the marker, and it
-                # records which transport owns it so a later bond removal knows
-                # where to look.
+                # A positively verified bond writes the marker *and* records
+                # which transport owns it, so a later bond removal knows where
+                # to look.
                 entry_data = self._mark_ble_bond_established(entry_data)
                 entry_data[CONF_BLE_BOND_CONTEXT] = build_bond_context(evidence)
+                entry_data.pop(CONF_BLE_BOND_ATTEMPTED_SOURCE, None)
                 self._pairing_success_evidence = evidence
+            elif succeeded and self._pairing_mode != "verify_existing":
+                # A bond was asked for and nothing contradicted it, but this
+                # protocol has no authentication-gated read to prove it with.
+                # Record that pairing happened, without provenance: the marker
+                # keeps the coordinator from immediately re-pairing a bed that
+                # just paired, which over a proxy can return auth error 82 and
+                # wedge the connection, while the missing context means this
+                # cannot later authorize removing a host bond.
+                #
+                # The marker is scoped to the route that made the attempt. It is
+                # only credible there: automatic routing can put the first real
+                # connection on another adapter or proxy that was never bonded,
+                # and an unscoped marker would suppress pair=True on that link
+                # and turn a good setup into an authentication failure. Without
+                # a known route there is nothing to scope it to, so nothing is
+                # recorded and the bed simply pairs again on first connect.
+                attempted_source = (
+                    evidence.owner.source if isinstance(evidence, BondEvidence) else None
+                )
+                if attempted_source:
+                    entry_data = self._mark_ble_bond_established(entry_data)
+                    entry_data[CONF_BLE_BOND_ATTEMPTED_SOURCE] = attempted_source
+                entry_data.pop(CONF_BLE_BOND_CONTEXT, None)
             return self.async_create_entry(
                 title=self._manual_data.get(CONF_NAME, "Adjustable Bed"),
                 data=entry_data,
@@ -5120,11 +5149,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
     @staticmethod
     def _same_bond_record(pinned: LocalBondRecord, current: LocalBondRecord) -> bool:
         """Return True when two reads describe the same BlueZ device object."""
-        return (
-            pinned.device_path == current.device_path
-            and pinned.adapter_path == current.adapter_path
-            and pinned.address.upper() == current.address.upper()
-        )
+        return pinned.is_same_bond_as(current)
 
     async def _async_bond_removal_worker(self) -> OperationResult:
         """Stop using the bed, then remove the bond and confirm it is gone."""

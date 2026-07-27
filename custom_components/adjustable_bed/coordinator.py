@@ -98,6 +98,7 @@ from .const import (
     BEDS_WITH_POSITION_FEEDBACK,
     CONF_BACK_MAX_ANGLE,
     CONF_BED_TYPE,
+    CONF_BLE_BOND_ATTEMPTED_SOURCE,
     CONF_BLE_BOND_ESTABLISHED,
     CONF_BLE_BOND_MARKER_UNRELIABLE,
     CONF_CB24_BED_SELECTION,
@@ -1060,6 +1061,9 @@ class AdjustableBedCoordinator:
                 data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
         if context is not None:
             data[CONF_BLE_BOND_CONTEXT] = context
+            # Provenance is only ever written from positive proof, and it names
+            # its own owner. The unproven route scope has nothing left to say.
+            data.pop(CONF_BLE_BOND_ATTEMPTED_SOURCE, None)
         if data != dict(self.entry.data):
             self._begin_internal_entry_update(
                 bool(data.get(CONF_BLE_BOND_ESTABLISHED, False))
@@ -1951,10 +1955,32 @@ class AdjustableBedCoordinator:
 
         return not self._uses_persistent_connection()
 
+    def _unverified_marker_applies(self, source: str | None) -> bool:
+        """Return True when an unproven bond marker may be trusted on this route.
+
+        A bond recorded without an authentication-gated read to prove it is only
+        credible on the transport that made it. Automatic routing can re-rank a
+        later connection onto an adapter or proxy that was never bonded, and
+        trusting the marker there suppresses ``pair=True`` on an unbonded link,
+        which fails authentication and raises a repair for a bed that only
+        needed pairing.
+
+        Erring toward pairing is the recoverable direction: a redundant
+        ``pair=True`` is caught by the unreliable-marker latch, whereas skipping
+        it on an unbonded route cannot be retried within the attempt.
+        """
+        attempted = self.entry.data.get(CONF_BLE_BOND_ATTEMPTED_SOURCE)
+        if not attempted:
+            # No scope recorded: either the bond was proven (and carries
+            # provenance instead) or the entry predates scoping. Unchanged.
+            return True
+        return bool(source) and source == attempted
+
     def _prepare_pairing_attempt(
         self,
         device: BLEDevice,
         pairing_details: dict[str, Any],
+        source: str | None = None,
     ) -> tuple[bool, bool, bool]:
         """Resolve pairing policy and diagnostics for one connection attempt."""
         bed_requires_pairing = requires_pairing(self._bed_type, self._protocol_variant)
@@ -1974,9 +2000,23 @@ class AdjustableBedCoordinator:
             )
             self._mark_ble_bond_established()
 
+        # An unproven marker only speaks for the route that recorded it.
+        marker_out_of_scope = self._ble_bond_established and not (
+            self._unverified_marker_applies(source)
+        )
+        if marker_out_of_scope:
+            _LOGGER.info(
+                "Bond marker for %s was recorded on %s but this attempt uses %s; "
+                "requesting pairing rather than trusting it on another transport",
+                self._address,
+                self.entry.data.get(CONF_BLE_BOND_ATTEMPTED_SOURCE),
+                source or "an unknown source",
+            )
+        bond_marker_trusted = self._ble_bond_established and not marker_out_of_scope
+
         use_pairing = (
             bed_requires_pairing
-            and not self._ble_bond_established
+            and not bond_marker_trusted
             and not self._skip_pair_next_attempt
             and self._pairing_supported is not False
         )
@@ -1998,6 +2038,8 @@ class AdjustableBedCoordinator:
             pairing_decision = "not_required"
         elif self._ble_bond_marker_unreliable:
             pairing_decision = "bond_marker_unreliable"
+        elif marker_out_of_scope:
+            pairing_decision = "bond_marker_other_transport"
         elif os_bond_reported and not bond_marker_before_attempt:
             pairing_decision = "existing_os_bond_detected"
         elif self._ble_bond_established:
@@ -2020,6 +2062,9 @@ class AdjustableBedCoordinator:
                 "os_bond_reported": os_bond_reported,
                 "transient_skip_was_set": transient_skip_was_set,
                 "ordering": pairing_ordering,
+                "attempt_source": source,
+                "bond_marker_scope": self.entry.data.get(CONF_BLE_BOND_ATTEMPTED_SOURCE),
+                "bond_marker_out_of_scope": marker_out_of_scope,
             }
         )
         # Both of these skip pairing because something claimed we are already
@@ -2364,6 +2409,7 @@ class AdjustableBedCoordinator:
                 ) = self._prepare_pairing_attempt(
                     device,
                     pairing_details,
+                    source=adapter_result.source,
                 )
                 keep_connecting_through_startup = self._uses_persistent_connection()
                 if use_pairing:
