@@ -29,9 +29,7 @@
       "setup_progress": {
         "title": "Sjekker tilkoblingen",
         "description": "Sjekker **{name}** ({address})…"
-      },
-      "bluetooth_pairing": {},
-      "manual_pairing": {}
+      }
     },
     "progress": {
       "locating": "Leter etter sengen…",

@@ -302,3 +302,71 @@ def test_bond_presence(paired: bool, bonded: bool, expected: bool) -> None:
         bonded=bonded,
     )
     assert record.has_bond is expected
+
+
+class TestManagedObjectRead:
+    """The D-Bus read itself, since everything else trusts its answer."""
+
+    def _patch_bus(
+        self,
+        *,
+        body: Any = None,
+        error_name: str | None = None,
+        raises: Exception | None = None,
+    ):
+        from dbus_fast import MessageType
+
+        class _Bus:
+            def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+                pass
+
+            async def connect(self) -> None:
+                if raises is not None:
+                    raise raises
+
+            async def call(self, _message: Any) -> Any:
+                return type(
+                    "_Reply",
+                    (),
+                    {
+                        "message_type": (
+                            MessageType.ERROR if error_name else MessageType.METHOD_RETURN
+                        ),
+                        "error_name": error_name,
+                        "body": body if body is not None else [],
+                    },
+                )()
+
+            def disconnect(self) -> None:
+                return None
+
+        return patch("dbus_fast.aio.MessageBus", _Bus)
+
+    async def test_a_successful_reply_is_parsed(self) -> None:
+        with self._patch_bus(body=[_objects(devices=[_device()])]):
+            inventory = await async_read_local_bonds(TEST_ADDRESS)
+        assert inventory.readable
+        assert inventory.bonded_records
+
+    async def test_a_refused_call_is_unavailable_not_empty(self) -> None:
+        """The distinction the permissive helper throws away."""
+        with self._patch_bus(error_name="org.freedesktop.DBus.Error.AccessDenied"):
+            inventory = await async_read_local_bonds(TEST_ADDRESS)
+        assert inventory.status is BluezReadStatus.UNAVAILABLE
+
+    async def test_an_unreachable_bus_is_unavailable(self) -> None:
+        with self._patch_bus(raises=FileNotFoundError("no socket")):
+            inventory = await async_read_local_bonds(TEST_ADDRESS)
+        assert inventory.status is BluezReadStatus.UNAVAILABLE
+
+    async def test_a_malformed_reply_is_unavailable(self) -> None:
+        with self._patch_bus(body=["not a dict"]):
+            inventory = await async_read_local_bonds(TEST_ADDRESS)
+        assert inventory.status is BluezReadStatus.UNAVAILABLE
+
+    async def test_a_host_with_no_bond_is_readable_and_empty(self) -> None:
+        """Readable-and-empty is a real answer; unavailable is not."""
+        with self._patch_bus(body=[_objects(devices=[])]):
+            inventory = await async_read_local_bonds(TEST_ADDRESS)
+        assert inventory.readable
+        assert inventory.records == ()

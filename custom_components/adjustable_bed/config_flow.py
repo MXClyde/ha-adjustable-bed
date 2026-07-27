@@ -45,6 +45,7 @@ from .adapter import (
 )
 from .address_lock import async_get_connect_lock
 from .bluetooth_bond import (
+    BondRemovalResult,
     LocalBondInventory,
     LocalBondRecord,
     async_read_local_bonds,
@@ -2235,7 +2236,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             action = user_input.get("action")
             if action == "use_existing_bond" and can_use_existing:
                 return self._create_entry_for_existing_bond()
-            if action == "remove_bond_and_pair" and existing is not None:
+            if action == "remove_bond_and_pair" and can_use_existing and existing is not None:
                 self._pairing_remove_record = existing
                 result = await self._async_handle_pair_now(errors)
                 if result is not None:
@@ -2507,7 +2508,12 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 )
             finally:
                 self.async_report_action(SetupAction.DISCONNECTING)
-                await client.disconnect()
+                try:
+                    await client.disconnect()
+                except Exception:  # noqa: BLE001 - cleanup must not mask the result
+                    _LOGGER.debug(
+                        "Disconnect after pairing %s failed", address, exc_info=True
+                    )
 
     def _verification_possible(self) -> bool:
         """Return True only when a connectable scanner exists to probe through.
@@ -3388,7 +3394,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 requested_motor_count,
             ):
                 return self.async_show_form(
-                    step_id="init",
+                    step_id="configure",
                     data_schema=vol.Schema(schema_dict),
                     errors={CONF_MOTOR_COUNT: "invalid_motor_count_for_bed_type"},
                 )
@@ -3396,7 +3402,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 octo_pin = normalize_octo_pin(user_input.get(CONF_OCTO_PIN, DEFAULT_OCTO_PIN))
                 if not is_valid_octo_pin(octo_pin):
                     return self.async_show_form(
-                        step_id="init",
+                        step_id="configure",
                         data_schema=vol.Schema(schema_dict),
                         errors={CONF_OCTO_PIN: "invalid_pin"},
                     )
@@ -3421,7 +3427,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                     )
             except ValueError, TypeError:
                 return self.async_show_form(
-                    step_id="init",
+                    step_id="configure",
                     data_schema=vol.Schema(schema_dict),
                     errors={"base": "invalid_number"},
                 )
@@ -3431,14 +3437,14 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                     value = float(user_input[CONF_BACK_MAX_ANGLE] or DEFAULT_BACK_MAX_ANGLE)
                     if value <= 0 or value > 180:
                         return self.async_show_form(
-                            step_id="init",
+                            step_id="configure",
                             data_schema=vol.Schema(schema_dict),
                             errors={CONF_BACK_MAX_ANGLE: "invalid_angle"},
                         )
                     user_input[CONF_BACK_MAX_ANGLE] = value
                 except ValueError, TypeError:
                     return self.async_show_form(
-                        step_id="init",
+                        step_id="configure",
                         data_schema=vol.Schema(schema_dict),
                         errors={CONF_BACK_MAX_ANGLE: "invalid_angle"},
                     )
@@ -3447,14 +3453,14 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                     value = float(user_input[CONF_LEGS_MAX_ANGLE] or DEFAULT_LEGS_MAX_ANGLE)
                     if value <= 0 or value > 180:
                         return self.async_show_form(
-                            step_id="init",
+                            step_id="configure",
                             data_schema=vol.Schema(schema_dict),
                             errors={CONF_LEGS_MAX_ANGLE: "invalid_angle"},
                         )
                     user_input[CONF_LEGS_MAX_ANGLE] = value
                 except ValueError, TypeError:
                     return self.async_show_form(
-                        step_id="init",
+                        step_id="configure",
                         data_schema=vol.Schema(schema_dict),
                         errors={CONF_LEGS_MAX_ANGLE: "invalid_angle"},
                     )
@@ -3587,21 +3593,27 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
         assert record is not None
 
         coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
-        if coordinator is not None:
-            # Take the bed out of use through the coordinator's own locking
-            # order. Composing public methods from here would let an unpair
-            # acquire the address lock while a command already holds the command
-            # lock and is waiting for it.
-            try:
-                await coordinator.async_prepare_for_transport_operation("unpair")
-            except Exception as err:  # noqa: BLE001 - report, do not remove blindly
-                _LOGGER.warning("Could not release the bed before unpairing: %s", err)
-                return OperationResult(
-                    outcome=OperationOutcome.UNPAIR_FAILED,
-                    detail=str(err) or err.__class__.__name__,
-                )
+        if coordinator is None:
+            return self._unpair_result(await async_remove_local_bond(record))
 
-        result = await async_remove_local_bond(record)
+        # Hold the bed out of use for the whole transaction, through the
+        # coordinator's own locking order. Releasing the locks before the
+        # removal would let a command reconnect midway; composing public methods
+        # from here would let the unpair take the address lock while a command
+        # already holds the command lock and is waiting for it.
+        try:
+            async with coordinator.async_transport_operation("unpair"):
+                return self._unpair_result(await async_remove_local_bond(record))
+        except Exception as err:  # noqa: BLE001 - report, do not remove blindly
+            _LOGGER.warning("Could not unpair %s: %s", self.config_entry.title, err)
+            return OperationResult(
+                outcome=OperationOutcome.UNPAIR_FAILED,
+                detail=str(err) or err.__class__.__name__,
+            )
+
+    @staticmethod
+    def _unpair_result(result: BondRemovalResult) -> OperationResult:
+        """Turn a bond-removal outcome into an operation result."""
         if not result.succeeded:
             return OperationResult(
                 outcome=OperationOutcome.UNPAIR_FAILED,

@@ -44,9 +44,11 @@ _DEVICE_INTERFACE = "org.bluez.Device1"
 _ADAPTER_INTERFACE = "org.bluez.Adapter1"
 _OBJECT_MANAGER_INTERFACE = "org.freedesktop.DBus.ObjectManager"
 
-# BlueZ answers GetManagedObjects quickly; a hang means something is wrong with
-# the bus, and a destructive flow must not sit on it indefinitely.
-_DBUS_TIMEOUT_SECONDS = 10.0
+# BlueZ answers GetManagedObjects in milliseconds; a hang means something is
+# wrong with the bus. One unpair makes three calls (inventory, removal,
+# verification), so the per-call budget is kept small enough that the whole
+# transaction stays inside a sensible wait even in the worst case.
+_DBUS_TIMEOUT_SECONDS = 4.0
 
 
 class BluezReadStatus(StrEnum):

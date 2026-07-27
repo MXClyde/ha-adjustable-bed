@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from copy import copy
 from typing import Any
@@ -3379,6 +3380,29 @@ def _patch_inventory(inventory: LocalBondInventory):
     )
 
 
+@pytest.fixture(autouse=True)
+def _clear_domain_data(hass: HomeAssistant):
+    """Drop any coordinator a test stubbed in, even when it fails."""
+    yield
+    hass.data.pop(DOMAIN, None)
+
+
+def _transport_coordinator(error: Exception | None = None) -> tuple[Any, list[str]]:
+    """Return a coordinator stub whose transport gate records its use."""
+    entered: list[str] = []
+
+    @contextlib.asynccontextmanager
+    async def _gate(operation: str):
+        if error is not None:
+            raise error
+        entered.append(operation)
+        yield
+
+    coordinator = MagicMock()
+    coordinator.async_transport_operation = _gate
+    return coordinator, entered
+
+
 async def _open_unpair(hass: HomeAssistant, entry_id: str) -> Any:
     result = await hass.config_entries.options.async_init(entry_id)
     return await hass.config_entries.options.async_configure(
@@ -3540,8 +3564,7 @@ async def test_unpair_releases_the_bed_before_touching_the_bond(
 ) -> None:
     """A live coordinator must be quiesced through its own locking order."""
     mock_config_entry.add_to_hass(hass)
-    coordinator = MagicMock()
-    coordinator.async_prepare_for_transport_operation = AsyncMock()
+    coordinator, entered = _transport_coordinator()
     hass.data.setdefault(DOMAIN, {})[mock_config_entry.entry_id] = coordinator
 
     inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
@@ -3561,8 +3584,7 @@ async def test_unpair_releases_the_bed_before_touching_the_bond(
             await hass.async_block_till_done()
             progress = await hass.config_entries.options.async_configure(progress["flow_id"])
 
-    coordinator.async_prepare_for_transport_operation.assert_awaited_once()
-    hass.data[DOMAIN].pop(mock_config_entry.entry_id, None)
+    assert entered == ["unpair"]
 
 
 async def test_a_bed_that_cannot_be_released_is_not_unpaired(
@@ -3570,9 +3592,8 @@ async def test_a_bed_that_cannot_be_released_is_not_unpaired(
 ) -> None:
     """Better to leave the bond alone than to remove it mid-command."""
     mock_config_entry.add_to_hass(hass)
-    coordinator = MagicMock()
-    coordinator.async_prepare_for_transport_operation = AsyncMock(
-        side_effect=RuntimeError("still connected")
+    coordinator, _entered = _transport_coordinator(
+        error=RuntimeError("still connected")
     )
     hass.data.setdefault(DOMAIN, {})[mock_config_entry.entry_id] = coordinator
 
@@ -3591,7 +3612,6 @@ async def test_a_bed_that_cannot_be_released_is_not_unpaired(
 
     removal.assert_not_called()
     assert "not removed" in progress["description_placeholders"]["outcome"]
-    hass.data[DOMAIN].pop(mock_config_entry.entry_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -3737,3 +3757,29 @@ async def test_replacing_a_bond_that_cannot_be_removed_does_not_pair(
     attempt.assert_not_called()
     assert result is None
     assert errors["base"] == "bond_removal_failed"
+
+
+async def test_a_one_connection_bed_defers_pairing_without_removing_a_bond(
+    hass: HomeAssistant,
+) -> None:
+    """Gen2 must not spend its single connection, even to replace a bond.
+
+    Removing the bond here would leave the box refusing every reconnect until it
+    is power-cycled, with nothing to show for it (#385).
+    """
+    flow = _pairing_flow(hass)
+    flow._manual_data[CONF_BED_TYPE] = BED_TYPE_LEGGETT_GEN2
+    flow._pairing_remove_record = _bond_record()
+
+    with (
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond"
+        ) as removal,
+        patch.object(flow, "_attempt_pairing") as attempt,
+    ):
+        result = await flow._async_handle_pair_now({})
+
+    removal.assert_not_called()
+    attempt.assert_not_called()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"].get(CONF_BLE_BOND_ESTABLISHED) is not True

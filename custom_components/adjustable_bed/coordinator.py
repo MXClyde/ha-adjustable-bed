@@ -10,7 +10,7 @@ import random
 import time
 import traceback
 from collections import deque
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -1304,7 +1304,9 @@ class AdjustableBedCoordinator:
                 self._last_bond_evidence is not None
                 and self._last_bond_evidence.proves_stale_host_bond
             ),
-            "recovery_action": "repair_issue_raised",
+            "recovery_action": (
+                "repair_issue_raised" if self._last_bond_evidence is not None else None
+            ),
             "backend_reports": self._device_pairing_states(),
             "connection_attempts": pairing_attempts,
         }
@@ -2205,7 +2207,10 @@ class AdjustableBedCoordinator:
                         self._connecting = False
                     # Don't notify here - the connect success/failure paths will notify
 
-                # Determine which adapter was actually used for connection
+                # Determine which adapter was actually used for connection.
+                # Recorded here, immediately after the connect, because bond
+                # verification runs before controller startup and must be able
+                # to attribute a failure to the transport that carried it.
                 actual_adapter = "unknown"
                 try:
                     # Try to get the actual connection source from the client
@@ -2221,6 +2226,7 @@ class AdjustableBedCoordinator:
                 # Track successful connection for diagnostics (issue #168)
                 self._connection_success_count += 1
                 self._actual_adapter = actual_adapter
+                self._connection_path = async_path_for_source(self.hass, actual_adapter)
                 self._last_connection_error = None
                 self._last_connection_error_type = None
                 attempt_details["actual_source"] = actual_adapter
@@ -3126,30 +3132,34 @@ class AdjustableBedCoordinator:
         async with self._lock:
             await self._async_disconnect_locked(reason)
 
-    async def async_prepare_for_transport_operation(self, operation: str) -> None:
-        """Take the bed fully out of use so a transport operation can proceed.
+    @contextlib.asynccontextmanager
+    async def async_transport_operation(self, operation: str) -> AsyncIterator[None]:
+        """Hold the bed out of use for the whole of a transport operation.
 
         Removing or recreating a Bluetooth bond must not race a command or a
-        reconnect. Doing that safely means acquiring the same locks in the same
-        order the rest of the coordinator does - command lock, then connection
-        lock - because an unpair that grabbed the address lock first could
-        deadlock against a command that already holds the command lock and is
-        waiting for the address.
+        reconnect, and it is not enough to disconnect and then let go: the
+        removal itself has to happen while everything else is still excluded.
+        So this is a context manager rather than a "prepare" call, and the locks
+        stay held until the caller's transaction finishes.
 
-        Callers get a bed that is disconnected, with its idle and reconnect
-        timers cancelled, and an ``_intentional_disconnect`` flag set so nothing
-        reconnects underneath them. A failure to reach that state raises, so the
-        caller can refuse to touch the bond rather than remove it blindly.
+        The locks are taken in the coordinator's established order - command
+        lock, then connection lock - because an unpair that grabbed the address
+        lock first could deadlock against a command that already holds the
+        command lock and is waiting for the address.
+
+        Inside the block the bed is disconnected with its idle and reconnect
+        timers cancelled. Failing to reach that state raises, so a caller can
+        refuse to touch the bond rather than remove it blindly.
         """
-        _LOGGER.info(
-            "Releasing %s for a %s operation", self._address, operation
-        )
+        _LOGGER.info("Releasing %s for a %s operation", self._address, operation)
         async with self._command_lock, self._lock:
+            client = self._client
             await self._async_disconnect_locked(f"transport_operation_{operation}")
-            if self._client is not None and self._client.is_connected:
+            if client is not None and client.is_connected:
                 raise RuntimeError(
                     f"Could not release the Bluetooth connection to {self._address}"
                 )
+            yield
 
     async def _async_disconnect_locked(self, reason: str = "intentional") -> None:
         """Disconnect from the bed. The caller MUST already hold ``self._lock``.
