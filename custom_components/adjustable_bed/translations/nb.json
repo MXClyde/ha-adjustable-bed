@@ -7,7 +7,7 @@
           "transport_proxy": "Bluetooth-proxy",
           "transport_unknown": "Bluetooth",
           "transport_likely": "Sannsynlig tilkobling: {kind} · {scanner}{signal}",
-          "transport_signal": " · {rssi} dBm",
+          "transport_signal": "· {rssi} dBm",
           "transport_none": "⚠️ Ingen Bluetooth-adapter eller proxy ser denne enheten akkurat nå. Du kan likevel fullføre oppsettet; Home Assistant kobler til når den dukker opp.",
           "transport_local_alternative": "En Bluetooth-adapter på denne Home Assistant-verten ({scanner}) ser den også.",
           "transport_preferred_unavailable": "⚠️ Den valgte adapteren ({adapter}) ser ikke denne enheten akkurat nå, så Home Assistant velger vei automatisk.",
