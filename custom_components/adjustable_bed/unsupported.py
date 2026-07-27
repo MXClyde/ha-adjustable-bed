@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from homeassistant.core import HomeAssistant
@@ -177,11 +177,31 @@ def _pairing_required_issue_id(address: str) -> str:
     return f"pairing_required_{address.replace(':', '_').lower()}"
 
 
+def _evidence_field(evidence: dict[str, Any] | None, key: str) -> str | None:
+    """Return a top-level evidence field as a string, or None."""
+    if not isinstance(evidence, dict):
+        return None
+    value = evidence.get(key)
+    return str(value) if value is not None else None
+
+
+def _evidence_owner_field(evidence: dict[str, Any] | None, key: str) -> str | None:
+    """Return a field of the evidence's bond owner as a string, or None."""
+    if not isinstance(evidence, dict):
+        return None
+    owner = evidence.get("owner")
+    if not isinstance(owner, dict):
+        return None
+    value = owner.get(key)
+    return str(value) if value is not None else None
+
+
 async def create_pairing_required_issue(
     hass: HomeAssistant,
     address: str,
     name: str,
     entry_id: str | None = None,
+    evidence: dict[str, Any] | None = None,
 ) -> None:
     """Create a fixable issue for beds that require Bluetooth pairing.
 
@@ -190,6 +210,12 @@ async def create_pairing_required_issue(
     flow (see ``repairs.py``) walks the user through power-cycling the base and
     re-pairs it. ``entry_id`` (when known) lets the repair flow clear a stale
     bond marker and reload the entry on success.
+
+    ``evidence`` carries what was actually observed: which transport saw the
+    failure and what kind of failure it was. Without it a repair cannot tell a
+    local authentication failure from one carried by a proxy, and those need
+    opposite treatment - one may justify removing a host bond, the other must
+    never touch it (issue #459).
     """
     issue_id = _pairing_required_issue_id(address)
 
@@ -205,10 +231,18 @@ async def create_pairing_required_issue(
             "name": name,
             "address": address,
         },
+        # Home Assistant stores issue data as flat scalars, so the evidence is
+        # spread across named keys rather than nested. A repair reads these to
+        # decide whether recovery may touch a host bond at all.
         data={
             "address": address,
             "name": name,
             "entry_id": entry_id,
+            "evidence_status": _evidence_field(evidence, "status"),
+            "evidence_transport": _evidence_owner_field(evidence, "transport"),
+            "evidence_source": _evidence_owner_field(evidence, "source"),
+            "evidence_adapter": _evidence_owner_field(evidence, "adapter"),
+            "evidence_observed_at": _evidence_field(evidence, "observed_at"),
         },
     )
 

@@ -154,11 +154,13 @@ class TestPairedSetup:
 
         result = await hass.config_entries.options.async_init(entry.entry_id)
 
+        # The options flow always opens on a menu, so a bed that cannot pair its
+        # sides is proven by the absence of the entry, not by skipping the menu.
+        assert result["type"] == FlowResultType.MENU
+        expected = {"settings", "remove_bond"}
         if offers_pairing:
-            assert result["type"] == FlowResultType.MENU
-            assert set(result["menu_options"]) == {"settings", "pair_sides"}
-        else:
-            assert result["type"] == FlowResultType.FORM
+            expected.add("pair_sides")
+        assert set(result["menu_options"]) == expected
 
     async def test_single_address_pair_enable_and_revert_in_place(
         self,
@@ -191,7 +193,7 @@ class TestPairedSetup:
 
         result = await hass.config_entries.options.async_init(entry.entry_id)
         assert result["type"] == FlowResultType.MENU
-        assert set(result["menu_options"]) == {"settings", "pair_sides"}
+        assert set(result["menu_options"]) == {"settings", "pair_sides", "remove_bond"}
         result = await hass.config_entries.options.async_configure(
             result["flow_id"], {"next_step_id": "pair_sides"}
         )
@@ -259,6 +261,40 @@ class TestPairedSetup:
         coordinator = hass.data[DOMAIN][entry.entry_id]
         assert isinstance(coordinator, PairedBedCoordinator)
         assert set(coordinator.sides) == {SIDE_LEFT, SIDE_RIGHT}
+
+    async def test_splitting_a_bed_is_not_removing_its_bluetooth_bond(
+        self,
+        hass: HomeAssistant,
+        mock_coordinator_connected,
+        enable_custom_integrations,
+    ):
+        """Two separate features both wanted an options step called "unpair".
+
+        Splitting a combined bed and removing a Bluetooth bond are unrelated and
+        both destructive, so they must stay distinct handlers: defining them
+        under one name would silently shadow whichever came first.
+        """
+        from custom_components.adjustable_bed.config_flow import AdjustableBedOptionsFlow
+
+        assert (
+            AdjustableBedOptionsFlow.async_step_unpair
+            is not AdjustableBedOptionsFlow.async_step_remove_bond
+        )
+
+        entry = _paired_entry(hass)
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        menu = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            menu["flow_id"], {"next_step_id": "unpair"}
+        )
+
+        # The split confirmation asks for a checkbox; the bond confirmation
+        # takes no input and names the adapter the bond sits on instead.
+        assert result["step_id"] == "unpair"
+        assert [str(key) for key in result["data_schema"].schema] == ["confirm"]
+        assert not result.get("description_placeholders")
 
     async def test_options_flow_exposes_confirmed_unpair(
         self,

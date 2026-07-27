@@ -196,6 +196,45 @@ class TestBuildPairEntryData:
         assert single_options_from_child(child) == original_options
         assert pair_layout_from_descriptor(child) == layout
 
+    def test_a_split_keeps_the_bond_state_the_side_actually_has(self):
+        """A bond belongs to an address, so the frozen snapshot cannot own it.
+
+        The side goes on proving and removing bonds while it is combined, and
+        the restored entry authorizes bond removal from what it carries.
+        """
+        original_data = {
+            "address": LEFT_ADDR,
+            "name": "Left",
+            "bed_type": "okimat",
+            "ble_bond_established": True,
+            "ble_bond_context": {"version": 1, "transport": "local", "source": "hci0"},
+        }
+        data = build_pair_entry_data(
+            dict(original_data),
+            {"address": RIGHT_ADDR, "bed_type": "okimat"},
+            name="Master",
+            left_origin_data=original_data,
+        )
+        left = get_child(data, SIDE_LEFT)
+        assert left is not None
+        child = dict(left)
+
+        # Re-proven while combined, through a proxy this time.
+        proxy_context = {"version": 1, "transport": "proxy", "source": "bedroom-proxy"}
+        child["ble_bond_context"] = proxy_context
+        restored = single_data_from_child(child)
+        assert restored["ble_bond_context"] == proxy_context
+        assert restored["ble_bond_established"] is True
+
+        # Removed while combined: absence has to survive the split too, or the
+        # restored entry would offer to remove a bond that is already gone.
+        child.pop("ble_bond_context")
+        child.pop("ble_bond_established")
+        restored = single_data_from_child(child)
+        assert "ble_bond_context" not in restored
+        assert "ble_bond_established" not in restored
+        assert restored["name"] == "Left"
+
 
 class TestBuildSingleAddressPairEntryData:
     @pytest.mark.parametrize(

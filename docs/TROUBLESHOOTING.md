@@ -252,6 +252,47 @@ The integration connects with pairing enabled and, for OKIN-style beds, verifies
   - **Linux / Raspberry Pi / HA OS (SSH):** `bluetoothctl` → `scan on` → `pair XX:XX:XX:XX:XX:XX` → `trust XX:XX:XX:XX:XX:XX`
   - **Windows / macOS (for testing):** Bluetooth settings → find the bed → "Pair"
 
+### Which side stores the bond
+
+A Bluetooth bond belongs to whichever transport created it. A bond made through
+an adapter on the Home Assistant host lives in that host's BlueZ. A bond made
+through an ESPHome proxy lives on the proxy, where Home Assistant can neither
+read nor remove it. They are separate: pairing through one does nothing for the
+other, and moving a bed to a different proxy means pairing again.
+
+The setup and pairing screens say which path they expect to use, and warn before
+a pairing-required bed would bond through a proxy. Diagnostics record the path
+that was predicted, the path actually used, who owns the bond and what evidence
+there is for it.
+
+### When pairing seems to have worked but nothing responds
+
+Connecting is not the same as bonding, and a bed can accept a connection while
+leaving the link unauthenticated. The integration therefore proves a bond by
+reading a characteristic that an unbonded link cannot read. If that read fails
+with an authentication error, the bond did not form and setup says so. If it
+times out or the characteristic is missing, the result is inconclusive rather
+than assumed good — some receivers (OKIN CST in particular) never answer that
+read even when perfectly bonded — and the integration will simply ask to pair
+again on its next connection instead of claiming a bond it cannot prove.
+
+### Removing a bond
+
+Settings → Devices & Services → Adjustable Bed → Configure → **Remove the
+Bluetooth bond**. Use it when a bond has gone stale, when you want to re-pair
+from scratch, or to clean up after moving the bed to a different adapter. It
+asks for confirmation, names the adapter the bond is on, and verifies the
+removal before reporting success. It never deletes the device.
+
+If Home Assistant cannot read the host's Bluetooth bonds at all (no local
+adapter, or no access to the system D-Bus), the action refuses rather than
+guessing. If two adapters on the host are both bonded to the bed, set the bed's
+preferred adapter to the one you want cleared and try again.
+
+A bed combined from two entries does not offer this action: a bond belongs to
+one Bluetooth address, and a combined bed keeps its addresses on the two sides.
+Split it back into two beds first if you need to remove a side's bond.
+
 ### Signs Pairing is Needed
 - Connection succeeds but no commands work
 - Device info (manufacturer/model) is blank and reads fail with "insufficient authentication"

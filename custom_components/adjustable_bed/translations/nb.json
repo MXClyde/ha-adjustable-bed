@@ -30,6 +30,21 @@
       "setup_progress": {
         "title": "Sjekker tilkoblingen",
         "description": "Sjekker **{name}** ({address})…"
+      },
+      "pairing_progress": {
+        "title": "Parer sengen",
+        "description": "Parer **{name}** ({address})…"
+      },
+      "bluetooth_pairing": {
+        "data_description": {
+          "bond_state_proxy": "ℹ️ Denne sengen pares via en Bluetooth-proxy, som beholder koblingen selv. Home Assistant kan verken lese eller fjerne en kobling som ligger på en proxy, og kan derfor ikke si om det allerede finnes en.",
+          "bond_state_unreadable": "ℹ️ Home Assistant klarte ikke å lese Bluetooth-koblingene på denne verten, og kan derfor ikke si om sengen allerede er paret.",
+          "bond_state_existing": "✅ Denne Home Assistant-verten har allerede en Bluetooth-kobling for denne sengen. Du kan sette opp med den koblingen, eller fjerne den og pare på nytt.",
+          "bond_state_multiple": "⚠️ Mer enn én Bluetooth-adapter på denne verten er koblet til denne sengen. Parer du på nytt, brukes den adapteren Home Assistant kobler til gjennom.",
+          "bond_state_none": "ℹ️ Denne Home Assistant-verten har ingen Bluetooth-kobling for denne sengen ennå.",
+          "bond_state_route_uncertain": "ℹ️ Denne Home Assistant-verten har en Bluetooth-kobling for denne sengen, men mer enn én adapter eller proxy kan ta tilkoblingen, og Home Assistant velger først når den kobler til. Å sette opp med den eksisterende koblingen ville forutsatt en rute som ikke kan garanteres, så par heller på nytt og la tilkoblingen registrere hvilken transport som faktisk eier koblingen.",
+          "bond_state_mismatched": "ℹ️ Denne Home Assistant-verten har en Bluetooth-kobling for denne sengen, men på en annen adapter enn den denne tilkoblingen bruker. En kobling hører til én adapter, så den kan ikke brukes her. Par på nytt for å lage en kobling på denne adapteren, eller velg den adapteren som allerede har koblingen."
+        }
       }
     },
     "progress": {
@@ -41,6 +56,12 @@
       "verifying_bond": "Bekrefter Bluetooth-koblingen…",
       "disconnecting": "Kobler fra…",
       "unpairing": "Fjerner Bluetooth-koblingen…"
+    },
+    "error": {
+      "not_advertising": "Denne sengen sender ikke ut Bluetooth-signal akkurat nå, så ingen tilkobling ble forsøkt. Vekk den, sett den i paremodus, eller flytt den nærmere en Bluetooth-adapter eller proxy, og prøv igjen.",
+      "bond_verification_failed": "Sengen koblet til, men forbindelsen er fortsatt uautentisert, så koblingen ble ikke opprettet. Sett sengen i paremodus igjen og prøv på nytt.",
+      "bond_removal_failed": "Den eksisterende Bluetooth-koblingen kunne ikke fjernes, så paring ble ikke forsøkt.",
+      "auto_detect_failed": "Automatisk gjenkjenning klarte ikke å avgjøre sengetypen sikkert nok. Velg typen fra listen."
     }
   },
   "selector": {
@@ -49,6 +70,48 @@
         "finish": "Fullfør oppsettet likevel",
         "retry": "Sjekk på nytt"
       }
+    },
+    "pairing_action": {
+      "options": {
+        "pair_now": "Par nå",
+        "use_existing_bond": "Sett opp med den eksisterende koblingen",
+        "remove_bond_and_pair": "Fjern den eksisterende koblingen og par på nytt"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Justerbar seng",
+        "description": "Hva vil du gjøre?",
+        "menu_options": {
+          "settings": "Endre innstillinger",
+          "remove_bond": "Fjern Bluetooth-koblingen"
+        }
+      },
+      "remove_bond": {
+        "title": "Fjern Bluetooth-koblingen",
+        "description": "Dette fjerner Bluetooth-koblingen som **{name}** ({address}) har med denne Home Assistant-verten.\n\n**Koblingen er lagret på:** {transport}{provenance}\n\nHome Assistant kobler fra sengen først. Etterpå må sengen pares på nytt før den kan styres, og du må kanskje sette den i paremodus igjen for å få til det.\n\nDette sletter **ikke** enheten Justerbar seng eller innstillingene dens. Velg **Send inn** for å fjerne koblingen, eller gå tilbake for å la den være.",
+        "data_description": {
+          "outcome_removed": "✅ Bluetooth-koblingen ble fjernet, og fjerningen er bekreftet.",
+          "outcome_failed": "❌ Koblingen ble ikke fjernet ({reason})."
+        }
+      },
+      "remove_bond_result": {
+        "title": "Bluetooth-kobling",
+        "description": "{outcome}"
+      }
+    },
+    "progress": {
+      "unpairing": "Fjerner Bluetooth-koblingen…",
+      "disconnecting": "Kobler fra…"
+    },
+    "abort": {
+      "remove_bond_proxy_owned": "**{name}** er paret via en Bluetooth-proxy ({transport}), ikke via denne Home Assistant-verten, så Home Assistant kan ikke fjerne den koblingen. Koblingen ligger på selve proxyen: fjern den der (en ESPHome-proxy glemmer koblingene sine når den flashes på nytt eller tilbakestilles), eller sett sengens foretrukne adapter til en Bluetooth-adapter på denne verten og par på nytt.",
+      "remove_bond_no_bond": "Denne Home Assistant-verten har ingen Bluetooth-kobling lagret for **{name}** ({address}), så det er ingenting å fjerne.",
+      "remove_bond_bluez_unavailable": "Home Assistant klarte ikke å lese Bluetooth-koblingene på denne verten, og prøver derfor ikke å fjerne noen. Det betyr som regel at verten mangler en lokal Bluetooth-adapter, eller ikke har tilgang til system-D-Bus.",
+      "remove_bond_ambiguous": "Home Assistant kan ikke vite hvilken Bluetooth-kobling du mener for **{name}** ({address}). Enten er mer enn én adapter på denne verten koblet til den, eller så har ikke adapteren den ble paret gjennom noen kobling lenger. Sett sengens foretrukne adapter til den du vil rydde, og prøv igjen.",
+      "remove_bond_changed": "Bluetooth-koblingene på denne verten endret seg mens bekreftelsen sto åpen, så ingenting ble fjernet. Åpne **Fjern Bluetooth-koblingen** på nytt for å se gjeldende tilstand og bekrefte derfra."
     }
   }
 }

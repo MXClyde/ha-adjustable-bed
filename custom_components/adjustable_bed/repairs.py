@@ -10,6 +10,7 @@ resolving the issue.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
@@ -28,6 +29,19 @@ from homeassistant.helpers.issue_registry import (
 from .adapter import get_discovered_service_info
 from .address_lock import async_get_connect_lock
 from .ble_auth import is_ble_authentication_error
+from .bluetooth_transport import (
+    TransportClass,
+    async_path_for_source,
+    client_source,
+)
+from .bond_verification import (
+    CONF_BLE_BOND_CONTEXT,
+    BondEvidence,
+    BondOwner,
+    BondVerificationStatus,
+    bond_context_matches,
+    build_bond_context,
+)
 from .const import (
     ADAPTER_AUTO,
     CONF_BED_TYPE,
@@ -188,11 +202,75 @@ class CombineBedsRepairFlow(RepairsFlow):
 class PairingRequiredRepairFlow(RepairsFlow):
     """Guided flow to (re-)pair a bed that requires Bluetooth bonding."""
 
-    def __init__(self, address: str, name: str, entry_id: str | None) -> None:
+    def __init__(
+        self,
+        address: str,
+        name: str,
+        entry_id: str | None,
+        evidence: BondEvidence | None = None,
+    ) -> None:
         """Store the target bed details from the issue data."""
         self._address = address
         self._name = name
         self._entry_id = entry_id
+        self._evidence = evidence
+
+    def _paired_entry_data(self, verified_owner: BondOwner | None) -> dict[str, Any] | None:
+        """Return entry data for a repaired bond without stale ownership."""
+        if self._entry_id is None:
+            return None
+        entry = self.hass.config_entries.async_get_entry(self._entry_id)
+        if entry is None:
+            return None
+
+        data = {**entry.data, CONF_BLE_BOND_ESTABLISHED: True}
+        if verified_owner is not None and verified_owner.transport is not TransportClass.UNKNOWN:
+            prior_status = (
+                str(self._evidence.status)
+                if self._evidence is not None
+                else "unknown"
+            )
+            context = build_bond_context(
+                BondEvidence(
+                    status=BondVerificationStatus.VERIFIED,
+                    owner=verified_owner,
+                    operation=f"repair_authenticated_read_after_{prior_status}",
+                    observed_at=datetime.now(UTC).isoformat(),
+                )
+            )
+            stored = entry.data.get(CONF_BLE_BOND_CONTEXT)
+            # A coordinator that proved the bond has already recorded the same
+            # owner. Restating it with a fresh timestamp is still a real change
+            # to the entry, and this write is not tagged as an internal
+            # bond-marker update, so the reload it triggers would drop the link
+            # a one-connection-per-pairing-window bed will not grant again.
+            data[CONF_BLE_BOND_CONTEXT] = (
+                stored if bond_context_matches(stored, context) else context
+            )
+        else:
+            # Pairing may have succeeded while the auth probe was inconclusive.
+            # The old context describes the bond that was just replaced and can
+            # no longer authorize host-side removal.
+            data.pop(CONF_BLE_BOND_CONTEXT, None)
+        return data
+
+    def _persist_repaired_bond(self, verified_owner: BondOwner | None) -> None:
+        """Persist a successful repair and its freshly verified owner."""
+        if self._entry_id is None:
+            return
+        entry = self.hass.config_entries.async_get_entry(self._entry_id)
+        data = self._paired_entry_data(verified_owner)
+        if entry is None or data is None or data == dict(entry.data):
+            return
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry_id)
+        claim = getattr(coordinator, "begin_internal_bond_update", None)
+        if callable(claim):
+            # Let a loaded coordinator claim this as one of its own bond writes,
+            # so the update listener does not reload. That reload would drop the
+            # link this repair just paired on, and a bed that grants one
+            # connection per pairing window never offers another.
+            claim(bool(data.get(CONF_BLE_BOND_ESTABLISHED, False)))
+        self.hass.config_entries.async_update_entry(entry, data=data)
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -297,10 +375,25 @@ class PairingRequiredRepairFlow(RepairsFlow):
             try:
                 # async_pair_now() clears the runtime bond marker itself, which
                 # editing entry.data alone would not do.
-                return bool(await coordinator.async_pair_now())
+                paired = bool(await coordinator.async_pair_now())
             except Exception as err:  # noqa: BLE001 - any failure means "not paired"
                 _LOGGER.warning("Repair: pairing failed for %s: %s", self._address, err)
                 return False
+            if paired:
+                # What matters is whether this pairing was proven, not whether
+                # the stored context changed. The coordinator deliberately skips
+                # rewriting provenance when the owner is identical, so comparing
+                # contexts would read a correctly re-verified same-adapter bond
+                # as "nothing was established" and delete a valid record.
+                evidence = getattr(coordinator, "last_bond_evidence", None)
+                if isinstance(evidence, BondEvidence) and evidence.proves_bond:
+                    self._persist_repaired_bond(evidence.owner)
+                else:
+                    # Nothing established an owner this time, so the stored
+                    # context still describes the pre-repair bond and can no
+                    # longer authorize a host-side removal.
+                    self._persist_repaired_bond(None)
+            return paired
 
         # No coordinator: the entry failed setup and is retrying. Clear the bond
         # marker so the next setup requests the bond, then let setup own the one
@@ -320,7 +413,19 @@ class PairingRequiredRepairFlow(RepairsFlow):
         except Exception as err:  # noqa: BLE001 - any failure means "not paired"
             _LOGGER.warning("Repair: pairing failed for %s: %s", self._address, err)
             return False
-        return self._bonded_now()
+        bonded = self._bonded_now()
+        if bonded:
+            # Same rule as the coordinator-driven branch above: an unchanged
+            # context is the expected result of re-verifying the same adapter,
+            # so ask the reloaded coordinator what it actually proved rather
+            # than reading "unchanged" as "unproven".
+            reloaded = self.hass.data.get(DOMAIN, {}).get(self._entry_id)
+            evidence = getattr(reloaded, "last_bond_evidence", None)
+            if isinstance(evidence, BondEvidence) and evidence.proves_bond:
+                self._persist_repaired_bond(evidence.owner)
+            else:
+                self._persist_repaired_bond(None)
+        return bonded
 
     async def _async_try_pair(self) -> bool:
         """Create a bond for beds that pair at connect time, and verify it.
@@ -347,6 +452,7 @@ class PairingRequiredRepairFlow(RepairsFlow):
 
         client: BleakClient | None = None
         reload_entry_id: str | None = None
+        verified_owner: BondOwner | None = None
         # Hold the address lock for the whole client lifetime. Releasing it after
         # the connect would let the disconnect below land inside another caller's
         # connect attempt, where bleak's cleanup can abort it.
@@ -372,6 +478,10 @@ class PairingRequiredRepairFlow(RepairsFlow):
                     # (e.g. the characteristic is absent) are inconclusive, not failures.
                     await client.read_gatt_char(DEVICE_INFO_CHARS["model_number"])
                     bonded = True
+                    source = client_source(client)
+                    path = async_path_for_source(self.hass, source) if source else None
+                    if path is not None:
+                        verified_owner = BondOwner.from_path(path)
                 except BleakError as err:
                     if is_ble_authentication_error(err):
                         _LOGGER.warning(
@@ -402,11 +512,7 @@ class PairingRequiredRepairFlow(RepairsFlow):
                 if self._entry_id is not None:
                     entry = self.hass.config_entries.async_get_entry(self._entry_id)
                     if entry is not None:
-                        if not entry.data.get(CONF_BLE_BOND_ESTABLISHED):
-                            self.hass.config_entries.async_update_entry(
-                                entry,
-                                data={**entry.data, CONF_BLE_BOND_ESTABLISHED: True},
-                            )
+                        self._persist_repaired_bond(verified_owner)
                         reload_entry_id = self._entry_id
             finally:
                 if client is not None:
@@ -432,8 +538,40 @@ async def async_create_fix_flow(
         return CombineBedsRepairFlow()
 
     payload = data or {}
+    evidence: BondEvidence | None = None
+    raw_status = payload.get("evidence_status")
+    status: BondVerificationStatus | None = None
+    if isinstance(raw_status, str):
+        try:
+            status = BondVerificationStatus(raw_status)
+        except ValueError:
+            pass
+    if status is not None:
+        raw_transport = payload.get("evidence_transport")
+        transport = TransportClass.UNKNOWN
+        if isinstance(raw_transport, str):
+            try:
+                transport = TransportClass(raw_transport)
+            except ValueError:
+                pass
+        observed_at = payload.get("evidence_observed_at")
+        evidence = BondEvidence(
+            status=status,
+            owner=BondOwner(
+                transport=transport,
+                source=payload.get("evidence_source"),
+                adapter=payload.get("evidence_adapter"),
+            ),
+            operation="pairing_required_issue",
+            observed_at=(
+                observed_at
+                if isinstance(observed_at, str)
+                else datetime.now(UTC).isoformat()
+            ),
+        )
     return PairingRequiredRepairFlow(
         address=payload.get("address", ""),
         name=payload.get("name", "your bed"),
         entry_id=payload.get("entry_id"),
+        evidence=evidence,
     )

@@ -9,6 +9,7 @@ returned the asserted value could hide broken fan-out logic.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -558,6 +559,32 @@ class TestSingleAddressCoordinator:
         await coordinator.async_execute_controller_command(record, side=SIDE_BOTH)
 
         assert sides == [SIDE_LEFT, SIDE_RIGHT]
+
+    async def test_bond_actions_reach_the_coordinator_that_owns_the_link(self):
+        """This surface keeps the entry's address, so it is offered bond removal.
+
+        The locks and the link live on the inner coordinator, so a gate that
+        stopped at the wrapper would guard nothing, and the removal would fail
+        on a missing attribute instead.
+        """
+        coordinator = self._coordinator(BED_TYPE_SBI, SBIController)
+        inner = coordinator._single_inner
+        entered: list[str] = []
+        applied: list[bool] = []
+
+        @contextlib.asynccontextmanager
+        async def gate(operation: str):
+            entered.append(operation)
+            yield
+
+        inner.async_transport_operation = gate
+        inner.apply_confirmed_bond_removal = lambda: applied.append(True)
+
+        async with coordinator.async_transport_operation("unpair"):
+            coordinator.apply_confirmed_bond_removal()
+
+        assert entered == ["unpair"]
+        assert applied == [True]
 
     def test_side_and_combined_ids_share_the_mac_device(self):
         coordinator = self._coordinator(BED_TYPE_SBI, SBIController)

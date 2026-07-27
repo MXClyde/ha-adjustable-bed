@@ -17,6 +17,16 @@ from homeassistant.helpers.issue_registry import IssueSeverity
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.adjustable_bed.bluetooth_transport import (
+    ConnectionPath,
+    TransportClass,
+)
+from custom_components.adjustable_bed.bond_verification import (
+    CONF_BLE_BOND_CONTEXT,
+    BondEvidence,
+    BondOwner,
+    BondVerificationStatus,
+)
 from custom_components.adjustable_bed.const import (
     BED_TYPE_LEGGETT_GEN2,
     CONF_BED_TYPE,
@@ -338,12 +348,25 @@ async def test_async_create_fix_flow_builds_pairing_flow(hass: HomeAssistant) ->
     flow = await async_create_fix_flow(
         hass,
         f"pairing_required_{TEST_ADDRESS.replace(':', '_').lower()}",
-        {"address": TEST_ADDRESS, "name": TEST_NAME, "entry_id": "abc123"},
+        {
+            "address": TEST_ADDRESS,
+            "name": TEST_NAME,
+            "entry_id": "abc123",
+            "evidence_status": "auth_failed",
+            "evidence_transport": "proxy",
+            "evidence_source": "bedroom-proxy",
+            "evidence_adapter": None,
+            "evidence_observed_at": "2026-07-27T00:00:00+00:00",
+        },
     )
     assert isinstance(flow, PairingRequiredRepairFlow)
     assert flow._address == TEST_ADDRESS
     assert flow._name == TEST_NAME
     assert flow._entry_id == "abc123"
+    assert flow._evidence is not None
+    assert flow._evidence.status is BondVerificationStatus.AUTH_FAILED
+    assert flow._evidence.owner.transport is TransportClass.PROXY
+    assert flow._evidence.owner.source == "bedroom-proxy"
 
 
 async def test_async_create_fix_flow_routes_combine_suggestion(
@@ -423,6 +446,7 @@ async def test_try_pair_succeeds_and_clears_marker(hass: HomeAssistant) -> None:
     flow.hass = hass
 
     client = MagicMock()
+    client._connected_scanner = MagicMock(source="bedroom-proxy")
     client.pair = AsyncMock()
     client.read_gatt_char = AsyncMock(return_value=b"Model X")
     client.disconnect = AsyncMock()
@@ -430,6 +454,12 @@ async def test_try_pair_succeeds_and_clears_marker(hass: HomeAssistant) -> None:
     with (
         patch(BLEAK_DEVICE, return_value=MagicMock()),
         patch(ESTABLISH, new=AsyncMock(return_value=client)) as mock_establish,
+        patch(
+            "custom_components.adjustable_bed.repairs.async_path_for_source",
+            return_value=ConnectionPath(
+                source="bedroom-proxy", transport=TransportClass.PROXY
+            ),
+        ),
         patch.object(
             hass.config_entries, "async_reload", new=AsyncMock()
         ) as mock_reload,
@@ -438,6 +468,8 @@ async def test_try_pair_succeeds_and_clears_marker(hass: HomeAssistant) -> None:
 
     assert result is True
     assert entry.data[CONF_BLE_BOND_ESTABLISHED] is True
+    assert entry.data[CONF_BLE_BOND_CONTEXT]["transport"] == "proxy"
+    assert entry.data[CONF_BLE_BOND_CONTEXT]["source"] == "bedroom-proxy"
     assert mock_establish.await_args.kwargs["pair"] is True
     client.pair.assert_not_awaited()
     mock_reload.assert_awaited_once_with(entry.entry_id)
@@ -657,6 +689,12 @@ async def test_try_pair_treats_non_auth_read_error_as_success(hass: HomeAssistan
             CONF_NAME: TEST_NAME,
             CONF_BED_TYPE: "okimat",
             CONF_BLE_BOND_ESTABLISHED: False,
+            CONF_BLE_BOND_CONTEXT: {
+                "version": 1,
+                "transport": "local",
+                "source": "11:22:33:44:55:66",
+                "adapter": "hci0",
+            },
         },
         unique_id=TEST_ADDRESS,
         entry_id="repair_inconclusive_entry",
@@ -678,6 +716,7 @@ async def test_try_pair_treats_non_auth_read_error_as_success(hass: HomeAssistan
         assert await flow._async_try_pair() is True
 
     assert entry.data[CONF_BLE_BOND_ESTABLISHED] is True
+    assert CONF_BLE_BOND_CONTEXT not in entry.data
     mock_reload.assert_awaited_once_with(entry.entry_id)
     client.disconnect.assert_awaited_once()
 
@@ -700,3 +739,207 @@ async def test_try_pair_returns_false_on_auth_error(hass: HomeAssistant) -> None
         assert await flow._async_try_pair() is False
 
     client.disconnect.assert_awaited_once()
+
+
+async def test_a_reverified_same_adapter_bond_keeps_its_provenance(
+    hass: HomeAssistant,
+) -> None:
+    """An unchanged context means "same owner, re-proven", not "nothing proven".
+
+    The coordinator deliberately skips rewriting provenance when the owner is
+    identical, so treating "unchanged" as "unproven" deleted a perfectly valid
+    record and left later unpairs guessing.
+    """
+    context = {
+        "version": 1,
+        "transport": "local",
+        "source": "11:22:33:44:55:66",
+        "adapter": "hci0",
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_LEGGETT_GEN2,
+            CONF_BLE_BOND_ESTABLISHED: True,
+            CONF_BLE_BOND_CONTEXT: context,
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_same_owner_entry",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = MagicMock()
+    coordinator.async_pair_now = AsyncMock(return_value=True)
+    coordinator.last_bond_evidence = BondEvidence(
+        status=BondVerificationStatus.VERIFIED,
+        owner=BondOwner(
+            transport=TransportClass.LOCAL, source="11:22:33:44:55:66", adapter="hci0"
+        ),
+        operation="runtime_authenticated_read",
+        observed_at="2026-07-27T00:00:00+00:00",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, entry.entry_id)
+    flow.hass = hass
+    try:
+        assert await flow._async_pair_via_coordinator() is True
+    finally:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+
+    stored = entry.data[CONF_BLE_BOND_CONTEXT]
+    assert stored["transport"] == "local"
+    assert stored["source"] == "11:22:33:44:55:66"
+    assert stored["adapter"] == "hci0"
+
+
+async def test_a_reverified_same_adapter_bond_is_not_rewritten(
+    hass: HomeAssistant,
+) -> None:
+    """Restating a bond's owner is still a change to the entry.
+
+    This path only runs for beds that grant one connection per pairing window,
+    and the coordinator has already recorded the same owner through an internal
+    write. An untagged rewrite here reads as an options change, and the reload
+    it triggers takes away the link the bed will not grant again.
+    """
+    context = {
+        "version": 1,
+        "transport": "local",
+        "source": "11:22:33:44:55:66",
+        "adapter": "hci0",
+        "operation": "runtime_authenticated_read",
+        "verified_at": "2026-07-27T00:00:00+00:00",
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_LEGGETT_GEN2,
+            CONF_BLE_BOND_ESTABLISHED: True,
+            CONF_BLE_BOND_CONTEXT: context,
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_no_rewrite_entry",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = MagicMock()
+    coordinator.async_pair_now = AsyncMock(return_value=True)
+    coordinator.last_bond_evidence = BondEvidence(
+        status=BondVerificationStatus.VERIFIED,
+        owner=BondOwner(
+            transport=TransportClass.LOCAL, source="11:22:33:44:55:66", adapter="hci0"
+        ),
+        operation="runtime_authenticated_read",
+        observed_at="2026-07-27T12:00:00+00:00",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, entry.entry_id)
+    flow.hass = hass
+    with patch.object(
+        hass.config_entries, "async_update_entry", wraps=hass.config_entries.async_update_entry
+    ) as update:
+        try:
+            assert await flow._async_pair_via_coordinator() is True
+        finally:
+            hass.data[DOMAIN].pop(entry.entry_id, None)
+
+    update.assert_not_called()
+    assert entry.data[CONF_BLE_BOND_CONTEXT] == context
+
+
+async def test_a_successful_repair_does_not_reload_a_one_connection_bed(
+    hass: HomeAssistant,
+) -> None:
+    """The reload would take away the link the repair just paired on.
+
+    Pairing a live link reports success without a new authenticated read, so the
+    repair drops the old provenance, and an untagged entry write reads as an
+    options change. On a bed that grants one connection per pairing window the
+    resulting reload strands it until it is power-cycled.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_LEGGETT_GEN2,
+            CONF_BLE_BOND_CONTEXT: {
+                "version": 1,
+                "transport": "local",
+                "source": "11:22:33:44:55:66",
+                "adapter": "hci0",
+            },
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_no_reload_entry",
+    )
+    entry.add_to_hass(hass)
+
+    claimed: list[bool] = []
+    coordinator = MagicMock()
+    coordinator.async_pair_now = AsyncMock(return_value=True)
+    coordinator.last_bond_evidence = None
+    coordinator.begin_internal_bond_update = claimed.append
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, entry.entry_id)
+    flow.hass = hass
+    try:
+        assert await flow._async_pair_via_coordinator() is True
+    finally:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+
+    # The cleanup still happened, and the coordinator was given the chance to
+    # claim it so the update listener leaves the entry loaded.
+    assert CONF_BLE_BOND_CONTEXT not in entry.data
+    assert entry.data[CONF_BLE_BOND_ESTABLISHED] is True
+    assert claimed == [True]
+
+
+async def test_an_unproven_coordinator_repair_drops_the_old_provenance(
+    hass: HomeAssistant,
+) -> None:
+    """Nothing established an owner, so the pre-repair record cannot stand."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_LEGGETT_GEN2,
+            CONF_BLE_BOND_ESTABLISHED: True,
+            CONF_BLE_BOND_CONTEXT: {
+                "version": 1,
+                "transport": "local",
+                "source": "11:22:33:44:55:66",
+                "adapter": "hci0",
+            },
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_unproven_owner_entry",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = MagicMock()
+    coordinator.async_pair_now = AsyncMock(return_value=True)
+    coordinator.last_bond_evidence = BondEvidence(
+        status=BondVerificationStatus.INCONCLUSIVE,
+        owner=BondOwner(),
+        operation="runtime_authenticated_read",
+        observed_at="2026-07-27T00:00:00+00:00",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, entry.entry_id)
+    flow.hass = hass
+    try:
+        assert await flow._async_pair_via_coordinator() is True
+    finally:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+
+    assert CONF_BLE_BOND_CONTEXT not in entry.data

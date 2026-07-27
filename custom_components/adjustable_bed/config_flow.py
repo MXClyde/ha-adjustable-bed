@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import voluptuous as vol
 from homeassistant.components.bluetooth import (
@@ -23,6 +25,7 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.const import __version__ as HA_VERSION
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.selector import (
     SelectOptionDict,
@@ -46,19 +49,39 @@ from .adapter import (
     read_ble_device_info,
 )
 from .address_lock import async_get_connect_lock
+from .bluetooth_bond import (
+    BondRemovalResult,
+    BondSelectionStatus,
+    LocalBondInventory,
+    LocalBondRecord,
+    async_read_local_bonds,
+    async_remove_local_bond,
+    select_local_bond,
+)
 from .bluetooth_freshness import (
+    ADVERTISEMENT_WAIT_SECONDS,
     FreshnessStatus,
     async_gate_connection,
     async_wait_for_advertisement,
 )
 from .bluetooth_transport import (
     ConnectionPath,
+    PathPrediction,
     TransportClass,
     async_describe_actual,
     async_describe_prediction,
     async_path_for_source,
     async_predict_path,
     client_source,
+)
+from .bond_verification import (
+    CONF_BLE_BOND_CONTEXT,
+    BondEvidence,
+    BondOwner,
+    BondVerificationStatus,
+    async_verify_authenticated_access,
+    bond_owner_from_entry,
+    build_bond_context,
 )
 from .const import (
     ADAPTER_AUTO,
@@ -209,6 +232,7 @@ from .validators import (
 
 if TYPE_CHECKING:
     from bleak import BleakClient
+    from bleak.backends.device import BLEDevice
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -225,6 +249,105 @@ BED_TYPE_AUTO_DETECT = "auto_detect"
 # such as OKIN receivers) — we keep "Auto-detect" selected and ask the user to
 # choose, rather than silently configuring a guessed protocol.
 _AUTO_DETECT_MIN_CONFIDENCE = 0.7
+
+
+async def _async_translation(hass: HomeAssistant, category: str, key: str, default: str) -> str:
+    """Return a translated string from a flow catalogue, or an English default.
+
+    ``category`` is ``config`` or ``options``: Home Assistant keeps them as
+    separate namespaces, and the options flow cannot read config keys.
+    """
+    try:
+        translations = await async_get_translations(hass, hass.config.language, category, {DOMAIN})
+    except Exception:  # noqa: BLE001 - a missing translation must not block a flow
+        return default
+    return translations.get(f"component.{DOMAIN}.{category}.{key}", default)
+
+
+# English fallbacks for the pairing form's bond-state line. The shipped text
+# lives in strings.json; these only apply if a translation is missing.
+_BOND_STATE_FALLBACKS: Final[dict[str, str]] = {
+    "bond_state_proxy": (
+        "ℹ️ This bed will pair through a Bluetooth proxy, which keeps the bond "
+        "itself. Home Assistant cannot read or remove a bond stored on a proxy, "
+        "so it cannot tell you whether one already exists."
+    ),
+    "bond_state_unreadable": (
+        "ℹ️ Home Assistant could not read the Bluetooth bonds on this host, so it "
+        "cannot tell whether this bed is already paired."
+    ),
+    "bond_state_existing": (
+        "✅ This Home Assistant host already has a Bluetooth bond for this bed. "
+        "You can set it up using that bond, or remove it and pair again."
+    ),
+    "bond_state_multiple": (
+        "⚠️ More than one Bluetooth adapter on this host is bonded to this bed. "
+        "Pairing again will use whichever adapter Home Assistant connects through."
+    ),
+    "bond_state_mismatched": (
+        "ℹ️ This Home Assistant host has a Bluetooth bond for this bed, but on a "
+        "different adapter from the one this connection will use. Bonds belong "
+        "to one adapter, so that one cannot be used here. Pair again to create a "
+        "bond on this adapter, or select the bonded adapter instead."
+    ),
+    "bond_state_route_uncertain": (
+        "ℹ️ This Home Assistant host has a Bluetooth bond for this bed, but more "
+        "than one adapter or proxy could take the connection, and Home Assistant "
+        "chooses which when it connects. Setting up with the existing bond would "
+        "assume a route it cannot guarantee, so pair again instead and let the "
+        "connection record which transport really owns the bond."
+    ),
+    "bond_state_none": ("ℹ️ This Home Assistant host has no Bluetooth bond for this bed yet."),
+}
+
+
+def _every_route_holds_bond(
+    prediction: PathPrediction,
+    inventory: LocalBondInventory,
+    record: LocalBondRecord,
+) -> bool:
+    """Return True when every route that may ever connect holds ``record``.
+
+    ``prediction.chosen`` is advisory by design: Home Assistant re-ranks every
+    connectable scanner inside ``connect()``, so a route is only certain when
+    there is nothing else it could pick. Certifying a bond persists a marker
+    that suppresses ``pair=True`` without ever connecting, so betting on the
+    prediction costs an ordinary bed a failed authentication and a retry, and a
+    bed that grants one connection per pairing window its whole window.
+
+    Every enumerated route counts, including one that cannot take a connection
+    at this instant. ``can_connect`` is free-slot state and nothing more: a
+    proxy that is out of slots now can have one free before the entry's first
+    connection, and certifying against that snapshot is the same bet on a
+    changing value. ``connectable`` is no better a filter, since the path
+    enumeration itself falls back to the non-connectable view for proxies that
+    misclassify a bed they can in fact reach.
+    """
+    if not prediction.paths:
+        return False
+    for path in prediction.paths:
+        if path.transport is not TransportClass.LOCAL:
+            return False
+        selection = select_local_bond(
+            inventory, owner_source=path.source, owner_adapter=path.adapter
+        )
+        if not selection.is_exact or selection.record != record:
+            return False
+    return True
+
+
+class NotAdvertisingError(Exception):
+    """Raised when a bed is not advertising, so no connection was attempted.
+
+    Distinct from a pairing failure on purpose: the two need different advice,
+    and conflating them is what sends users to re-seat a bond that was never the
+    problem (issues #458 and #461).
+    """
+
+    def __init__(self, status: FreshnessStatus) -> None:
+        """Record which kind of missing evidence stopped the attempt."""
+        super().__init__(str(status))
+        self.status = status
 
 
 def _motor_count_options(
@@ -407,17 +530,31 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             CONF_BLE_BOND_ESTABLISHED: True,
         }
 
-    def _create_entry_for_existing_bond(self) -> ConfigFlowResult:
+    def _create_entry_for_existing_bond(self, record: LocalBondRecord) -> ConfigFlowResult:
         """Create an entry after the user confirms the adapter is already bonded."""
         assert self._manual_data is not None
+        assert record.has_bond
         _LOGGER.info(
             "User confirmed an existing BLE bond for %s via adapter %s",
             self._manual_data.get(CONF_ADDRESS),
             self._manual_data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO),
         )
+        entry_data = self._mark_ble_bond_established(self._manual_data)
+        entry_data[CONF_BLE_BOND_CONTEXT] = build_bond_context(
+            BondEvidence(
+                status=BondVerificationStatus.VERIFIED,
+                owner=BondOwner(
+                    transport=TransportClass.LOCAL,
+                    source=record.adapter_address,
+                    adapter=record.adapter_path.rsplit("/", 1)[-1] or None,
+                ),
+                operation="existing_bluez_bond",
+                observed_at=datetime.now(UTC).isoformat(),
+            )
+        )
         return self.async_create_entry(
             title=self._manual_data.get(CONF_NAME, "Adjustable Bed"),
-            data=self._mark_ble_bond_established(self._manual_data),
+            data=entry_data,
         )
 
     @staticmethod
@@ -483,6 +620,15 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         # replayed submission from the previous form cannot be read as a
         # confirmation of a result the user never saw.
         self._verify_form_shown: bool = False
+        # Set when the user chose to replace an existing host bond rather than
+        # pair on top of it.
+        self._pairing_remove_record: LocalBondRecord | None = None
+        # The evidence behind a verified bond, kept for logging and diagnostics.
+        self._pairing_success_evidence: BondEvidence | None = None
+        # The form that launched the tracked pairing operation. Pairing is shared
+        # by Bluetooth discovery and manual setup, and failures return to the
+        # same form rather than silently switching flows.
+        self._pairing_step_id: str = "bluetooth_pairing"
         # Octo capability snapshots captured per single-entry as the user connects
         # each side, so a one-link Octo pair can be captured SEQUENTIALLY across
         # resubmissions of the pair step (connect left, disconnect, connect right)
@@ -523,10 +669,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
 
     async def _get_config_translation(self, key: str, default: str) -> str:
         """Return a config-flow translation with a safe English fallback."""
-        translations = await async_get_translations(
-            self.hass, self.hass.config.language, "config", {DOMAIN}
-        )
-        return translations.get(f"component.{DOMAIN}.config.{key}", default)
+        return await _async_translation(self.hass, "config", key, default)
 
     async def _async_transport_note(
         self,
@@ -547,9 +690,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             return await async_describe_prediction(
                 self.hass,
                 prediction,
-                pairing_required=bool(
-                    bed_type and requires_pairing(bed_type, protocol_variant)
-                ),
+                pairing_required=bool(bed_type and requires_pairing(bed_type, protocol_variant)),
             )
         except Exception:  # noqa: BLE001 - never block setup on a preview
             _LOGGER.debug("Could not describe the connection path for %s", address, exc_info=True)
@@ -2554,115 +2695,250 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         """Collect Malouf layout/memory fields after a Bluetooth-discovery override."""
         return await self._async_malouf_step("bluetooth_malouf", user_input)
 
-    async def async_step_bluetooth_pairing(
-        self, user_input: dict[str, Any] | None = None
+    async def _async_pairing_step(
+        self,
+        step_id: str,
+        user_input: dict[str, Any] | None,
+        *,
+        errors: dict[str, str] | None = None,
     ) -> ConfigFlowResult:
-        """Handle Bluetooth pairing for beds that require it."""
-        assert self._manual_data is not None
+        """Offer the pairing actions that actually apply to this bed's state.
 
-        errors: dict[str, str] = {}
-        description_placeholders = {
-            "name": self._manual_data.get(CONF_NAME, "Unknown"),
-            "pairing_instructions": await self._get_pairing_instructions(
-                self._manual_data.get(CONF_BED_TYPE),
-                self._manual_data.get(CONF_PROTOCOL_VARIANT),
-            ),
-            "transport": await self._async_transport_note(
-                self._manual_data[CONF_ADDRESS],
-                self._manual_data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO),
-                self._manual_data.get(CONF_BED_TYPE),
-                self._manual_data.get(CONF_PROTOCOL_VARIANT),
-            ),
-        }
+        The old form offered "Pair Now" and "Skip (already paired)". Skip was
+        ambiguous in both directions: it asserted a bond nothing had checked
+        for, and it gave no way to replace one that had gone stale. The choices
+        here are computed from what the host's BlueZ actually reports and from
+        which transport would own the bond (issue #461).
+        """
+        assert self._manual_data is not None
+        address = self._manual_data.get(CONF_ADDRESS, "")
+        bed_type = self._manual_data.get(CONF_BED_TYPE)
+        variant = self._manual_data.get(CONF_PROTOCOL_VARIANT)
+
+        errors = dict(errors or {})
+        inventory = await async_read_local_bonds(address)
+        prediction = async_predict_path(
+            self.hass, address, self._manual_data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO)
+        )
+        existing = inventory.sole_bond
+        # An existing bond is only offerable when it is on this host and there is
+        # exactly one of it. A proxy keeps its own bond store that the host
+        # cannot read, so claiming a bond exists there would be a guess.
+        over_proxy = (
+            prediction.chosen is not None and prediction.chosen.transport is TransportClass.PROXY
+        )
+        # "Not a proxy" is not the same as "provably the host". An unknown or
+        # absent path cannot show that the bond BlueZ is holding is the one this
+        # bed will actually use, so it is not offered as usable.
+        proven_local = (
+            prediction.chosen is not None and prediction.chosen.transport is TransportClass.LOCAL
+        )
+        existing_selection = (
+            select_local_bond(
+                inventory,
+                owner_source=prediction.chosen.source,
+                owner_adapter=prediction.chosen.adapter,
+            )
+            if proven_local and prediction.chosen is not None
+            else None
+        )
+        can_use_existing = (
+            existing is not None
+            and existing_selection is not None
+            and existing_selection.is_exact
+            and existing_selection.record == existing
+        )
+        # Using the existing bond asserts it without ever connecting, so it is
+        # only honest when no other route could win and turn that assertion
+        # false. That is the same rule the deferred-pairing path applies to a
+        # bed granting one connection per pairing window: never persist a bond
+        # this setup did not prove. Replacing is judged separately, because it
+        # connects and records the route it actually took.
+        can_certify_existing = (
+            can_use_existing
+            and existing is not None
+            and _every_route_holds_bond(prediction, inventory, existing)
+        )
+        can_replace_existing = can_use_existing and not grants_one_connection_per_pairing_window(
+            bed_type or "", variant
+        )
 
         if user_input is not None:
             action = user_input.get("action")
+            should_pair = False
+            if action == "use_existing_bond" and can_certify_existing and existing is not None:
+                return self._create_entry_for_existing_bond(existing)
+            if action == "remove_bond_and_pair" and can_replace_existing and existing is not None:
+                self._pairing_remove_record = existing
+                should_pair = True
+            elif action in ("pair_now", "retry"):
+                self._pairing_remove_record = None
+                should_pair = True
 
-            if action == "pair_now":
-                result = await self._async_handle_pair_now(errors)
-                if result is not None:
-                    return result
+            if should_pair:
+                if grants_one_connection_per_pairing_window(
+                    self._manual_data.get(CONF_BED_TYPE) or "",
+                    self._manual_data.get(CONF_PROTOCOL_VARIANT),
+                ):
+                    # This path deliberately performs no BLE work, so there is
+                    # no long operation to put behind a progress view.
+                    result = await self._async_handle_pair_now(errors)
+                    if result is not None:
+                        return result
+                return await self._async_start_pairing_operation(step_id, prediction)
 
-            elif action == "skip_pairing":
-                return self._create_entry_for_existing_bond()
+        options = ["pair_now"]
+        if can_certify_existing:
+            options.append("use_existing_bond")
+        if can_replace_existing:
+            options.append("remove_bond_and_pair")
+        default_action = "use_existing_bond" if can_certify_existing else "pair_now"
 
         return self.async_show_form(
-            step_id="bluetooth_pairing",
+            step_id=step_id,
             data_schema=vol.Schema(
                 {
-                    vol.Required("action"): SelectSelector(
+                    vol.Required("action", default=default_action): SelectSelector(
                         SelectSelectorConfig(
-                            options=[
-                                SelectOptionDict(value="pair_now", label="Pair Now"),
-                                SelectOptionDict(
-                                    value="skip_pairing", label="Skip (already paired)"
-                                ),
-                            ],
+                            options=options,
                             mode=SelectSelectorMode.LIST,
+                            translation_key="pairing_action",
                         )
                     ),
                 }
             ),
             errors=errors,
-            description_placeholders=description_placeholders,
+            description_placeholders={
+                "name": self._manual_data.get(CONF_NAME, "Unknown"),
+                "pairing_instructions": await self._get_pairing_instructions(bed_type, variant),
+                "transport": await self._async_transport_note(
+                    address,
+                    self._manual_data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO),
+                    bed_type,
+                    variant,
+                ),
+                "bond_state": await self._async_bond_state_note(
+                    inventory,
+                    over_proxy,
+                    can_certify_existing,
+                    route_uncertain=can_use_existing and not can_certify_existing,
+                ),
+            },
         )
+
+    async def _async_bond_state_note(
+        self,
+        inventory: LocalBondInventory,
+        over_proxy: bool,
+        can_use_existing: bool,
+        *,
+        route_uncertain: bool = False,
+    ) -> str:
+        """Say what is already known about this bed's bond, if anything.
+
+        Looked up rather than written inline: this is the central status on an
+        otherwise translated form, and building it in Python left Norwegian
+        users reading English exactly where it mattered most.
+        """
+        if over_proxy:
+            key = "bond_state_proxy"
+        elif not inventory.readable:
+            key = "bond_state_unreadable"
+        elif can_use_existing:
+            key = "bond_state_existing"
+        elif route_uncertain:
+            # The bond is identified and sits on a route that could be used; it
+            # just is not the only route, so it cannot be asserted up front.
+            key = "bond_state_route_uncertain"
+        elif len(inventory.bonded_records) > 1:
+            key = "bond_state_multiple"
+        elif inventory.bonded_records:
+            # A bond exists, just not one this route can use. Saying "no bond"
+            # would be false, and it invites pairing again alongside a bond that
+            # is sitting right there.
+            key = "bond_state_mismatched"
+        else:
+            key = "bond_state_none"
+        return await self._get_config_translation(
+            f"step.bluetooth_pairing.data_description.{key}", _BOND_STATE_FALLBACKS[key]
+        )
+
+    async def async_step_bluetooth_pairing(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle Bluetooth pairing for beds that require it."""
+        return await self._async_pairing_step("bluetooth_pairing", user_input)
 
     async def async_step_manual_pairing(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle Bluetooth pairing for manually selected beds that require it."""
+        return await self._async_pairing_step("manual_pairing", user_input)
+
+    async def _async_start_pairing_operation(
+        self, step_id: str, prediction: PathPrediction
+    ) -> ConfigFlowResult:
+        """Start pairing behind a tracked Home Assistant progress step."""
         assert self._manual_data is not None
+        address = self._manual_data.get(CONF_ADDRESS, "")
+        name = self._manual_data.get(CONF_NAME, "Adjustable Bed")
+        self._pairing_step_id = step_id
+        self.async_begin_operation(
+            name=name,
+            address=address,
+            prediction=prediction,
+            action=SetupAction.LOCATING,
+            placeholders={"name": name, "address": address},
+        )
+        return await self.async_step_pairing_progress()
 
+    async def _async_pairing_worker(self) -> OperationResult:
+        """Run pairing in the progress task and preserve its form result."""
         errors: dict[str, str] = {}
-        description_placeholders = {
-            "name": self._manual_data.get(CONF_NAME, "Unknown"),
-            "pairing_instructions": await self._get_pairing_instructions(
-                self._manual_data.get(CONF_BED_TYPE),
-                self._manual_data.get(CONF_PROTOCOL_VARIANT),
-            ),
-            "transport": await self._async_transport_note(
-                self._manual_data[CONF_ADDRESS],
-                self._manual_data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO),
-                self._manual_data.get(CONF_BED_TYPE),
-                self._manual_data.get(CONF_PROTOCOL_VARIANT),
-            ),
-        }
+        result = await self._async_handle_pair_now(errors)
+        if result is not None:
+            return OperationResult(
+                outcome=OperationOutcome.SUCCESS,
+                payload=(result, errors),
+            )
 
-        if user_input is not None:
-            action = user_input.get("action")
+        error = errors.get("base", "pairing_failed")
+        outcome = {
+            "not_advertising": OperationOutcome.NOT_ADVERTISING,
+            "pairing_not_supported": OperationOutcome.PAIRING_NOT_SUPPORTED,
+            "bond_verification_failed": OperationOutcome.BOND_VERIFICATION_FAILED,
+            "bond_removal_failed": OperationOutcome.UNPAIR_FAILED,
+        }.get(error, OperationOutcome.CONNECTION_FAILED)
+        return OperationResult(outcome=outcome, payload=(None, errors))
 
-            if action == "pair_now":
-                result = await self._async_handle_pair_now(errors)
-                if result is not None:
-                    return result
-
-            elif action == "skip_pairing":
-                return self._create_entry_for_existing_bond()
-
-        return self.async_show_form(
-            step_id="manual_pairing",
-            data_schema=vol.Schema(
-                {
-                    vol.Required("action"): SelectSelector(
-                        SelectSelectorConfig(
-                            options=[
-                                SelectOptionDict(value="pair_now", label="Pair Now"),
-                                SelectOptionDict(
-                                    value="skip_pairing", label="Skip (already paired)"
-                                ),
-                            ],
-                            mode=SelectSelectorMode.LIST,
-                        )
-                    ),
-                }
-            ),
-            errors=errors,
-            description_placeholders=description_placeholders,
+    async def async_step_pairing_progress(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Run pairing as a cancellable, tracked background operation."""
+        return await self.async_run_operation_step(
+            step_id="pairing_progress",
+            worker=self._async_pairing_worker,
+            next_step_id="pairing_result",
         )
 
-    async def _async_handle_pair_now(
-        self, errors: dict[str, str]
-    ) -> ConfigFlowResult | None:
+    async def async_step_pairing_result(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Create the entry on success or return to the originating form."""
+        operation_result = self.operation.result
+        if operation_result is not None and operation_result.payload is not None:
+            result, errors = operation_result.payload
+            if result is not None:
+                return result
+        else:
+            errors = {"base": "pairing_failed"}
+        return await self._async_pairing_step(
+            self._pairing_step_id,
+            None,
+            errors=errors,
+        )
+
+    async def _async_handle_pair_now(self, errors: dict[str, str]) -> ConfigFlowResult | None:
         """Run the "Pair Now" action for the two pairing steps.
 
         Returns the created entry, or None when the caller should redisplay its
@@ -2671,6 +2947,9 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         assert self._manual_data is not None
         address = self._manual_data.get(CONF_ADDRESS)
         title = self._manual_data.get(CONF_NAME, "Adjustable Bed")
+        if not isinstance(address, str) or not address:
+            errors["base"] = "pairing_failed"
+            return None
 
         if grants_one_connection_per_pairing_window(
             self._manual_data.get(CONF_BED_TYPE) or "",
@@ -2689,31 +2968,133 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             return self.async_create_entry(title=title, data=self._manual_data)
 
         try:
-            if await self._attempt_pairing(address):
-                return self.async_create_entry(
-                    title=title,
-                    data=self._mark_ble_bond_established(self._manual_data),
-                )
-            errors["base"] = "pairing_failed"
+            device: BLEDevice | None = None
+            prediction: PathPrediction | None = None
+            remove_record = self._pairing_remove_record
+            self._pairing_remove_record = None
+            if remove_record is not None:
+                # Resolve the exact fresh device before the destructive step.
+                # Reusing it for the connection avoids deleting a working bond
+                # only to discover afterwards that the bed is unavailable.
+                device, prediction = await self._async_resolve_pairing_device(address)
+                # Keep replacement atomic with respect to every other connector
+                # for this address. _attempt_pairing() re-enters this task-owned
+                # lock, so no competing flow can consume the pairing window
+                # between removal and the new connection.
+                async with async_get_connect_lock(self.hass, address):
+                    removal = await async_remove_local_bond(remove_record)
+                    if not removal.succeeded:
+                        _LOGGER.warning(
+                            "Not pairing %s: the existing bond could not be removed (%s)",
+                            address,
+                            removal.error,
+                        )
+                        errors["base"] = "bond_removal_failed"
+                        return None
+                    evidence = await self._attempt_pairing(
+                        address,
+                        device=device,
+                        prediction=prediction,
+                    )
+            else:
+                evidence = await self._attempt_pairing(address)
+        except NotAdvertisingError as err:
+            # A bed that never answered a scan is not a pairing failure, and
+            # saying so would send the user after the wrong thing.
+            _LOGGER.info("Not pairing %s: %s", address, err.status)
+            errors["base"] = "not_advertising"
+            return None
         except (NotImplementedError, TypeError) as err:
             # NotImplementedError: ESPHome < 2024.3.0 doesn't support pairing
             # TypeError: older bleak-retry-connector doesn't have pair kwarg
             _LOGGER.warning("Pairing not supported: %s", err)
             errors["base"] = "pairing_not_supported"
+            return None
         except Exception as err:
             _LOGGER.warning("Pairing failed for %s: %s", address, err)
             errors["base"] = "pairing_failed"
-        return None
+            return None
 
-    async def _attempt_pairing(self, address: str | None) -> bool:
-        """Attempt to pair using the protocol's required connection ordering.
+        if evidence.status is BondVerificationStatus.AUTH_FAILED:
+            # The link came up but is still unauthenticated, which is the one
+            # outcome that says the bond really did not form.
+            errors["base"] = "bond_verification_failed"
+            return None
 
-        Returns:
-            True if pairing succeeded, False otherwise
+        entry_data = dict(self._manual_data)
+        if evidence.proves_bond:
+            # Only a positively verified bond writes the marker, and it records
+            # which transport owns it so a later bond removal knows where to look.
+            entry_data = self._mark_ble_bond_established(entry_data)
+            entry_data[CONF_BLE_BOND_CONTEXT] = build_bond_context(evidence)
+            self._pairing_success_evidence = evidence
+        else:
+            # UNSUPPORTED or INCONCLUSIVE: pairing was requested and nothing
+            # contradicted it, but there is no proof. Leave the marker unset so
+            # the coordinator's first connection asks to pair again rather than
+            # skipping it on our say-so.
+            _LOGGER.info(
+                "Pairing for %s completed without proof of a bond (%s); the "
+                "coordinator will request pairing again on its first connection",
+                address,
+                evidence.status,
+            )
+        return self.async_create_entry(title=title, data=entry_data)
+
+    async def _async_resolve_pairing_device(
+        self, address: str | None
+    ) -> tuple[BLEDevice, PathPrediction]:
+        """Wait for a fresh advertisement and return its connection target."""
+        if not address:
+            raise ValueError("No address provided for pairing")
+
+        preferred_adapter = ADAPTER_AUTO
+        if self._manual_data:
+            preferred_adapter = self._manual_data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO)
+        prediction = async_predict_path(self.hass, address, preferred_adapter)
+        pinned = bool(preferred_adapter and preferred_adapter != ADAPTER_AUTO)
+        source = preferred_adapter if pinned else None
+
+        # Whether the pinned source can reach the bed is decided by the
+        # freshness lookup, not by the prediction. async_predict_path only
+        # enumerates connectable scanners, and some ESPHome proxies file a
+        # perfectly connectable bed under non-connectable; the lookup checks
+        # both buckets, so refusing here would block pairing over exactly the
+        # proxy that Automatic mode uses happily.
+        self.async_report_action(SetupAction.LOCATING)
+        evidence, device = await async_wait_for_advertisement(
+            self.hass,
+            address,
+            source=source,
+            wait_timeout=ADVERTISEMENT_WAIT_SECONDS,
+            on_progress=self.async_report_progress,
+        )
+        if not evidence.is_fresh or device is None:
+            raise NotAdvertisingError(evidence.status)
+        return device, prediction
+
+    async def _attempt_pairing(
+        self,
+        address: str | None,
+        *,
+        device: BLEDevice | None = None,
+        prediction: PathPrediction | None = None,
+    ) -> BondEvidence:
+        """Pair using the protocol's required connection ordering, and verify it.
+
+        Returns the evidence gathered, which is what the caller must judge: a
+        connection is not a bond, and ``client.pair()`` returning is not a bond
+        either. Only an authentication-gated operation that succeeded proves one
+        (issue #461).
+
+        The bed must have advertised recently before anything is attempted.
+        Without that check a bed that is asleep or unplugged still looks present
+        in Home Assistant's history, and the attempt burns its whole connection
+        timeout producing a failure that reads like a pairing problem (#458).
 
         Raises:
-            NotImplementedError: If the Bluetooth backend doesn't support pairing
-            Exception: If pairing fails for other reasons
+            NotImplementedError: the Bluetooth backend does not support pairing.
+            NotAdvertisingError: the bed is not currently advertising.
         """
         from bleak import BleakClient
         from bleak_retry_connector import establish_connection
@@ -2721,7 +3102,6 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         if not address:
             raise ValueError("No address provided for pairing")
 
-        # Get preferred adapter from config data
         preferred_adapter = ADAPTER_AUTO
         if self._manual_data:
             preferred_adapter = self._manual_data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO)
@@ -2732,42 +3112,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             preferred_adapter,
         )
 
-        # Find the device from discovered service info, respecting preferred adapter
-        address_upper = address.upper()
-        matching_service_info = None
-
-        for service_info in get_discovered_service_info(
-            self.hass,
-            include_non_connectable=True,
-        ):
-            if service_info.address.upper() != address_upper:
-                continue
-            # Check adapter preference
-            source = getattr(service_info, "source", None)
-            if preferred_adapter == ADAPTER_AUTO:
-                # Accept any adapter
-                matching_service_info = service_info
-                break
-            elif source == preferred_adapter:
-                # Exact match for preferred adapter
-                matching_service_info = service_info
-                break
-
-        if not matching_service_info:
-            if preferred_adapter != ADAPTER_AUTO:
-                raise ValueError(
-                    f"Device {address} not found via adapter '{preferred_adapter}'. "
-                    "Try setting adapter to 'auto' or ensure the device is in range of the preferred adapter."
-                )
-            raise ValueError(f"Device {address} not found in Bluetooth scan")
-
-        device = matching_service_info.device
-        _LOGGER.debug(
-            "Found device %s via adapter %s (connectable=%s)",
-            address,
-            getattr(matching_service_info, "source", "unknown"),
-            getattr(matching_service_info, "connectable", None),
-        )
+        if device is None:
+            device, prediction = await self._async_resolve_pairing_device(address)
+        elif prediction is None:
+            prediction = async_predict_path(self.hass, address, preferred_adapter)
+        assert prediction is not None
 
         bed_type = self._manual_data.get(CONF_BED_TYPE) if self._manual_data else None
         protocol_variant = (
@@ -2782,8 +3131,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         # making the app's ordinary unbonded GATT connection first.
         # Hold the address lock for the whole client lifetime, not just the
         # connect: the disconnect below must not land in the middle of another
-        # caller's connect attempt, where bleak's cleanup can abort it.
+        # caller's connect attempt, where bleak's cleanup can abort it. Keeping
+        # it all in this one task is also required, because the lock is
+        # reentrant per task rather than per caller.
         async with async_get_connect_lock(self.hass, address):
+            self.async_report_action(SetupAction.CONNECTING)
             client = await establish_connection(
                 BleakClient,
                 device,
@@ -2793,18 +3145,42 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 pair=not pair_after_service_discovery,
                 use_services_cache=not pair_after_service_discovery,
             )
+            self.async_track_client(client)
             try:
+                # The routed transport is only knowable now, and it decides who
+                # owns any bond this attempt creates.
+                # Ownership has to come from the route actually taken. A
+                # prediction is explicitly not a guarantee, and recording one as
+                # the bond owner could persist "local" for a bond stored on a
+                # proxy, later authorizing removal of an unrelated host bond.
+                actual_source = client_source(client)
+                path = async_path_for_source(self.hass, actual_source) if actual_source else None
+                self.async_report_path(path or prediction.chosen)
+
                 if pair_after_service_discovery:
                     _LOGGER.info(
                         "Connected to %s and discovered services; creating the BLE bond now",
                         address,
                     )
+                    self.async_report_action(SetupAction.PAIRING)
                     await client.pair()
 
-                _LOGGER.info("Pairing successful for %s", address)
-                return True
+                self.async_report_action(SetupAction.VERIFYING_BOND)
+                return await async_verify_authenticated_access(
+                    client,
+                    bed_type=bed_type,
+                    protocol_variant=protocol_variant,
+                    path=path,
+                    operation="setup_pairing",
+                )
             finally:
-                await client.disconnect()
+                self.async_report_action(SetupAction.DISCONNECTING)
+                try:
+                    await client.disconnect()
+                except Exception:  # noqa: BLE001 - cleanup must not mask the result
+                    _LOGGER.debug("Disconnect after pairing %s failed", address, exc_info=True)
+                else:
+                    self.async_track_client(None)
 
     def _verification_possible(self) -> bool:
         """Return True only when a connectable scanner exists to probe through.
@@ -2979,15 +3355,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             # error key distinguishes "the bed is silent" from "we briefly lost
             # the handle to a bed that is advertising fine".
             report.error = evidence.error_key
-            _LOGGER.debug(
-                "Skipping the capability probe for %s: %s", address, evidence.status
-            )
+            _LOGGER.debug("Skipping the capability probe for %s: %s", address, evidence.status)
             return report
 
         report.device_found = True
-        report.source = evidence.source or (
-            prediction.chosen.source if prediction.chosen else None
-        )
+        report.source = evidence.source or (prediction.chosen.source if prediction.chosen else None)
         report.via_proxy = bool(
             evidence.path is not None and evidence.path.transport is TransportClass.PROXY
         )
@@ -3026,14 +3398,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                             actual_source,
                             # Only carry the measured signal over when the same
                             # scanner measured it.
-                            rssi=(
-                                evidence.rssi if actual_source == evidence.source else None
-                            ),
+                            rssi=(evidence.rssi if actual_source == evidence.source else None),
                         )
                         if report.actual_path is not None:
-                            report.via_proxy = (
-                                report.actual_path.transport is TransportClass.PROXY
-                            )
+                            report.via_proxy = report.actual_path.transport is TransportClass.PROXY
                         if path_reporter is not None:
                             path_reporter(report.actual_path)
                     _report(SetupAction.DISCOVERING_SERVICES)
@@ -3050,9 +3418,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                                 writable += 1
                     report.writable_count = writable
                     _report(SetupAction.READING_CAPABILITIES)
-                    report.manufacturer, report.model = await read_ble_device_info(
-                        client, address
-                    )
+                    report.manufacturer, report.model = await read_ble_device_info(client, address)
                 finally:
                     if client is not None:
                         _report(SetupAction.DISCONNECTING)
@@ -3121,9 +3487,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         if report.actual_path is not None:
             lines.append(
                 "✅ "
-                + await async_describe_actual(
-                    self.hass, report.actual_path, report.predicted_path
-                )
+                + await async_describe_actual(self.hass, report.actual_path, report.predicted_path)
             )
         else:
             connected_parts = ["✅ Connected"]
@@ -3368,13 +3732,21 @@ def _shown_option_values(schema_dict: dict[Any, Any]) -> dict[str, Any]:
         return {}
 
 
-class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
+class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEntry):
     """Handle Adjustable Bed options."""
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         """Initialize the options flow."""
         super().__init__(config_entry)
         self._pending_data: dict[str, Any] = {}
+        # The exact BlueZ record the user confirmed removing, captured at the
+        # confirmation step so the removal cannot drift onto a different one.
+        self._bond_removal_record: LocalBondRecord | None = None
+        # True once the bond-removal result form has been drawn, and once its
+        # state update has been applied. Both guard against Home Assistant
+        # replaying the confirmation's input into the result step.
+        self._bond_removal_result_shown: bool = False
+        self._bond_removal_state_applied: bool = False
 
     @staticmethod
     def _variant_for_bed_type(bed_type: str, data: dict[str, Any]) -> str:
@@ -3454,7 +3826,10 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
             DEFAULT_PROTOCOL_VARIANT,
         )
         # These markers describe the old protocol's authentication requirements
-        # and must not steer pairing for the new one.
+        # and must not steer pairing for the new one. That includes the recorded
+        # owner: leaving stale proxy provenance behind would keep blocking the
+        # bond removal after the new protocol has established a perfectly
+        # ordinary local bond.
         drop_bond_marker = requires_pairing(previous_bed_type, previous_variant) != requires_pairing(
             bed_type,
             requested_variant,
@@ -3462,6 +3837,7 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
         if drop_bond_marker:
             new_data.pop(CONF_BLE_BOND_ESTABLISHED, None)
             new_data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
+            new_data.pop(CONF_BLE_BOND_CONTEXT, None)
         self._remove_irrelevant_bed_settings(new_data, bed_type)
 
         children = iter_children(new_data)
@@ -3473,6 +3849,7 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
             if drop_bond_marker:
                 child_data.pop(CONF_BLE_BOND_ESTABLISHED, None)
                 child_data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
+                child_data.pop(CONF_BLE_BOND_CONTEXT, None)
             child_bed_type = child_data.get(CONF_BED_TYPE)
             self._remove_irrelevant_bed_settings(
                 child_data,
@@ -3482,34 +3859,44 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
         new_data[CONF_PAIR_CHILDREN] = cleaned
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Manage the options."""
-        if is_paired(self.config_entry.data) and user_input is None:
-            action = (
+        """Offer the settings form alongside the pairing and Bluetooth actions.
+
+        Always a menu rather than going straight to the form, because removing a
+        Bluetooth bond has to live somewhere a user can find it, and it must be
+        clearly separate from deleting the config entry (issue #455). The
+        paired-bed actions share the same menu; which one is offered depends on
+        how this entry is paired.
+        """
+        menu_options = ["settings"]
+        data = self.config_entry.data
+        if is_paired(data):
+            menu_options.append(
                 "revert_sides"
-                if self.config_entry.data.get(CONF_PAIR_MODE)
-                == PAIR_MODE_SINGLE_ADDRESS
+                if data.get(CONF_PAIR_MODE) == PAIR_MODE_SINGLE_ADDRESS
                 else "unpair"
             )
-            return self.async_show_menu(
-                step_id="init", menu_options=["settings", action]
-            )
-        if user_input is None and supports_single_address_pairing(
-            self.config_entry.data.get(CONF_BED_TYPE),
-            self.config_entry.data.get(CONF_PROTOCOL_VARIANT),
-            resolved_variant=self.config_entry.data.get(
-                CONF_KAIDI_RESOLVED_VARIANT
-            ),
+        elif supports_single_address_pairing(
+            data.get(CONF_BED_TYPE),
+            data.get(CONF_PROTOCOL_VARIANT),
+            resolved_variant=data.get(CONF_KAIDI_RESOLVED_VARIANT),
         ):
-            return self.async_show_menu(
-                step_id="init", menu_options=["settings", "pair_sides"]
-            )
-        return await self._async_options_form(user_input, step_id="init")
+            menu_options.append("pair_sides")
+        if data.get(CONF_ADDRESS):
+            # A bond belongs to one BLE address. A bed combined from two entries
+            # keeps its addresses on the children, so there is no single bond to
+            # offer here - only a dead action that could not do anything.
+            menu_options.append("remove_bond")
+        return self.async_show_menu(step_id="init", menu_options=menu_options)
+
+    def _async_flow_manager(self) -> Any:
+        """Options flows are driven by their own manager, not the config one."""
+        return self.hass.config_entries.options
 
     async def async_step_settings(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Manage settings for a paired bed."""
-        return await self._async_options_form(user_input, step_id="init")
+        """Manage the options."""
+        return await self._async_options_form(user_input, step_id="settings")
 
     async def async_step_unpair(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Confirm splitting a paired bed back into two entries."""
@@ -3898,7 +4285,7 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                     requested_bed_type,
                     requested_variant,
                 )
-                return await self.async_step_init()
+                return await self._async_options_form(None, step_id=step_id)
 
             bed_type = requested_bed_type
             # The discovery toggle is global, not per-entry: pull it out of
@@ -3916,11 +4303,11 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                 user_input[CONF_PROTOCOL_VARIANT] = requested_variant
             else:
                 user_input.pop(CONF_PROTOCOL_VARIANT, None)
-            if (
-                self.config_entry.data.get(CONF_BED_TYPE) != bed_type
-                and bed_type_has_position_feedback(bed_type, form_variant)
-                != bed_type_has_position_feedback(bed_type, requested_variant)
-            ):
+            if self.config_entry.data.get(
+                CONF_BED_TYPE
+            ) != bed_type and bed_type_has_position_feedback(
+                bed_type, form_variant
+            ) != bed_type_has_position_feedback(bed_type, requested_variant):
                 # Rebuild once more when the chosen variant changes position
                 # capability, so the user sees the new sensing default and can
                 # still explicitly override it on the following submission.
@@ -3929,7 +4316,7 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                     bed_type,
                     requested_variant,
                 )
-                return await self.async_step_init()
+                return await self._async_options_form(None, step_id=step_id)
             requested_motor_count = user_input.get(
                 CONF_MOTOR_COUNT,
                 form_motor_count,
@@ -3940,7 +4327,7 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                 requested_motor_count,
             ):
                 return self.async_show_form(
-                    step_id="init",
+                    step_id=step_id,
                     data_schema=vol.Schema(schema_dict),
                     errors={CONF_MOTOR_COUNT: "invalid_motor_count_for_bed_type"},
                 )
@@ -4102,4 +4489,272 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
         return self.async_show_form(
             step_id=step_id,
             data_schema=vol.Schema(schema_dict),
+        )
+
+    # ------------------------------------------------------------------
+    # Remove the Bluetooth bond (issue #455)
+    #
+    # Removing a bond is destructive and transport-specific, so it is gated on
+    # three things: the bond must be shown to live on this host, the user must
+    # confirm having seen which transport that is, and the removal must be
+    # confirmed afterwards before anything is reported as done.
+    # ------------------------------------------------------------------
+
+    async def _async_bond_situation(self) -> tuple[LocalBondInventory, BondOwner]:
+        """Return the host's bond records and the owner we have on record."""
+        address = self.config_entry.data.get(CONF_ADDRESS, "")
+        inventory = await async_read_local_bonds(address)
+        return inventory, bond_owner_from_entry(self.config_entry.data)
+
+    async def async_step_remove_bond(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Explain exactly what will be removed and ask for confirmation.
+
+        The record is identified once, when the confirmation is rendered, and
+        pinned. On submission the inventory is read again and the pinned record
+        must still be there unchanged. Without that, the bond shown to the user
+        and the bond actually removed are two separate lookups, and anything
+        that changes BlueZ in between (another adapter pairing, a bond removed
+        elsewhere) means removing something the user never saw.
+        """
+        inventory, owner = await self._async_bond_situation()
+        name = self.config_entry.data.get(CONF_NAME) or self.config_entry.title
+        address = self.config_entry.data.get(CONF_ADDRESS, "")
+
+        # Proxy-owned bonds are refused before anything else: the host cannot
+        # reach them, and a destructive button that quietly does nothing to the
+        # bond the user has in mind is worse than no button.
+        if owner.transport is TransportClass.PROXY:
+            return self._async_abort_bond_removal("proxy_owned", name, address, owner)
+
+        selection_source = owner.source
+        selection_adapter = owner.adapter
+        if not owner.is_host:
+            # No recorded owner, which is every entry paired before provenance
+            # existed. The host's own BlueZ still holds a record for this exact
+            # address, so there is something concrete to remove, but if the bed
+            # is currently routing through a proxy then the bond that matters to
+            # the user lives there and this one is a leftover. Refuse rather
+            # than act on a guess about which the user means.
+            prediction = async_predict_path(
+                self.hass,
+                address,
+                self.config_entry.data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO),
+            )
+            if (
+                prediction.chosen is not None
+                and prediction.chosen.transport is TransportClass.PROXY
+            ):
+                return self._async_abort_bond_removal("proxy_owned", name, address, owner)
+            if (
+                prediction.chosen is not None
+                and prediction.chosen.transport is TransportClass.LOCAL
+            ):
+                # Legacy entries do not name the bond owner. A proven local
+                # connection path supplies the same adapter identifiers newer
+                # entries persist, so an explicitly selected adapter can still
+                # disambiguate two host bonds.
+                selection_source = prediction.chosen.source
+                selection_adapter = prediction.chosen.adapter
+
+        selection = select_local_bond(
+            inventory,
+            owner_source=selection_source,
+            owner_adapter=selection_adapter,
+        )
+        if selection.status is BondSelectionStatus.UNREADABLE:
+            return self._async_abort_bond_removal("bluez_unavailable", name, address, owner)
+        if selection.status is BondSelectionStatus.NO_BOND:
+            return self._async_abort_bond_removal("no_bond", name, address, owner)
+        if selection.status is BondSelectionStatus.AMBIGUOUS:
+            return self._async_abort_bond_removal("ambiguous", name, address, owner)
+        if selection.status is BondSelectionStatus.UNKNOWN_OWNER:
+            # Provenance names an adapter that no longer holds a bond for this
+            # bed. Acting anyway would mean removing a record nothing pointed at.
+            return self._async_abort_bond_removal("ambiguous", name, address, owner)
+
+        record = selection.record
+        assert record is not None
+
+        if user_input is not None:
+            pinned = self._bond_removal_record
+            if pinned is None or not self._same_bond_record(pinned, record):
+                # The host's bond state moved between showing the confirmation
+                # and acting on it. Re-confirm rather than remove something else.
+                self._bond_removal_record = None
+                return self._async_abort_bond_removal("changed", name, address, owner)
+            self.async_begin_operation(
+                name=name,
+                address=address,
+                action=SetupAction.UNPAIRING,
+                placeholders={"name": name, "address": address},
+            )
+            return await self.async_step_remove_bond_progress()
+
+        # Pin what is being shown, so the submission can prove it is the same.
+        self._bond_removal_record = record
+        return self.async_show_form(
+            step_id="remove_bond",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "name": name,
+                "address": address,
+                "transport": record.adapter_address or record.adapter_path,
+                "provenance": (
+                    ""
+                    if owner.is_host
+                    else (
+                        "\n\n⚠️ Home Assistant has no record of which transport created "
+                        "this bond, because it predates that being tracked. This is the "
+                        "only Bluetooth bond this host holds for that address."
+                    )
+                ),
+            },
+        )
+
+    def _async_abort_bond_removal(
+        self, reason: str, name: str, address: str, owner: BondOwner
+    ) -> ConfigFlowResult:
+        """Abort the removal with an explanation of why it is not offered."""
+        return self.async_abort(
+            reason=f"remove_bond_{reason}",
+            description_placeholders={
+                "name": name,
+                "address": address,
+                "transport": owner.source or str(owner.transport),
+            },
+        )
+
+    @staticmethod
+    def _same_bond_record(pinned: LocalBondRecord, current: LocalBondRecord) -> bool:
+        """Return True when two reads describe the same BlueZ device object."""
+        return (
+            pinned.device_path == current.device_path
+            and pinned.adapter_path == current.adapter_path
+            and pinned.address.upper() == current.address.upper()
+        )
+
+    async def _async_bond_removal_worker(self) -> OperationResult:
+        """Stop using the bed, then remove the bond and confirm it is gone."""
+        record = self._bond_removal_record
+        assert record is not None
+
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+        if coordinator is None:
+            # No coordinator to quiesce, but the address still has to be held:
+            # a config or repair flow could otherwise connect to this bed while
+            # its bond is being removed.
+            async with async_get_connect_lock(self.hass, record.address):
+                return await self._async_remove_and_apply(record)
+
+        # Hold the bed out of use for the whole transaction, through the
+        # coordinator's own locking order. Releasing the locks before the
+        # removal would let a command reconnect midway; composing public methods
+        # from here would let the removal take the address lock while a command
+        # already holds the command lock and is waiting for it.
+        try:
+            async with coordinator.async_transport_operation("unpair"):
+                return await self._async_remove_and_apply(record)
+        except Exception as err:  # noqa: BLE001 - report, do not remove blindly
+            _LOGGER.warning(
+                "Could not remove the bond for %s: %s", self.config_entry.title, err
+            )
+            return OperationResult(
+                outcome=OperationOutcome.UNPAIR_FAILED,
+                detail=str(err) or err.__class__.__name__,
+            )
+
+    async def _async_remove_and_apply(self, record: LocalBondRecord) -> OperationResult:
+        """Finish a started removal and persist its result before cancellation."""
+        removal_task = self.hass.async_create_task(async_remove_local_bond(record))
+        try:
+            removal = await asyncio.shield(removal_task)
+        except asyncio.CancelledError:
+            # Once RemoveDevice may have been sent, cancellation cannot safely
+            # abandon the verification read. Keep the surrounding transport
+            # lock held, record a confirmed removal, then honor cancellation.
+            removal = await removal_task
+            result = self._bond_removal_result(removal)
+            self._apply_confirmed_bond_removal(result)
+            raise
+        result = self._bond_removal_result(removal)
+        self._apply_confirmed_bond_removal(result)
+        return result
+
+    def _apply_confirmed_bond_removal(self, result: OperationResult) -> None:
+        """Clear persisted bond state immediately after confirmed removal."""
+        if not result.succeeded or self._bond_removal_state_applied:
+            return
+        self._bond_removal_state_applied = True
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+        if coordinator is not None:
+            coordinator.apply_confirmed_bond_removal()
+            return
+        data = dict(self.config_entry.data)
+        data.pop(CONF_BLE_BOND_ESTABLISHED, None)
+        data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
+        data.pop(CONF_BLE_BOND_CONTEXT, None)
+        self.hass.config_entries.async_update_entry(self.config_entry, data=data)
+
+    async def _async_bond_removal_outcome_note(self, succeeded: bool, detail: str | None) -> str:
+        """Describe the removal in the user's language."""
+        if succeeded:
+            return await _async_translation(
+                self.hass,
+                "options",
+                "step.remove_bond.data_description.outcome_removed",
+                "✅ The Bluetooth bond was removed and the removal was confirmed.",
+            )
+        template = await _async_translation(
+            self.hass,
+            "options",
+            "step.remove_bond.data_description.outcome_failed",
+            "❌ The bond was not removed ({reason}).",
+        )
+        return template.format(reason=detail or "unknown reason")
+
+    @staticmethod
+    def _bond_removal_result(result: BondRemovalResult) -> OperationResult:
+        """Turn a bond-removal outcome into an operation result."""
+        if not result.succeeded:
+            return OperationResult(
+                outcome=OperationOutcome.UNPAIR_FAILED,
+                detail=result.error or str(result.status),
+                payload=result,
+            )
+        return OperationResult(outcome=OperationOutcome.SUCCESS, payload=result)
+
+    async def async_step_remove_bond_progress(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Run the bond removal as a tracked background operation."""
+        return await self.async_run_operation_step(
+            step_id="remove_bond_progress",
+            worker=self._async_bond_removal_worker,
+            next_step_id="remove_bond_result",
+        )
+
+    async def async_step_remove_bond_result(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Report the outcome after the worker has applied confirmed removal."""
+        result = self.operation.result
+        succeeded = result is not None and result.succeeded
+
+        if result is not None:
+            self._apply_confirmed_bond_removal(result)
+
+        if user_input is not None and self._bond_removal_result_shown:
+            return self.async_create_entry(title="", data={})
+
+        detail = result.detail if result is not None else None
+        self._bond_removal_result_shown = True
+        return self.async_show_form(
+            step_id="remove_bond_result",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "name": self.config_entry.data.get(CONF_NAME) or self.config_entry.title,
+                "outcome": await self._async_bond_removal_outcome_note(succeeded, detail),
+            },
         )

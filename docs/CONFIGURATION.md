@@ -30,7 +30,8 @@ To adjust settings after setup:
 
 1. Go to **Settings** → **Devices & Services**
 2. Find "Adjustable Bed" and click **Configure** (gear icon)
-3. Adjust settings and click **Submit**
+3. Choose **Change settings** from the menu
+4. Adjust settings and click **Submit**
 
 ![Configuration options location](https://github.com/user-attachments/assets/8d6dc2b9-7df2-48dc-9ea5-61aaadce6c63)
 
@@ -252,7 +253,8 @@ Some Octo beds require PIN authentication to maintain the BLE connection. The be
 **How to configure:**
 1. Go to **Settings** → **Devices & Services**
 2. Find your Adjustable Bed and click **Configure** (gear icon)
-3. Enter your 4-digit PIN in the "Octo PIN" field
+3. Choose **Change settings** from the menu
+4. Enter your 4-digit PIN in the "Octo PIN" field
 
 **Finding your PIN:**
 - Check your Octo physical remote's settings menu
@@ -270,7 +272,8 @@ Jensen JMC400 beds require PIN authentication for BLE control.
 **How to configure:**
 1. Go to **Settings** → **Devices & Services**
 2. Find your Adjustable Bed and click **Configure** (gear icon)
-3. Enter your 4-digit PIN in the "Jensen PIN" field
+3. Choose **Change settings** from the menu
+4. Enter your 4-digit PIN in the "Jensen PIN" field
 
 **Finding your PIN:**
 - Default PIN is `3060` (used if field left empty)

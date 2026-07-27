@@ -244,26 +244,46 @@
       },
       "bluetooth_pairing": {
         "title": "Bluetooth Pairing Required",
-        "description": "**{name}** requires Bluetooth pairing.\n\n{transport}\n\n**To pair:**\n{pairing_instructions}\n\nIf you've already paired manually via system Bluetooth settings, click 'Skip'.",
+        "description": "**{name}** requires Bluetooth pairing.\n\n{transport}\n\n{bond_state}\n\n**To pair:**\n{pairing_instructions}",
         "data": {
           "action": "Action",
           "pairing_instructions_generic": "Pairing instructions (generic)",
           "pairing_instructions_okin": "Pairing instructions (Okin)",
           "pairing_instructions_sleep_number": "Pairing instructions (Sleep Number)",
-          "pairing_instructions_leggett_gen2": "Pairing instructions (Leggett & Platt Gen2)"
+          "pairing_instructions_leggett_gen2": "Pairing instructions (Leggett & Platt Gen2)",
+          "bond_state": "Current bond",
+          "bond_state_proxy": "Bond state: proxy",
+          "bond_state_unreadable": "Bond state: unknown",
+          "bond_state_existing": "Bond state: already bonded",
+          "bond_state_multiple": "Bond state: several adapters",
+          "bond_state_none": "Bond state: not bonded",
+          "bond_state_route_uncertain": "Bond state: route not certain",
+          "bond_state_mismatched": "Bond state"
         },
         "data_description": {
           "pairing_instructions_generic": "1. Put your bed in pairing mode (hold lamp button until blue light blinks, or unplug for 30+ seconds)\n2. Click 'Pair Now'",
           "pairing_instructions_okin": "1. Put the OKIN base into Bluetooth pairing mode by power-cycling the control box: unplug it for ~30 seconds, then plug it back in. The status light blinks blue, then turns green after ~20 seconds. (Some models instead use the under-bed lamp/light button - hold it until the light blinks blue.) There is no separate Bluetooth pairing button; any Pair/Learn button on the box only syncs the RF remote.\n2. While the light is active, click 'Pair Now'.",
           "pairing_instructions_sleep_number": "1. Put your bed in pairing mode (hold the side pairing button until the blue light blinks)\n2. Click 'Pair Now'",
-          "pairing_instructions_leggett_gen2": "1. Unplug your bed's power cord and remove any batteries from the power supply.\n2. Plug the bed back in. Wait for a small chime and a pulsing blue light under the bed.\n3. While the light is pulsing, promptly click 'Pair Now'."
+          "pairing_instructions_leggett_gen2": "1. Unplug your bed's power cord and remove any batteries from the power supply.\n2. Plug the bed back in. Wait for a small chime and a pulsing blue light under the bed.\n3. While the light is pulsing, promptly click 'Pair Now'.",
+          "bond_state": "What this Home Assistant host already knows about a bond for this bed.",
+          "bond_state_proxy": "ℹ️ This bed will pair through a Bluetooth proxy, which keeps the bond itself. Home Assistant cannot read or remove a bond stored on a proxy, so it cannot tell you whether one already exists.",
+          "bond_state_unreadable": "ℹ️ Home Assistant could not read the Bluetooth bonds on this host, so it cannot tell whether this bed is already paired.",
+          "bond_state_existing": "✅ This Home Assistant host already has a Bluetooth bond for this bed. You can set it up using that bond, or remove it and pair again.",
+          "bond_state_multiple": "⚠️ More than one Bluetooth adapter on this host is bonded to this bed. Pairing again will use whichever adapter Home Assistant connects through.",
+          "bond_state_none": "ℹ️ This Home Assistant host has no Bluetooth bond for this bed yet.",
+          "bond_state_route_uncertain": "ℹ️ This Home Assistant host has a Bluetooth bond for this bed, but more than one adapter or proxy could take the connection, and Home Assistant chooses which when it connects. Setting up with the existing bond would assume a route it cannot guarantee, so pair again instead and let the connection record which transport really owns the bond.",
+          "bond_state_mismatched": "ℹ️ This Home Assistant host has a Bluetooth bond for this bed, but on a different adapter from the one this connection will use. Bonds belong to one adapter, so that one cannot be used here. Pair again to create a bond on this adapter, or select the bonded adapter instead."
         }
       },
       "manual_pairing": {
         "title": "Bluetooth Pairing Required",
-        "description": "**{name}** requires Bluetooth pairing.\n\n{transport}\n\n**To pair:**\n{pairing_instructions}\n\nIf you've already paired manually via system Bluetooth settings, click 'Skip'.",
+        "description": "**{name}** requires Bluetooth pairing.\n\n{transport}\n\n{bond_state}\n\n**To pair:**\n{pairing_instructions}",
         "data": {
-          "action": "Action"
+          "action": "Action",
+          "bond_state": "Current bond"
+        },
+        "data_description": {
+          "bond_state": "What this Home Assistant host already knows about a bond for this bed."
         }
       },
       "verify_connection": {
@@ -305,6 +325,10 @@
       "setup_progress": {
         "title": "Checking the connection",
         "description": "Checking **{name}** ({address})…"
+      },
+      "pairing_progress": {
+        "title": "Pairing the bed",
+        "description": "Pairing **{name}** ({address})…"
       },
       "pair_beds": {
         "title": "Combine two beds",
@@ -356,20 +380,28 @@
       "octo_pairing_needs_connection": "Both Octo beds must be connected before combining them — their capabilities (lights, memory presets, etc.) are read from the live beds and saved for the paired device. Connect each Octo side, then try again.",
       "pairing_unsupported_entities": "One of these beds has extra controls (such as climate, lights, or selectors) that combining doesn't support yet. Those would be lost, so pairing is blocked for now.",
       "same_address": "Both selections point at the same bed (same Bluetooth address). Pick two different beds to combine.",
-      "auto_detect_failed": "Couldn't identify this bed automatically. Pick a protocol from the list, or choose \"Diagnostic (unknown bed)\" to capture data for support."
+      "auto_detect_failed": "Couldn't identify this bed automatically. Pick a protocol from the list, or choose \"Diagnostic (unknown bed)\" to capture data for support.",
+      "not_advertising": "This bed is not currently advertising, so no connection was attempted. Wake it, put it into pairing mode, or move it closer to a Bluetooth adapter or proxy, then try again.",
+      "bond_verification_failed": "The bed connected but the link is still unauthenticated, so the bond did not form. Put the bed back into pairing mode and try again.",
+      "bond_removal_failed": "The existing Bluetooth bond could not be removed, so pairing was not attempted."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Adjustable Bed Options",
-        "description": "Adjust the configuration for your adjustable bed.",
+        "title": "Adjustable Bed",
+        "description": "What would you like to do?",
         "menu_options": {
-          "settings": "Settings",
+          "settings": "Change settings",
           "pair_sides": "Enable Left / Right / Both controls",
           "revert_sides": "Restore standalone controls",
-          "unpair": "Split into two beds"
-        },
+          "unpair": "Split into two beds",
+          "remove_bond": "Remove the Bluetooth bond"
+        }
+      },
+      "settings": {
+        "title": "Adjustable Bed Options",
+        "description": "Adjust the configuration for your adjustable bed.",
         "data": {
           "bed_type": "Bed type",
           "motor_count": "Number of motors",
@@ -418,6 +450,22 @@
           "legs_max_angle": "Maximum angle for legs/feet motors. Adjust if position readings don't match your bed's actual range."
         }
       },
+      "remove_bond": {
+        "title": "Remove the Bluetooth bond",
+        "description": "This removes the Bluetooth bond that **{name}** ({address}) has with this Home Assistant host.\n\n**Bond stored on:** {transport}{provenance}\n\nHome Assistant will disconnect from the bed first. Afterwards the bed will need pairing again before it can be controlled, and you may need to put it back into pairing mode to do that.\n\nThis does **not** delete the Adjustable Bed device or its settings. Select **Submit** to remove the bond, or go back to leave it alone.",
+        "data": {
+          "outcome_removed": "Removal confirmed",
+          "outcome_failed": "Removal failed"
+        },
+        "data_description": {
+          "outcome_removed": "✅ The Bluetooth bond was removed and the removal was confirmed.",
+          "outcome_failed": "❌ The bond was not removed ({reason})."
+        }
+      },
+      "remove_bond_result": {
+        "title": "Bluetooth bond",
+        "description": "{outcome}"
+      },
       "unpair": {
         "title": "Split paired bed",
         "description": "Restore the Left and Right sides as separate Adjustable Bed entries. Side entities keep their entity IDs, history, names, and areas. Combined controls are removed.",
@@ -447,6 +495,17 @@
       "invalid_angle": "Angle must be a positive number between 0 and 180 degrees.",
       "octo_tv_lift_pairing_unsupported": "One-motor OCTO TV/bed lifts must remain standalone and cannot be paired as bed sides.",
       "single_address_pairing_unsupported": "This CBNew protocol has no A/B side selector and cannot safely expose paired-side controls."
+    },
+    "progress": {
+      "unpairing": "Removing the Bluetooth bond…",
+      "disconnecting": "Disconnecting…"
+    },
+    "abort": {
+      "remove_bond_proxy_owned": "**{name}** is paired through a Bluetooth proxy ({transport}), not through this Home Assistant host, so Home Assistant cannot remove that bond. The bond lives on the proxy itself: clear it there (an ESPHome proxy forgets its bonds when it is reflashed or factory reset), or set the bed's preferred adapter to a Bluetooth adapter on this host and pair again.",
+      "remove_bond_no_bond": "This Home Assistant host has no Bluetooth bond stored for **{name}** ({address}), so there is nothing to remove.",
+      "remove_bond_bluez_unavailable": "Home Assistant could not read the Bluetooth bonds on this host, so it will not try to remove one. This usually means it has no local Bluetooth adapter, or no access to the system D-Bus.",
+      "remove_bond_ambiguous": "Home Assistant cannot tell which Bluetooth bond you mean for **{name}** ({address}). Either more than one adapter on this host is bonded to it, or the adapter it was paired through no longer holds a bond. Set the bed's preferred adapter to the one you want to clear, then try again.",
+      "remove_bond_changed": "The Bluetooth bonds on this host changed while the confirmation was open, so nothing was removed. Open **Remove the Bluetooth bond** again to see the current state and confirm from there."
     }
   },
   "entity": {
@@ -1910,6 +1969,13 @@
       "options": {
         "finish": "Finish setup anyway",
         "retry": "Check again"
+      }
+    },
+    "pairing_action": {
+      "options": {
+        "pair_now": "Pair now",
+        "use_existing_bond": "Set up using the existing bond",
+        "remove_bond_and_pair": "Remove the existing bond and pair again"
       }
     }
   }

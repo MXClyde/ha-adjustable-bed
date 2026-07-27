@@ -52,6 +52,7 @@ from .const import (
     PAIR_SIDES,
     RONDURE_VARIANT_SIDE_A,
     RONDURE_VARIANT_SIDE_B,
+    RUNTIME_BOND_KEYS,
     SBI_VARIANT_SIDE_A,
     SBI_VARIANT_SIDE_B,
     SIDE_LEFT,
@@ -290,10 +291,22 @@ def single_data_from_child(descriptor: Mapping[str, Any]) -> dict[str, Any]:
     Pair-only routing/provenance and capability snapshots are removed. All
     ordinary bed configuration, including options folded into the descriptor at
     pairing time, is retained.
+
+    Bond state is taken from the live descriptor rather than the frozen
+    pre-combine snapshot: a bond belongs to a BLE address, so whatever the side
+    proved or had removed while it was combined is still true afterwards.
+    Absence is meaningful too, or a bond removed while paired would resurrect on
+    the standalone entry and later authorize removing a bond that is gone.
     """
     origin_data = descriptor.get(KEY_ORIGIN_DATA)
     if isinstance(origin_data, Mapping):
-        return dict(origin_data)
+        data = dict(origin_data)
+        for key in RUNTIME_BOND_KEYS:
+            if key in descriptor:
+                data[key] = descriptor[key]
+            else:
+                data.pop(key, None)
+        return data
 
     data = {
         key: value
