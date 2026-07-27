@@ -18,6 +18,7 @@ from custom_components.adjustable_bed.bond_verification import (
     BondOwner,
     BondVerificationStatus,
     async_verify_authenticated_access,
+    bond_context_matches,
     bond_owner_from_entry,
     build_bond_context,
     has_evidence_backed_verifier,
@@ -167,6 +168,59 @@ class TestStaleHostBondEvidence:
 class TestProvenance:
     """A legacy marker must never authorize a destructive action."""
 
+    def test_unproven_evidence_cannot_become_provenance(self) -> None:
+        """Provenance authorizes removal, so it needs a positive verification."""
+        for status in (
+            BondVerificationStatus.INCONCLUSIVE,
+            BondVerificationStatus.UNSUPPORTED,
+            BondVerificationStatus.AUTH_FAILED,
+        ):
+            evidence = BondEvidence(
+                status=status,
+                owner=BondOwner.from_path(_LOCAL),
+                operation="setup_pairing",
+                observed_at="2026-07-27T00:00:00+00:00",
+            )
+            with pytest.raises(ValueError):
+                build_bond_context(evidence)
+
+    def test_the_same_owner_is_recognised_across_observations(self) -> None:
+        """verified_at moves every time; the owner is what decides a rewrite."""
+        def _context(when: str) -> dict:
+            return build_bond_context(
+                BondEvidence(
+                    status=BondVerificationStatus.VERIFIED,
+                    owner=BondOwner.from_path(_LOCAL),
+                    operation="runtime_authenticated_read",
+                    observed_at=when,
+                )
+            )
+
+        first = _context("2026-07-27T00:00:00+00:00")
+        later = _context("2026-07-27T09:30:00+00:00")
+        assert first != later
+        assert bond_context_matches(first, later)
+
+    def test_a_different_owner_is_not_a_match(self) -> None:
+        verified = build_bond_context(
+            BondEvidence(
+                status=BondVerificationStatus.VERIFIED,
+                owner=BondOwner.from_path(_LOCAL),
+                operation="setup_pairing",
+                observed_at="2026-07-27T00:00:00+00:00",
+            )
+        )
+        moved = build_bond_context(
+            BondEvidence(
+                status=BondVerificationStatus.VERIFIED,
+                owner=BondOwner.from_path(_PROXY),
+                operation="setup_pairing",
+                observed_at="2026-07-27T00:00:00+00:00",
+            )
+        )
+        assert not bond_context_matches(verified, moved)
+        assert not bond_context_matches(None, verified)
+
     def test_a_verified_bond_records_its_owner(self) -> None:
         evidence = BondEvidence(
             status=BondVerificationStatus.VERIFIED,
@@ -197,7 +251,18 @@ class TestProvenance:
         assert not bond_owner_from_entry({CONF_BLE_BOND_CONTEXT: context}).is_host
 
     @pytest.mark.parametrize(
-        "stored", [None, {}, {"transport": "nonsense"}, "not-a-dict", 42]
+        "stored",
+        [
+            None,
+            {},
+            {"transport": "nonsense"},
+            "not-a-dict",
+            42,
+            # An unhashable value raises TypeError rather than ValueError from
+            # the enum lookup, which used to propagate instead of falling back.
+            {"transport": ["local"]},
+            {"transport": {"local": True}},
+        ],
     )
     def test_malformed_provenance_is_unknown_not_local(self, stored: Any) -> None:
         owner = bond_owner_from_entry({CONF_BLE_BOND_CONTEXT: stored})

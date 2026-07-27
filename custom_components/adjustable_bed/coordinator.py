@@ -3213,6 +3213,13 @@ class AdjustableBedCoordinator:
             client = self._client
             await self._async_disconnect_locked(f"transport_operation_{operation}")
             if client is not None and client.is_connected:
+                # _async_disconnect_locked clears self._client even when the
+                # disconnect raised, so this local is the last reference to a
+                # live link. Force it closed before raising, or nothing ever
+                # will: close_stale_connections_by_address is None on
+                # non-BlueZ backends.
+                with contextlib.suppress(Exception):
+                    await client.disconnect()
                 raise RuntimeError(
                     f"Could not release the Bluetooth connection to {self._address}"
                 )
