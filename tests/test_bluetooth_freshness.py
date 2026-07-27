@@ -340,6 +340,27 @@ class TestWaitForAdvertisement:
         assert evidence.is_fresh
         assert resolved is device
 
+    async def test_fresh_evidence_without_a_device_keeps_waiting(
+        self, hass: HomeAssistant
+    ) -> None:
+        """Scanner history can change between freshness and device resolution."""
+        device = SimpleNamespace(address=TEST_ADDRESS)
+        with (
+            self._advancing_clock(step=0.0),
+            _patch_last_service_info(_service_info(age=1.0)),
+            patch(
+                f"{_FRESHNESS}.async_resolve_ble_device",
+                side_effect=[None, device],
+            ) as resolve,
+        ):
+            evidence, resolved = await async_wait_for_advertisement(
+                hass, TEST_ADDRESS, wait_timeout=60.0, poll_interval=0.001
+            )
+
+        assert evidence.is_fresh
+        assert resolved is device
+        assert resolve.call_count == 2
+
     async def test_a_silent_bed_gives_up_without_resolving_a_device(
         self, hass: HomeAssistant
     ) -> None:

@@ -371,7 +371,7 @@ async def async_wait_for_advertisement(
     known in advance, unlike a BLE connect.
     """
     evidence, device = async_gate_connection(hass, address, source=source, max_age=max_age)
-    if evidence.is_fresh:
+    if evidence.is_fresh and device is not None:
         return evidence, device
 
     deadline = _monotonic() + wait_timeout
@@ -388,7 +388,7 @@ async def async_wait_for_advertisement(
                 on_progress(min(1.0, max(0.0, elapsed / wait_timeout)))
         await asyncio.sleep(min(poll_interval, remaining))
         evidence, device = async_gate_connection(hass, address, source=source, max_age=max_age)
-        if evidence.is_fresh:
+        if evidence.is_fresh and device is not None:
             if on_progress is not None:
                 with contextlib.suppress(Exception):
                     on_progress(1.0)

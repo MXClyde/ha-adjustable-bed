@@ -342,10 +342,10 @@ def async_predict_path(
 ) -> PathPrediction:
     """Predict which path Home Assistant will use for the next connection.
 
-    An explicitly selected adapter wins whenever it can currently see the bed
-    and has connection capacity; when it cannot, the automatic ranking is returned and
-    ``preferred_available`` is False so the UI can say so instead of silently
-    showing a path the user did not choose.
+    Home Assistant re-ranks every connectable scanner inside ``connect()``, so
+    selecting an adapter does not pin the connection to it. Preserve that
+    selection as requested metadata and report whether it is available, while
+    always deriving ``chosen`` from the same automatic ranking as the wrapper.
     """
     paths = async_connection_paths(hass, address)
     if not paths:
@@ -356,29 +356,17 @@ def async_predict_path(
             preferred_available=False,
         )
 
+    preferred_available = True
     if preferred_adapter and preferred_adapter != ADAPTER_AUTO:
-        for path in paths:
-            if path.source == preferred_adapter and path.can_connect:
-                return PathPrediction(
-                    chosen=path,
-                    paths=paths,
-                    preferred_adapter=preferred_adapter,
-                    preferred_available=True,
-                )
-        # The requested adapter cannot currently see the bed or take another
-        # connection. Report the automatic choice, but flag that the preference
-        # is not in play so the UI does not quietly substitute another path.
-        return PathPrediction(
-            chosen=_first_usable(paths),
-            paths=paths,
-            preferred_adapter=preferred_adapter,
-            preferred_available=False,
+        preferred_available = any(
+            path.source == preferred_adapter and path.can_connect for path in paths
         )
 
     return PathPrediction(
         chosen=_first_usable(paths),
         paths=paths,
         preferred_adapter=preferred_adapter,
+        preferred_available=preferred_available,
     )
 
 

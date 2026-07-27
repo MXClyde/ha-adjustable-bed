@@ -260,7 +260,10 @@ class TestPathPrediction:
         assert prediction.local_alternative is None
         assert prediction.proxy_pairing_risk is False
 
-    async def test_preferred_adapter_overrides_ranking(self, hass: HomeAssistant) -> None:
+    async def test_preferred_adapter_does_not_override_ranking(
+        self, hass: HomeAssistant
+    ) -> None:
+        """The wrapper re-ranks scanners even when resolution preferred one."""
         devices = [
             _scanner_device(_scanner("hci0", scanner_type="usb"), -80),
             _scanner_device(_scanner("proxy", scanner_type="remote"), -50),
@@ -268,7 +271,8 @@ class TestPathPrediction:
         with _patch_scanner_devices(devices):
             prediction = async_predict_path(hass, TEST_ADDRESS, "hci0")
         assert prediction.chosen is not None
-        assert prediction.chosen.source == "hci0"
+        assert prediction.chosen.source == "proxy"
+        assert prediction.preferred_adapter == "hci0"
         assert prediction.preferred_available is True
 
     async def test_preferred_adapter_that_cannot_see_the_bed_is_reported(
