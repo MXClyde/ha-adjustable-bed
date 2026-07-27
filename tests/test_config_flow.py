@@ -189,10 +189,12 @@ async def _advance_progress(hass: HomeAssistant, result: Any) -> Any:
     Setup now runs its BLE work as a background task behind a progress view, so
     a submitted form returns SHOW_PROGRESS rather than the next form.
     """
-    while result["type"] == FlowResultType.SHOW_PROGRESS:
+    for _ in range(20):
+        if result["type"] != FlowResultType.SHOW_PROGRESS:
+            return result
         await hass.async_block_till_done()
         result = await hass.config_entries.flow.async_configure(result["flow_id"])
-    return result
+    raise AssertionError("the setup progress step never completed")
 
 
 
@@ -307,6 +309,30 @@ class TestPairingPersistence:
         }
         flow.context = {"source": SOURCE_USER}
         return flow
+
+    @pytest.mark.parametrize(
+        "step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"]
+    )
+    async def test_pairing_step_recomputes_transport_warning(
+        self, hass: HomeAssistant, step: str
+    ) -> None:
+        """The warning must reflect the adapter and protocol the user submitted."""
+        flow = self._new_pairing_flow(hass)
+        flow._manual_data[CONF_PREFERRED_ADAPTER] = "bedroom_proxy"
+        describe = AsyncMock(return_value="Pairing over the selected proxy")
+
+        with patch.object(flow, "_async_transport_note", new=describe):
+            result = await getattr(flow, step)()
+
+        assert result["description_placeholders"]["transport"] == (
+            "Pairing over the selected proxy"
+        )
+        describe.assert_awaited_once_with(
+            "AA:BB:CC:DD:EE:01",
+            "bedroom_proxy",
+            BED_TYPE_OKIMAT,
+            None,
+        )
 
     async def test_bluetooth_pairing_marks_bond_as_established(self, hass: HomeAssistant) -> None:
         """Pair Now should persist that the bed is already bonded."""

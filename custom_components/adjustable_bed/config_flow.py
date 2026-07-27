@@ -2268,6 +2268,12 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             description_placeholders={
                 "name": self._manual_data.get(CONF_NAME, "Unknown"),
                 "pairing_instructions": await self._get_pairing_instructions(bed_type, variant),
+                "transport": await self._async_transport_note(
+                    address,
+                    self._manual_data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO),
+                    bed_type,
+                    variant,
+                ),
                 "bond_state": self._bond_state_note(inventory, over_proxy, can_use_existing),
             },
         )
@@ -2554,14 +2560,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             address=address,
             prediction=async_predict_path(self.hass, address, preferred),
             action=SetupAction.LOCATING,
-            policy=(
-                ConnectionLifetimePolicy.KEEP_FIRST_LINK
-                if _skips_setup_connection_probe(
-                    self._pending_entry.get(CONF_BED_TYPE),
-                    self._pending_entry.get(CONF_PROTOCOL_VARIANT),
-                )
-                else ConnectionLifetimePolicy.ORDINARY
-            ),
+            policy=ConnectionLifetimePolicy.ORDINARY,
             placeholders={
                 "name": self._pending_entry.get(CONF_NAME) or address,
                 "address": address,

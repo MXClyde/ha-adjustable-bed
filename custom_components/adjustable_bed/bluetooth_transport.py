@@ -248,7 +248,7 @@ def _score(scanner_device: Any, rssi_diff: int) -> float | None:
 def _path_from_scanner_device(
     scanner_device: Any,
     registrations: dict[str, dict[str, Any]],
-    rssi_diff: int,
+    score: float | None,
 ) -> ConnectionPath | None:
     """Build a ConnectionPath from one habluetooth BluetoothScannerDevice."""
     scanner = getattr(scanner_device, "scanner", None)
@@ -267,7 +267,7 @@ def _path_from_scanner_device(
         rssi=_rssi(getattr(getattr(scanner_device, "advertisement", None), "rssi", None)),
         connectable=bool(getattr(scanner, "connectable", True)),
         can_connect=_can_connect(scanner, transport),
-        score=_score(scanner_device, rssi_diff),
+        score=score,
         source_domain=registration.get(_CONF_SOURCE_DOMAIN),
         source_model=registration.get(_CONF_SOURCE_MODEL),
     )
@@ -295,9 +295,11 @@ def async_connection_paths(hass: HomeAssistant, address: str) -> tuple[Connectio
 
     scanner_devices.sort(key=_sort_rssi, reverse=True)
     rssi_diff = 0
+    scores: dict[int, float | None] = {}
     if len(scanner_devices) > 1:
         rssi_diff = _sort_rssi(scanner_devices[0]) - _sort_rssi(scanner_devices[1])
         scored = [(_score(device, rssi_diff), device) for device in scanner_devices]
+        scores = {id(device): score for score, device in scored}
         # Keep the RSSI order for any device HA could not score, rather than
         # letting a None score reshuffle the list.
         if all(score is not None for score, _ in scored):
@@ -308,11 +310,13 @@ def async_connection_paths(hass: HomeAssistant, address: str) -> tuple[Connectio
             scanner_devices = [device for _, device in ranked]
 
     registrations = async_scanner_registrations(hass)
-    paths = [
-        path
-        for device in scanner_devices
-        if (path := _path_from_scanner_device(device, registrations, rssi_diff)) is not None
-    ]
+    paths: list[ConnectionPath] = []
+    for device in scanner_devices:
+        device_id = id(device)
+        score = scores[device_id] if device_id in scores else _score(device, rssi_diff)
+        path = _path_from_scanner_device(device, registrations, score)
+        if path is not None:
+            paths.append(path)
     return tuple(paths)
 
 
@@ -324,8 +328,8 @@ def async_predict_path(
 ) -> PathPrediction:
     """Predict which path Home Assistant will use for the next connection.
 
-    An explicitly selected adapter wins whenever it can currently see the bed;
-    when it cannot, the automatic ranking is returned and
+    An explicitly selected adapter wins whenever it can currently see the bed
+    and has connection capacity; when it cannot, the automatic ranking is returned and
     ``preferred_available`` is False so the UI can say so instead of silently
     showing a path the user did not choose.
     """
@@ -340,16 +344,16 @@ def async_predict_path(
 
     if preferred_adapter and preferred_adapter != ADAPTER_AUTO:
         for path in paths:
-            if path.source == preferred_adapter:
+            if path.source == preferred_adapter and path.can_connect:
                 return PathPrediction(
                     chosen=path,
                     paths=paths,
                     preferred_adapter=preferred_adapter,
                     preferred_available=True,
                 )
-        # The requested adapter cannot currently see the bed. Report the
-        # automatic choice, but flag that the preference is not in play so the
-        # UI can say so rather than quietly substituting a different transport.
+        # The requested adapter cannot currently see the bed or take another
+        # connection. Report the automatic choice, but flag that the preference
+        # is not in play so the UI does not quietly substitute another path.
         return PathPrediction(
             chosen=_first_usable(paths),
             paths=paths,
@@ -424,20 +428,31 @@ def async_resolve_ble_device(
     """
     normalized = address.upper()
     if source and source != ADAPTER_AUTO:
+        for connectable in (True, False):
+            try:
+                for scanner_device in bluetooth.async_scanner_devices_by_address(
+                    hass, normalized, connectable=connectable
+                ):
+                    scanner_source = getattr(
+                        getattr(scanner_device, "scanner", None), "source", None
+                    )
+                    if scanner_source == source:
+                        return getattr(scanner_device, "ble_device", None)
+            except Exception:  # noqa: BLE001 - fall through to the generic lookup
+                _LOGGER.debug(
+                    "Scanner-specific lookup failed for %s", address, exc_info=True
+                )
+    for connectable in (True, False):
         try:
-            for scanner_device in bluetooth.async_scanner_devices_by_address(
-                hass, normalized, connectable=True
-            ):
-                scanner_source = getattr(getattr(scanner_device, "scanner", None), "source", None)
-                if scanner_source == source:
-                    return getattr(scanner_device, "ble_device", None)
-        except Exception:  # noqa: BLE001 - fall through to the generic lookup
-            _LOGGER.debug("Scanner-specific lookup failed for %s", address, exc_info=True)
-    try:
-        return bluetooth.async_ble_device_from_address(hass, normalized, connectable=True)
-    except Exception:  # noqa: BLE001
-        _LOGGER.debug("Could not resolve a BLE device for %s", address, exc_info=True)
-        return None
+            device = bluetooth.async_ble_device_from_address(
+                hass, normalized, connectable=connectable
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Could not resolve a BLE device for %s", address, exc_info=True)
+            continue
+        if device is not None:
+            return device
+    return None
 
 
 def client_source(client: Any) -> str | None:
@@ -501,8 +516,9 @@ _DEFAULT_STRINGS: dict[str, str] = {
         "see it, with a weaker signal."
     ),
     "transport_preferred_unavailable": (
-        "⚠️ The selected adapter ({adapter}) cannot currently see this device, "
-        "so Home Assistant will choose a path automatically."
+        "⚠️ The selected adapter ({adapter}) is not currently available for this "
+        "connection. Select Automatic to let Home Assistant choose another path, "
+        "or restore the selected adapter before continuing."
     ),
     "transport_not_guaranteed": (
         "Home Assistant picks the path when it connects, so this is a "
