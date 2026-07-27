@@ -3783,3 +3783,159 @@ async def test_a_one_connection_bed_defers_pairing_without_removing_a_bond(
     attempt.assert_not_called()
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"].get(CONF_BLE_BOND_ESTABLISHED) is not True
+
+
+# ---------------------------------------------------------------------------
+# Unpair target safety (issue #455)
+# ---------------------------------------------------------------------------
+
+
+def _record_on(adapter_path: str, adapter_address: str) -> LocalBondRecord:
+    return LocalBondRecord(
+        address=_BONDED_ADDRESS,
+        device_path=f"{adapter_path}/dev_AA_BB_CC_DD_EE_FF",
+        adapter_path=adapter_path,
+        adapter_address=adapter_address,
+        paired=True,
+        bonded=True,
+    )
+
+
+def _with_provenance(
+    hass: HomeAssistant, entry: MockConfigEntry, *, source: str, adapter: str | None = None
+) -> None:
+    hass.config_entries.async_update_entry(
+        entry,
+        data={
+            **entry.data,
+            CONF_BLE_BOND_CONTEXT: {
+                "version": 1,
+                "transport": "local",
+                "source": source,
+                "adapter": adapter,
+            },
+        },
+    )
+
+
+async def test_unpair_removes_the_adapter_provenance_names_not_the_first(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    """A local scanner's source is its adapter MAC; adapter is the interface name.
+
+    Comparing the interface name against BlueZ's adapter MAC matches nothing, and
+    silently fell through to "whichever record came first" - the wrong bond on a
+    two-adapter host.
+    """
+    first = _record_on("/org/bluez/hci0", "11:22:33:44:55:66")
+    second = _record_on("/org/bluez/hci1", "AA:AA:AA:AA:AA:AA")
+    _with_provenance(hass, mock_config_entry, source="AA:AA:AA:AA:AA:AA", adapter="hci1")
+
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(first, second))
+    removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=second)
+    with (
+        _patch_inventory(inventory),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
+            AsyncMock(return_value=removed),
+        ) as removal,
+    ):
+        confirm = await _open_unpair(hass, mock_config_entry.entry_id)
+        assert confirm["description_placeholders"]["transport"] == "AA:AA:AA:AA:AA:AA"
+        progress = await hass.config_entries.options.async_configure(
+            confirm["flow_id"], user_input={}
+        )
+        while progress["type"] == FlowResultType.SHOW_PROGRESS:
+            await hass.async_block_till_done()
+            progress = await hass.config_entries.options.async_configure(progress["flow_id"])
+
+    removal.assert_awaited_once()
+    assert removal.await_args[0][0].adapter_path == "/org/bluez/hci1"
+
+
+async def test_unpair_refuses_when_provenance_names_an_adapter_with_no_bond(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    """Removing "the only one left" would delete a bond nothing pointed at."""
+    only = _record_on("/org/bluez/hci0", "11:22:33:44:55:66")
+    _with_provenance(hass, mock_config_entry, source="AA:AA:AA:AA:AA:AA")
+
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(only,))
+    with (
+        _patch_inventory(inventory),
+        patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
+    ):
+        result = await _open_unpair(hass, mock_config_entry.entry_id)
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "unpair_ambiguous"
+    removal.assert_not_called()
+
+
+async def test_unpair_refuses_two_bonds_with_no_provenance(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    mock_config_entry.add_to_hass(hass)
+    first = _record_on("/org/bluez/hci0", "11:22:33:44:55:66")
+    second = _record_on("/org/bluez/hci1", "AA:AA:AA:AA:AA:AA")
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(first, second))
+    with (
+        _patch_inventory(inventory),
+        patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
+    ):
+        result = await _open_unpair(hass, mock_config_entry.entry_id)
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "unpair_ambiguous"
+    removal.assert_not_called()
+
+
+async def test_a_legacy_entry_with_one_bond_can_still_unpair_but_says_so(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    """Entries paired before provenance existed must not lose the action entirely.
+
+    There is exactly one host bond for this exact address, so there is nothing to
+    choose between - but the confirmation says the transport is unknown rather
+    than implying it was verified.
+    """
+    mock_config_entry.add_to_hass(hass)
+    only = _record_on("/org/bluez/hci0", "11:22:33:44:55:66")
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(only,))
+    with _patch_inventory(inventory):
+        result = await _open_unpair(hass, mock_config_entry.entry_id)
+
+    assert result["type"] == FlowResultType.FORM
+    assert "no record of which transport created" in (
+        result["description_placeholders"]["provenance"]
+    )
+
+
+async def test_unpair_refuses_when_the_bond_state_changed_after_confirmation(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    """The bond shown and the bond removed have to be the same object."""
+    mock_config_entry.add_to_hass(hass)
+    shown = _record_on("/org/bluez/hci0", "11:22:33:44:55:66")
+    moved = _record_on("/org/bluez/hci1", "AA:AA:AA:AA:AA:AA")
+
+    inventories = [
+        LocalBondInventory(status=BluezReadStatus.OK, records=(shown,)),
+        LocalBondInventory(status=BluezReadStatus.OK, records=(moved,)),
+    ]
+    with (
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_read_local_bonds",
+            AsyncMock(side_effect=inventories),
+        ),
+        patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
+    ):
+        confirm = await _open_unpair(hass, mock_config_entry.entry_id)
+        assert confirm["description_placeholders"]["transport"] == "11:22:33:44:55:66"
+        result = await hass.config_entries.options.async_configure(
+            confirm["flow_id"], user_input={}
+        )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "unpair_changed"
+    removal.assert_not_called()
