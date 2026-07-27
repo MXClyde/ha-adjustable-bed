@@ -3248,6 +3248,7 @@ async def test_a_not_advertising_bed_offers_retry_and_still_allows_finishing(
         assert verify["step_id"] == "verify_connection"
         caps = verify["description_placeholders"]["capabilities"]
         assert "not currently advertising" in caps
+        assert "select **Check again**" in caps
         # Nothing may reach the BLE stack once the gate has refused.
         connects.assert_not_called()
 

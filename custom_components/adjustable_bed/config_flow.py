@@ -2681,7 +2681,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             )
             lines.append(
                 "Wake it (press a button on the remote), put it in pairing mode, or move it "
-                "closer to an adapter or proxy, then select **Retry**."
+                "closer to an adapter or proxy, then select **Check again**."
             )
             return "\n".join(lines)
 
