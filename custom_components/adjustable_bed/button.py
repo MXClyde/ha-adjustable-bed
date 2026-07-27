@@ -15,14 +15,19 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
-    CONF_HAS_MASSAGE,
     DOMAIN,
+    SIDE_BOTH,
 )
 from .coordinator import AdjustableBedCoordinator
 from .entity import AdjustableBedEntity
+from .paired_coordinator import (
+    PairedBedCoordinator,
+    PairedSideProxy,
+    SingleAddressPairedCoordinator,
+)
 
 if TYPE_CHECKING:
-    from .beds.base import BedController
+    from .beds.base import BedController, MotorControlSpec
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -517,22 +522,143 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Adjustable Bed button entities."""
-    coordinator: AdjustableBedCoordinator = hass.data[DOMAIN][entry.entry_id]
-    has_massage = entry.data.get(CONF_HAS_MASSAGE, False)
-    controller = coordinator.controller
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    # Paired beds expose per-side buttons (presets, stop, connect) built against
+    # each child, plus combined controls on the parent device: a resilient "Stop"
+    # that fans STOP to both sides, and "both" movement/preset buttons for actions
+    # both sides support (since paired setup omits a combined cover, these buttons
+    # are how the whole bed is driven from the parent device/card).
+    if isinstance(coordinator, PairedBedCoordinator):
+        entities: list[ButtonEntity] = []
+        children = list(coordinator.children.values())
+        for side, child in coordinator.children.items():
+            entities.extend(
+                _button_entities_for(
+                    hass,
+                    cast(
+                        "AdjustableBedCoordinator",
+                        PairedSideProxy(coordinator, child, side),
+                    ),
+                )
+            )
+        entities.append(PairedBedStopButton(coordinator))
+        # Combined buttons read both children's live capabilities, so pass the
+        # raw children (the button itself dispatches via the parent, side=both).
+        entities.extend(_combined_button_entities_for(coordinator, children))
+        async_add_entities(entities)
+        return
+
+    async_add_entities(_button_entities_for(hass, coordinator))
+
+
+def _button_entities_for(
+    hass: HomeAssistant, coordinator: AdjustableBedCoordinator
+) -> list[ButtonEntity]:
+    """Build button entities for a single (child or standalone) coordinator."""
+    has_massage = coordinator.has_massage
+    # capability_controller: an offline paired side still gets its buttons built
+    # from a client-free controller minted from config (see coordinator); stale
+    # cleanup below runs against it too (only when non-None).
+    controller = coordinator.capability_controller
     if controller is not None and controller.auto_enable_massage:
         has_massage = True
 
     if controller is not None:
         _async_remove_stale_button_entities(hass, coordinator, controller, has_massage)
 
-    entities = []
+    entities: list[ButtonEntity] = []
     for description in BUTTON_DESCRIPTIONS:
         if not _should_add_button(description, controller, has_massage):
             continue
         entities.append(AdjustableBedButton(coordinator, description))
 
-    async_add_entities(entities)
+    return entities
+
+
+def _combined_button_entities_for(
+    coordinator: PairedBedCoordinator,
+    children: list[AdjustableBedCoordinator],
+) -> list[ButtonEntity]:
+    """Build the parent device's combined 'both sides' movement/preset buttons.
+
+    Only actions supported by BOTH children are exposed (connect/disconnect/stop
+    are coordinator actions handled separately by the combined Stop button).
+    """
+    if not children:
+        return []
+    # Build the combined surface from each side's capability controller (live when
+    # connected, else a client-free controller minted from config). For client-free
+    # beds (e.g. Linak) an OFFLINE side still participates via its offline
+    # controller, so the combined controls register up-front and survive reconnect.
+    # A combined action is safe only when EVERY side has a capability source. An
+    # unreadable side is unknown, not absent: intersecting only the readable side
+    # could expose a "both" action the other side cannot honour. Pair-level STOP
+    # remains available through the dedicated resilient stop button above.
+    if any(child.capability_controller is None for child in children):
+        return []
+    eligible = children
+    entities: list[ButtonEntity] = []
+    for description in BUTTON_DESCRIPTIONS:
+        if description.is_coordinator_action or description.press_fn is None:
+            continue
+        if description.key == "stop":
+            # The combined stop is the dedicated PairedBedStopButton (same
+            # {pair_id}_stop_both unique_id); don't also build a generic one.
+            continue
+        if not all(
+            _should_add_button(description, child.capability_controller, child.has_massage)
+            for child in eligible
+        ):
+            continue
+        entities.append(PairedBedCombinedButton(coordinator, description))
+
+    # Cover-based pairs (e.g. Linak) move via covers, not discrete up/down
+    # buttons, and paired setup creates no combined cover — so add per-motor
+    # "both sides" up/down motion buttons from the cover descriptors.
+    entities.extend(_combined_motor_buttons_for(coordinator, eligible))
+    return entities
+
+
+def _combined_motor_buttons_for(
+    coordinator: PairedBedCoordinator,
+    eligible: list[AdjustableBedCoordinator],
+) -> list[ButtonEntity]:
+    """Per-motor 'both sides' up/down buttons for a cover-based paired bed — only
+    the motors EVERY eligible side exposes (read from each side's capability
+    controller, so an offline client-free side still counts).
+
+    Built from each side's own ``MotorControlSpec`` (not generic
+    ``COVER_DESCRIPTIONS``) so a 3/4-motor Octo — whose ``head``/``feet`` map to the
+    extra ``_move_motor3/4`` functions — drives the RIGHT motor on both sides. All
+    eligible sides are the same bed type, so any side's specs match.
+    """
+    specs_by_key: dict[str, MotorControlSpec] = {}
+    common: set[str] | None = None
+    for child in eligible:
+        controller = child.capability_controller
+        if (
+            controller is None
+            or not getattr(controller, "supports_motor_control", False)
+            or getattr(controller, "has_discrete_motor_control", False)
+        ):
+            # Not a cover-based bed (discrete motors get combined buttons above),
+            # or no capability source for this side.
+            return []
+        side_specs = {spec.key: spec for spec in controller.motor_control_specs}
+        if not specs_by_key:
+            specs_by_key = side_specs
+        keys = set(side_specs)
+        common = keys if common is None else (common & keys)
+
+    entities: list[ButtonEntity] = []
+    for key in sorted(common or set()):
+        spec = specs_by_key.get(key)
+        if spec is None:
+            continue
+        entities.append(PairedBedCombinedMotorButton(coordinator, spec, "up"))
+        entities.append(PairedBedCombinedMotorButton(coordinator, spec, "down"))
+    return entities
 
 
 def _should_add_button(
@@ -600,7 +726,7 @@ def _async_remove_stale_button_entities(
         entity_id = registry.async_get_entity_id(
             "button",
             DOMAIN,
-            f"{coordinator.address}_{description.key}",
+            coordinator.entity_unique_id(description.key),
         )
         if entity_id is not None:
             registry.async_remove(entity_id)
@@ -639,8 +765,10 @@ class AdjustableBedButton(AdjustableBedEntity, ButtonEntity):
         """Initialize the button."""
         super().__init__(coordinator)
         self.entity_description = description
-        self._attr_unique_id = f"{coordinator.address}_{description.key}"
-        self._attr_translation_key = description.translation_key
+        self._attr_unique_id = coordinator.entity_unique_id(description.key)
+        self._attr_translation_key = coordinator.entity_translation_key(
+            description.translation_key or description.key
+        )
 
         # Beds that name their memory slots (Octo CAP_MEMINFO reports e.g.
         # Zero-G or Anti-Snore) are far more useful with that name than with
@@ -703,3 +831,142 @@ class AdjustableBedButton(AdjustableBedEntity, ButtonEntity):
                 self.entity_description.key,
             )
             raise
+
+
+def _paired_entity_unique_id(coordinator: PairedBedCoordinator, key: str) -> str:
+    """Keep legacy mock/duck coordinators compatible with the parent namespace."""
+    if isinstance(coordinator, PairedBedCoordinator):
+        return coordinator.entity_unique_id(key)
+    return f"{coordinator.pair_id}_{key}"
+
+
+class PairedBedStopButton(ButtonEntity):
+    """Combined STOP for a paired bed.
+
+    Lives on the synthetic parent device and stops BOTH sides with the resilient
+    stop contract — one side's STOP failure never prevents stopping the other.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "stop_both"
+
+    def __init__(self, coordinator: PairedBedCoordinator) -> None:
+        """Initialize the combined stop button."""
+        self._coordinator = coordinator
+        self._attr_unique_id = _paired_entity_unique_id(coordinator, "stop_both")
+        self._attr_device_info = coordinator.device_info
+        if isinstance(coordinator, SingleAddressPairedCoordinator):
+            self._attr_extra_state_attributes = {"bed_side": SIDE_BOTH}
+
+    @property
+    def available(self) -> bool:
+        """Always available (the bed reconnects on demand)."""
+        return True
+
+    async def async_press(self) -> None:
+        """Stop both sides."""
+        _LOGGER.info("Combined stop pressed for paired bed %s", self._coordinator.name)
+        await self._coordinator.async_stop_command(side=SIDE_BOTH)
+
+
+class PairedBedCombinedButton(ButtonEntity):
+    """A 'both sides' movement/preset button on the paired parent device.
+
+    Reuses the per-side button's translation_key (the parent device name keeps it
+    distinct from the per-side entities) and fans the action out to both sides.
+    """
+
+    _attr_has_entity_name = True
+    entity_description: AdjustableBedButtonEntityDescription
+
+    def __init__(
+        self,
+        coordinator: PairedBedCoordinator,
+        description: AdjustableBedButtonEntityDescription,
+    ) -> None:
+        """Initialize the combined button."""
+        self._coordinator = coordinator
+        self.entity_description = description
+        self._attr_translation_key = (
+            f"{description.translation_key}_both"
+            if isinstance(coordinator, SingleAddressPairedCoordinator)
+            else description.translation_key
+        )
+        self._attr_unique_id = _paired_entity_unique_id(
+            coordinator, f"{description.key}_both"
+        )
+        self._attr_device_info = coordinator.device_info
+        if isinstance(coordinator, SingleAddressPairedCoordinator):
+            self._attr_extra_state_attributes = {"bed_side": SIDE_BOTH}
+
+    @property
+    def available(self) -> bool:
+        """Always available (the bed reconnects on demand)."""
+        return True
+
+    async def async_press(self) -> None:
+        """Run the action on both sides."""
+        description = self.entity_description
+        if description.press_fn is None:
+            return
+        _LOGGER.info(
+            "Combined button %s pressed for paired bed %s",
+            description.key,
+            self._coordinator.name,
+        )
+        await self._coordinator.async_execute_controller_command(
+            description.press_fn,
+            side=SIDE_BOTH,
+            cancel_running=description.cancel_movement,
+        )
+
+
+class PairedBedCombinedMotorButton(ButtonEntity):
+    """A 'move both sides' up/down motion button on the paired parent device.
+
+    Cover-based pairs (Linak etc.) have no discrete motor buttons and no combined
+    cover, so these drive a motor on BOTH sides from the parent device/card.
+    """
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: PairedBedCoordinator,
+        spec: MotorControlSpec,
+        direction: str,
+    ) -> None:
+        """Initialize the combined motor button (``direction`` is up/down).
+
+        ``spec`` is the side's own ``MotorControlSpec`` for this motor, so its
+        ``open_fn``/``close_fn`` drive the correct per-bed motor (e.g. a 3/4-motor
+        Octo's mapped ``_move_motor3/4``), not the generic head/feet motors.
+        """
+        self._coordinator = coordinator
+        self._direction = direction
+        self._move_fn = spec.open_fn if direction == "up" else spec.close_fn
+        # Translation key from spec.translation_key (preserves controller-specific
+        # label overrides); unique_id stays on the stable spec.key.
+        base_translation_key = f"{spec.translation_key}_{direction}"
+        self._attr_translation_key = (
+            f"{base_translation_key}_both"
+            if isinstance(coordinator, SingleAddressPairedCoordinator)
+            else base_translation_key
+        )
+        self._attr_unique_id = _paired_entity_unique_id(
+            coordinator, f"{spec.key}_{direction}_both"
+        )
+        self._attr_device_info = coordinator.device_info
+        if isinstance(coordinator, SingleAddressPairedCoordinator):
+            self._attr_extra_state_attributes = {"bed_side": SIDE_BOTH}
+
+    @property
+    def available(self) -> bool:
+        """Always available (the bed reconnects on demand)."""
+        return True
+
+    async def async_press(self) -> None:
+        """Move this motor on both sides."""
+        await self._coordinator.async_execute_controller_command(
+            self._move_fn, side=SIDE_BOTH, cancel_running=True
+        )

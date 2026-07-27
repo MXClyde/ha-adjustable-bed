@@ -197,6 +197,30 @@ class TestConnectionPaths:
         ):
             assert async_connection_paths(hass, TEST_ADDRESS) == ()
 
+    async def test_empty_connectable_view_uses_non_connectable_proxy_paths(
+        self, hass: HomeAssistant
+    ) -> None:
+        """Prediction must describe the same fallback path resolution can use."""
+        scanner_device = _scanner_device(
+            _scanner("proxy", scanner_type="remote", connectable=False), -55
+        )
+
+        def lookup(
+            _hass: HomeAssistant, _address: str, *, connectable: bool
+        ) -> list[Any]:
+            return [] if connectable else [scanner_device]
+
+        with patch(
+            f"{_TRANSPORT}.bluetooth.async_scanner_devices_by_address",
+            side_effect=lookup,
+        ):
+            paths = async_connection_paths(hass, TEST_ADDRESS)
+
+        assert len(paths) == 1
+        assert paths[0].source == "proxy"
+        assert paths[0].transport is TransportClass.PROXY
+        assert paths[0].connectable is False
+
 
 class TestPathPrediction:
     """The prediction shown before setup must match what HA will really do."""
@@ -236,7 +260,10 @@ class TestPathPrediction:
         assert prediction.local_alternative is None
         assert prediction.proxy_pairing_risk is False
 
-    async def test_preferred_adapter_overrides_ranking(self, hass: HomeAssistant) -> None:
+    async def test_preferred_adapter_does_not_override_ranking(
+        self, hass: HomeAssistant
+    ) -> None:
+        """The wrapper re-ranks scanners even when resolution preferred one."""
         devices = [
             _scanner_device(_scanner("hci0", scanner_type="usb"), -80),
             _scanner_device(_scanner("proxy", scanner_type="remote"), -50),
@@ -244,7 +271,8 @@ class TestPathPrediction:
         with _patch_scanner_devices(devices):
             prediction = async_predict_path(hass, TEST_ADDRESS, "hci0")
         assert prediction.chosen is not None
-        assert prediction.chosen.source == "hci0"
+        assert prediction.chosen.source == "proxy"
+        assert prediction.preferred_adapter == "hci0"
         assert prediction.preferred_available is True
 
     async def test_preferred_adapter_that_cannot_see_the_bed_is_reported(

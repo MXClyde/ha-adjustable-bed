@@ -13,6 +13,10 @@ from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.adjustable_bed.bluetooth_transport import (
+    ConnectionPath,
+    TransportClass,
+)
 from custom_components.adjustable_bed.const import (
     BED_MOTOR_PULSE_DEFAULTS,
     BED_TYPE_BEDTECH,
@@ -241,6 +245,56 @@ class TestCoordinatorConnection:
             result = await coordinator.async_connect()
 
         assert result is False
+
+    async def test_failed_attempt_does_not_reuse_previous_connection_path(
+        self,
+        hass: HomeAssistant,
+        mock_async_ble_device_from_address,
+        mock_bluetooth_adapters,
+    ) -> None:
+        """A pre-connect auth failure has no proven transport owner."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title=TEST_NAME,
+            data={
+                CONF_ADDRESS: TEST_ADDRESS,
+                CONF_NAME: TEST_NAME,
+                CONF_BED_TYPE: BED_TYPE_OKIMAT,
+                CONF_MOTOR_COUNT: 2,
+                CONF_HAS_MASSAGE: False,
+                CONF_DISABLE_ANGLE_SENSING: True,
+                CONF_PREFERRED_ADAPTER: "auto",
+            },
+            unique_id=TEST_ADDRESS,
+            entry_id="failed_attempt_connection_path_test",
+        )
+        entry.add_to_hass(hass)
+        auth_error = BleakError("Insufficient authentication")
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.coordinator.establish_connection",
+                new_callable=AsyncMock,
+                side_effect=auth_error,
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.create_pairing_required_issue",
+                new_callable=AsyncMock,
+            ) as create_issue,
+        ):
+            coordinator = AdjustableBedCoordinator(hass, entry)
+            coordinator._max_retries = 1
+            coordinator._connection_path = ConnectionPath(
+                source="old-host",
+                transport=TransportClass.LOCAL,
+                adapter="hci0",
+            )
+            result = await coordinator.async_connect()
+
+        assert result is False
+        evidence = create_issue.await_args.kwargs["evidence"]
+        assert evidence["owner"]["transport"] == "unknown"
+        assert evidence["owner"]["source"] is None
 
     async def test_connect_detects_existing_bond_and_skips_pairing(
         self,
@@ -1871,6 +1925,31 @@ class TestCoordinatorDisconnectTimer:
 
         assert coordinator._reconnect_timer is None
         assert coordinator._intentional_disconnect is False
+
+    async def test_disconnect_error_with_live_link_is_reported_and_retained(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """A swallowed Bleak error cannot masquerade as a released link."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        controller = coordinator.controller
+        mock_bleak_client.is_connected = True
+        mock_bleak_client.disconnect.side_effect = BleakError("link still active")
+
+        disconnected = await coordinator.async_disconnect("sequential_switch")
+
+        assert disconnected is False
+        assert coordinator._client is mock_bleak_client
+        assert coordinator.controller is controller
+        assert coordinator.is_connected is True
+
+        # Leave the shared fixture clean for teardown.
+        mock_bleak_client.disconnect.side_effect = None
+        mock_bleak_client.is_connected = False
 
     async def test_failed_connection_cleanup_is_intentional(
         self,
@@ -4847,6 +4926,38 @@ class TestBondProvenanceAndTransportGate:
         assert client.disconnect.await_count == 2
         await coordinator.async_shutdown()
 
+    async def test_the_transport_gate_closes_the_link_after_an_unexpected_error(
+        self, hass: HomeAssistant, mock_config_entry
+    ) -> None:
+        """An aborted gate must not leave the bed's connection occupied.
+
+        Only BleakError counts as a failed teardown, so anything else unwinds
+        straight past the fallback close.
+        """
+        from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+
+        mock_config_entry.add_to_hass(hass)
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        client = MagicMock()
+        client.is_connected = True
+
+        async def disconnect() -> None:
+            if client.disconnect.await_count == 1:
+                raise OSError("backend went away")
+            client.is_connected = False
+
+        client.disconnect = AsyncMock(side_effect=disconnect)
+        coordinator._client = client
+
+        with pytest.raises(OSError):
+            async with coordinator.async_transport_operation("unpair"):
+                pytest.fail("the gate must not hand over an occupied bed")
+
+        assert client.disconnect.await_count == 2
+        assert client.is_connected is False
+
+        await coordinator.async_shutdown()
+
     async def test_an_authenticated_read_records_who_owns_the_bond(
         self, hass: HomeAssistant, mock_config_entry
     ) -> None:
@@ -4874,6 +4985,78 @@ class TestBondProvenanceAndTransportGate:
         assert context is not None
         assert context["transport"] == "local"
         assert context["source"] == "AA:BB:CC:11:22:33"
+
+        await coordinator.async_shutdown()
+
+    async def test_a_proven_bond_stays_available_as_evidence(
+        self, hass: HomeAssistant, mock_config_entry
+    ) -> None:
+        """A repair asks what the last read proved before keeping provenance.
+
+        Provenance is skipped when the owner has not changed, so the evidence
+        has to survive that too - otherwise a correctly re-verified bond reads
+        as "nothing was established" and its owner is deleted.
+        """
+        from custom_components.adjustable_bed.bluetooth_transport import (
+            ConnectionPath,
+            TransportClass,
+        )
+        from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+
+        mock_config_entry.add_to_hass(hass)
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._connection_path = ConnectionPath(
+            source="AA:BB:CC:11:22:33",
+            transport=TransportClass.LOCAL,
+            adapter="hci0",
+        )
+        coordinator._record_bond_provenance()
+        await hass.async_block_till_done()
+
+        # Again, with the owner already stored: this writes nothing.
+        coordinator._last_bond_evidence = None
+        coordinator._record_bond_provenance()
+        await hass.async_block_till_done()
+
+        evidence = coordinator.last_bond_evidence
+        assert evidence is not None
+        assert evidence.proves_bond
+        assert evidence.owner.source == "AA:BB:CC:11:22:33"
+        assert coordinator.pairing_diagnostics["recovery_action"] is None
+
+        await coordinator.async_shutdown()
+
+    async def test_a_confirmed_removal_stops_suppressing_the_next_pairing(
+        self, hass: HomeAssistant, mock_config_entry
+    ) -> None:
+        """A skip decided against the old bond must not outlive it.
+
+        The first connection after a removal is the one that has to pair, and on
+        a bed that grants one connection per pairing window it is the only one.
+        """
+        from custom_components.adjustable_bed.bond_verification import (
+            CONF_BLE_BOND_CONTEXT,
+        )
+        from custom_components.adjustable_bed.const import CONF_BLE_BOND_ESTABLISHED
+        from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+
+        mock_config_entry.add_to_hass(hass)
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={
+                **mock_config_entry.data,
+                CONF_BLE_BOND_ESTABLISHED: True,
+                CONF_BLE_BOND_CONTEXT: {"version": 1, "transport": "local"},
+            },
+        )
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._skip_pair_next_attempt = True
+
+        coordinator.apply_confirmed_bond_removal()
+        await hass.async_block_till_done()
+
+        assert coordinator._skip_pair_next_attempt is False
+        assert CONF_BLE_BOND_CONTEXT not in mock_config_entry.data
 
         await coordinator.async_shutdown()
 

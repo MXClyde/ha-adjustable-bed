@@ -29,6 +29,7 @@ from .const import (
 )
 from .coordinator import AdjustableBedCoordinator
 from .entity import AdjustableBedEntity
+from .paired_coordinator import PairedBedCoordinator, PairedSideProxy
 
 if TYPE_CHECKING:
     from .beds.base import BedController
@@ -263,10 +264,35 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Adjustable Bed number entities."""
-    coordinator: AdjustableBedCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    if isinstance(coordinator, PairedBedCoordinator):
+        paired_entities: list[NumberEntity] = []
+        for side, child in coordinator.children.items():
+            paired_entities.extend(
+                _number_entities_for(
+                    hass,
+                    cast(
+                        "AdjustableBedCoordinator",
+                        PairedSideProxy(coordinator, child, side),
+                    ),
+                )
+            )
+        if paired_entities:
+            async_add_entities(paired_entities)
+        return
+    async_add_entities(_number_entities_for(hass, coordinator))
+
+
+def _number_entities_for(
+    hass: HomeAssistant, coordinator: AdjustableBedCoordinator
+) -> list[NumberEntity]:
+    """Build number entities for a single (child or standalone) coordinator."""
+    entry = coordinator.entry  # ChildEntryView for a paired child; real entry otherwise
     bed_type = entry.data.get(CONF_BED_TYPE)
     has_massage = entry.data.get(CONF_HAS_MASSAGE, False)
-    controller = coordinator.controller
+    # capability_controller: an offline paired side still gets its number entities
+    # built from a client-free controller minted from config (see coordinator).
+    controller = coordinator.capability_controller
     if controller is not None and controller.auto_enable_massage:
         has_massage = True
 
@@ -410,8 +436,7 @@ async def async_setup_entry(
             )
         )
 
-    if entities:
-        async_add_entities(entities)
+    return entities
 
 
 def _async_remove_stale_sleep_number_entity(
@@ -423,7 +448,7 @@ def _async_remove_stale_sleep_number_entity(
     entity_id = registry.async_get_entity_id(
         "number",
         DOMAIN,
-        f"{coordinator.address}_{SLEEP_NUMBER_SETTING_DESCRIPTION.key}",
+        coordinator.entity_unique_id(SLEEP_NUMBER_SETTING_DESCRIPTION.key),
     )
     if entity_id is not None:
         registry.async_remove(entity_id)
@@ -447,7 +472,7 @@ def _async_remove_stale_position_entities(
         if stale_keys is not None and description.key not in stale_keys:
             continue
         entity_id = registry.async_get_entity_id(
-            "number", DOMAIN, f"{coordinator.address}_{description.key}"
+            "number", DOMAIN, coordinator.entity_unique_id(description.key)
         )
         if entity_id is not None:
             registry.async_remove(entity_id)
@@ -466,7 +491,8 @@ class AdjustableBedPositionNumber(AdjustableBedEntity, NumberEntity):
         """Initialize the number entity."""
         super().__init__(coordinator)
         self.entity_description = description
-        self._attr_unique_id = f"{coordinator.address}_{description.key}"
+        self._set_sided_translation_key(description.translation_key, description.key)
+        self._attr_unique_id = coordinator.entity_unique_id(description.key)
         self._unregister_callback: Callable[[], None] | None = None
 
     async def async_added_to_hass(self) -> None:
@@ -533,7 +559,8 @@ class AdjustableBedMassageNumber(AdjustableBedEntity, NumberEntity):
         """Initialize the massage number entity."""
         super().__init__(coordinator)
         self.entity_description = description
-        self._attr_unique_id = f"{coordinator.address}_{description.key}"
+        self._set_sided_translation_key(description.translation_key, description.key)
+        self._attr_unique_id = coordinator.entity_unique_id(description.key)
 
     @property
     def native_value(self) -> float | None:
@@ -589,7 +616,8 @@ class AdjustableBedLightLevelNumber(AdjustableBedEntity, NumberEntity):
         """Initialize the light level number entity."""
         super().__init__(coordinator)
         self.entity_description = description
-        self._attr_unique_id = f"{coordinator.address}_{description.key}"
+        self._set_sided_translation_key(description.translation_key, description.key)
+        self._attr_unique_id = coordinator.entity_unique_id(description.key)
         self._unregister_callback: Callable[[], None] | None = None
 
     async def async_added_to_hass(self) -> None:
@@ -648,7 +676,8 @@ class AdjustableBedSleepNumberSettingNumber(AdjustableBedEntity, NumberEntity):
         """Initialize the Sleep Number setting entity."""
         super().__init__(coordinator)
         self.entity_description = description
-        self._attr_unique_id = f"{coordinator.address}_{description.key}"
+        self._set_sided_translation_key(description.translation_key, description.key)
+        self._attr_unique_id = coordinator.entity_unique_id(description.key)
         self._unregister_callback: Callable[[], None] | None = None
 
     async def async_added_to_hass(self) -> None:
@@ -716,7 +745,8 @@ class AdjustableBedSideStateNumber(AdjustableBedEntity, NumberEntity):
         """Initialize the side-specific number entity."""
         super().__init__(coordinator)
         self.entity_description = description
-        self._attr_unique_id = f"{coordinator.address}_{description.key}"
+        self._set_sided_translation_key(description.translation_key, description.key)
+        self._attr_unique_id = coordinator.entity_unique_id(description.key)
         self._unregister_callback: Callable[[], None] | None = None
 
     async def async_added_to_hass(self) -> None:

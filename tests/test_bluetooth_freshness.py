@@ -75,6 +75,29 @@ class TestFreshnessStatus:
         assert evidence.status is FreshnessStatus.STALE
         assert not evidence.is_fresh
 
+    async def test_fresh_non_connectable_view_wins_over_stale_connectable_history(
+        self, hass: HomeAssistant
+    ) -> None:
+        """A stale strict snapshot must not hide a proxy's current fallback view."""
+
+        def lookup(
+            _hass: HomeAssistant, _address: str, *, connectable: bool
+        ) -> Any:
+            return _service_info(
+                age=1.0 if not connectable else MAX_ADVERTISEMENT_AGE_SECONDS + 1,
+                source="proxy",
+            )
+
+        with patch(
+            f"{_FRESHNESS}.bluetooth.async_last_service_info",
+            side_effect=lookup,
+        ):
+            evidence = async_check_advertisement(hass, TEST_ADDRESS)
+
+        assert evidence.status is FreshnessStatus.FRESH
+        assert evidence.source == "proxy"
+        assert evidence.age_seconds == pytest.approx(1.0)
+
     async def test_advertisement_exactly_at_the_limit_still_passes(
         self, hass: HomeAssistant
     ) -> None:
@@ -205,6 +228,68 @@ class TestPerScannerFreshness:
         assert evidence.status is FreshnessStatus.SOURCE_UNAVAILABLE
 
 
+class TestConflictingScannerViews:
+    """One scanner saying "no signal" must not discard another's real reading."""
+
+    def _scanner_device(self, source: str, *, seen_at: float, rssi: int) -> Any:
+        return SimpleNamespace(
+            scanner=SimpleNamespace(
+                source=source,
+                discovered_device_timestamps={TEST_ADDRESS: seen_at},
+            ),
+            advertisement=SimpleNamespace(rssi=rssi),
+        )
+
+    async def test_a_newer_invalidated_rssi_does_not_hide_a_valid_reading(
+        self, hass: HomeAssistant
+    ) -> None:
+        """A -127 published a second later would otherwise block a reachable bed."""
+        with patch(
+            f"{_FRESHNESS}.bluetooth.async_last_service_info",
+            side_effect=lambda _hass, _address, connectable=True: (
+                _service_info(age=5.0, rssi=-60, source="hci0")
+                if connectable
+                else _service_info(age=1.0, rssi=RSSI_INVALIDATED, source="proxy")
+            ),
+        ):
+            evidence = async_check_advertisement(hass, TEST_ADDRESS)
+
+        assert evidence.status is FreshnessStatus.FRESH
+        assert evidence.rssi == -60
+        assert evidence.source == "hci0"
+
+    async def test_an_invalidated_rssi_still_wins_when_it_is_all_there_is(
+        self, hass: HomeAssistant
+    ) -> None:
+        """Nothing can hear the bed, and that is the honest answer."""
+        with patch(
+            f"{_FRESHNESS}.bluetooth.async_last_service_info",
+            side_effect=lambda _hass, _address, connectable=True: _service_info(
+                age=1.0, rssi=RSSI_INVALIDATED
+            ),
+        ):
+            evidence = async_check_advertisement(hass, TEST_ADDRESS)
+
+        assert evidence.status is FreshnessStatus.RSSI_INVALID
+
+    async def test_the_selected_adapter_also_prefers_its_usable_view(
+        self, hass: HomeAssistant
+    ) -> None:
+        """The per-scanner path compares two views of one adapter the same way."""
+        devices = [self._scanner_device("hci0", seen_at=NOW - 5.0, rssi=-70)]
+        invalid = [self._scanner_device("hci0", seen_at=NOW - 1.0, rssi=RSSI_INVALIDATED)]
+        with patch(
+            f"{_FRESHNESS}.bluetooth.async_scanner_devices_by_address",
+            side_effect=lambda _hass, _address, connectable=True: (
+                invalid if connectable else devices
+            ),
+        ):
+            evidence = async_check_advertisement(hass, TEST_ADDRESS, source="hci0")
+
+        assert evidence.status is FreshnessStatus.FRESH
+        assert evidence.rssi == -70
+
+
 class TestGateConnection:
     """The BLEDevice must be resolved after the gate, never before it."""
 
@@ -255,9 +340,10 @@ class TestGateConnection:
         """Retry must work without restarting the flow."""
         stale = _service_info(age=MAX_ADVERTISEMENT_AGE_SECONDS + 5)
         fresh = _service_info(age=1.0)
+        # Each check consults both scanner views, so two lookups per call.
         with patch(
             f"{_FRESHNESS}.bluetooth.async_last_service_info",
-            side_effect=[stale, fresh],
+            side_effect=[stale, stale, fresh, fresh],
         ):
             assert not async_check_advertisement(hass, TEST_ADDRESS).is_fresh
             assert async_check_advertisement(hass, TEST_ADDRESS).is_fresh
@@ -293,8 +379,8 @@ class TestWaitForAdvertisement:
             evidence, resolved = await async_wait_for_advertisement(hass, TEST_ADDRESS)
         assert evidence.is_fresh
         assert resolved is device
-        # One glance at the history, no polling.
-        assert lookup.call_count == 1
+        # One glance at the history - both scanner views, but no polling.
+        assert lookup.call_count == 2
 
     async def test_an_advertisement_arriving_during_the_wait_is_accepted(
         self, hass: HomeAssistant
@@ -315,6 +401,27 @@ class TestWaitForAdvertisement:
             )
         assert evidence.is_fresh
         assert resolved is device
+
+    async def test_fresh_evidence_without_a_device_keeps_waiting(
+        self, hass: HomeAssistant
+    ) -> None:
+        """Scanner history can change between freshness and device resolution."""
+        device = SimpleNamespace(address=TEST_ADDRESS)
+        with (
+            self._advancing_clock(step=0.0),
+            _patch_last_service_info(_service_info(age=1.0)),
+            patch(
+                f"{_FRESHNESS}.async_resolve_ble_device",
+                side_effect=[None, device],
+            ) as resolve,
+        ):
+            evidence, resolved = await async_wait_for_advertisement(
+                hass, TEST_ADDRESS, wait_timeout=60.0, poll_interval=0.001
+            )
+
+        assert evidence.is_fresh
+        assert resolved is device
+        assert resolve.call_count == 2
 
     async def test_a_silent_bed_gives_up_without_resolving_a_device(
         self, hass: HomeAssistant

@@ -12,6 +12,16 @@ import type {
 } from "./types";
 
 export const PLATFORM = "adjustable_bed";
+export type BedSide = "left" | "right" | "both";
+
+export function splitSide(key: string): { key: string; side?: BedSide } {
+  for (const side of ["left", "right", "both"] as const) {
+    const suffix = `_${side}`;
+    if (key.endsWith(suffix))
+      return { key: key.slice(0, -suffix.length), side };
+  }
+  return { key };
+}
 
 // Default render order of the card's sections (keys without the "show_" prefix).
 export const SECTION_ORDER = [
@@ -79,6 +89,7 @@ function emptyBed(): BedEntities {
 export function bedEntitiesForDevice(
   hass: HomeAssistant,
   deviceId: string | undefined,
+  selectedSide?: BedSide,
 ): BedEntities {
   const bed = emptyBed();
   if (!deviceId || !hass?.entities) return bed;
@@ -108,8 +119,18 @@ export function bedEntitiesForDevice(
     if (entry.hidden) continue;
     const id = entry.entity_id;
     const domain = domainOf(id);
-    const key = keyOf(entry);
-    if (!key) continue;
+    const rawKey = keyOf(entry);
+    if (!rawKey) continue;
+    const split = splitSide(rawKey);
+    const stateSide = (hass.states[id]?.attributes.bed_side ??
+      hass.states[id]?.attributes.side) as
+      | BedSide
+      | undefined;
+    const entitySide = stateSide ?? split.side;
+    if (selectedSide) {
+      if (entitySide !== selectedSide) continue;
+    }
+    const key = selectedSide ? split.key : rawKey;
 
     let match: RegExpMatchArray | null;
 
@@ -137,7 +158,8 @@ export function bedEntitiesForDevice(
           else presetMap.set(key, id);
         } else if ((match = key.match(/^program_memory_(\d+)$/))) {
           memory(Number(match[1])).save = id;
-        } else if (key === "stop") {
+        } else if (key === "stop" || key === "stop_both") {
+          // stop_both is the paired parent device's combined STOP.
           bed.stop = id;
         } else if (key === "connect") {
           bed.connect = id;
@@ -210,6 +232,58 @@ export function bedEntitiesForDevice(
     .sort((a, b) => a.slot - b.slot);
 
   return bed;
+}
+
+export function isSingleAddressPairedDevice(
+  hass: HomeAssistant,
+  deviceId: string | undefined,
+): boolean {
+  if (!deviceId || !hass?.entities) return false;
+  return Object.values(hass.entities).some(
+    (entry) =>
+      entry.device_id === deviceId &&
+      entry.platform === PLATFORM &&
+      (hass.states[entry.entity_id]?.attributes.bed_side === "both" ||
+        splitSide(keyOf(entry)).side === "both"),
+  );
+}
+
+// Child (per-side) device IDs of a paired "Dual Bed" parent, ordered by display
+// name (so Left precedes Right). The per-side covers/numbers/sensors live on
+// these child devices, linked to the synthetic parent via `via_device_id`; the
+// parent itself only carries the combined "both sides" controls. Empty for a
+// non-paired (single) device, so the card falls back to single-device rendering.
+export function pairedChildDeviceIds(
+  hass: HomeAssistant,
+  parentId: string | undefined,
+): string[] {
+  if (!parentId || !hass?.devices) return [];
+  const name = (id: string): string => {
+    const d = hass.devices[id];
+    return (d?.name_by_user ?? d?.name ?? id).toLowerCase();
+  };
+  return Object.values(hass.devices)
+    .filter((d) => d.via_device_id === parentId)
+    .map((d) => d.id)
+    .sort((a, b) => (name(a) < name(b) ? -1 : name(a) > name(b) ? 1 : 0));
+}
+
+// If `deviceId` is one side (child) of a paired bed, return the synthetic
+// parent's id so a card pointed at a side still renders the whole pair (the card
+// editor / stub config can easily land on a child device); otherwise return
+// `deviceId` unchanged.
+export function resolvePairedParentId(
+  hass: HomeAssistant,
+  deviceId: string | undefined,
+): string | undefined {
+  if (!deviceId || !hass?.devices) return deviceId;
+  const parentId = hass.devices[deviceId]?.via_device_id;
+  // Only resolve to a parent that still exists in the registry (a stale
+  // via_device_id would otherwise point at a deleted device).
+  if (parentId && hass.devices[parentId] && pairedChildDeviceIds(hass, parentId).length) {
+    return parentId;
+  }
+  return deviceId;
 }
 
 // True when the bed exposes nothing the card renders. Presence sensors are not

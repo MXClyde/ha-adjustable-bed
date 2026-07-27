@@ -3,13 +3,17 @@
 Handlers live here as module-level functions rather than closures so they can be
 read, tested, and type-checked independently of integration setup. Each one
 recovers Home Assistant from ``call.hass``.
+
+Every motion service is *sided*: a paired (Dual Bed) target fans out to one or
+both sides, while a single bed behaves exactly as it always has.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
 from typing import TYPE_CHECKING, Any, cast
 
 import voluptuous as vol
@@ -32,14 +36,26 @@ from .const import (
     DEFAULT_MOTOR_COUNT,
     DOMAIN,
     OKIN_CST_POSITION_AXES,
+    SIDE_BOTH,
+    SIDE_LEFT,
+    SIDE_RIGHT,
     bed_type_has_position_feedback,
 )
 from .coordinator import AdjustableBedCoordinator
+from .paired_coordinator import PairedBedCoordinator, SingleAddressPairedCoordinator
+from .pairing import is_paired, pair_member_addresses
 
 if TYPE_CHECKING:
     from .beds.base import BedController
 
 _LOGGER = logging.getLogger(__name__)
+
+# A service target: a single bed's coordinator, or a paired bed's parent.
+BedTarget = AdjustableBedCoordinator | PairedBedCoordinator
+# (target, physical side) pairs connected purely to validate a call, so a failed
+# pre-flight can hand them back their idle timer.
+PreflightedSides = list[tuple[BedTarget, AdjustableBedCoordinator]]
+
 
 # Service names
 SERVICE_GOTO_PRESET = "goto_preset"
@@ -58,6 +74,7 @@ ATTR_CAPTURE_DURATION = "capture_duration"
 ATTR_INCLUDE_LOGS = "include_logs"
 ATTR_DIRECTION = "direction"
 ATTR_DURATION_MS = "duration_ms"
+ATTR_SIDE = "side"
 
 TIMED_MOVE_MOTOR_OPTIONS = (
     "tv_lift",
@@ -88,19 +105,96 @@ MIN_TIMED_MOVE_DURATION_MS = 100
 MAX_TIMED_MOVE_DURATION_MS = 30000  # 30 seconds max
 
 
-async def _get_coordinator_from_device(
+# Optional left/right/both target (paired beds). No default: when omitted, a call
+# that targets one side's child device acts on just that side, otherwise it falls
+# back to 'both' - so single-bed automations are unchanged.
+SIDE_FIELD = {vol.Optional(ATTR_SIDE): vol.In([SIDE_LEFT, SIDE_RIGHT, SIDE_BOTH])}
+
+
+def _resolve_sided_target(
     hass: HomeAssistant, device_id: str
-) -> AdjustableBedCoordinator | None:
-    """Get coordinator from device ID."""
+) -> tuple[BedTarget, str | None] | None:
+    """Resolve (coordinator, inferred_side) for a sided service target.
+
+    ``inferred_side`` is the left/right of a targeted paired child sub-device
+    (matched by its MAC identifier), or ``None`` for a single bed or the
+    paired parent device. Lets a caller targeting one side's device act on
+    just that side without passing ``side`` explicitly.
+    """
     device_registry = dr.async_get(hass)
     device = device_registry.async_get(device_id)
     if not device:
         return None
-
+    coordinator: BedTarget | None = None
     for entry_id in device.config_entries:
         if entry_id in hass.data.get(DOMAIN, {}):
-            return cast(AdjustableBedCoordinator, hass.data[DOMAIN][entry_id])
-    return None
+            coordinator = hass.data[DOMAIN][entry_id]
+            break
+    if coordinator is None:
+        return None
+    inferred_side: str | None = None
+    if isinstance(coordinator, PairedBedCoordinator) and not isinstance(
+        coordinator, SingleAddressPairedCoordinator
+    ):
+        macs = {ident[1].upper() for ident in device.identifiers if ident[0] == DOMAIN}
+        for side, child in coordinator.children.items():
+            if child.address.upper() in macs:
+                inferred_side = side
+                break
+    return coordinator, inferred_side
+
+
+def _resolve_sided_targets(
+    hass: HomeAssistant,
+    device_ids: list[str],
+    explicit_side: str | None,
+) -> tuple[list[tuple[BedTarget, str]], list[str]]:
+    """Group sided-service targets by coordinator, merging inferred sides.
+
+    Targeting both of a pair's child devices (or the parent) in one call
+    collapses to a single ``both`` fan-out - preserving the both-failure
+    contract - instead of two separate side commands. Each coordinator
+    appears once in first-seen order. Returns (targets, missing_device_ids).
+    """
+    ordered: list[int] = []
+    by_key: dict[int, tuple[BedTarget, set[str | None]]] = {}
+    missing: list[str] = []
+    for device_id in device_ids:
+        resolved = _resolve_sided_target(hass, device_id)
+        if resolved is None:
+            missing.append(device_id)
+            continue
+        coordinator, inferred_side = resolved
+        key = id(coordinator)
+        if key not in by_key:
+            by_key[key] = (coordinator, set())
+            ordered.append(key)
+        by_key[key][1].add(inferred_side)
+
+    targets: list[tuple[BedTarget, str]] = []
+    for key in ordered:
+        coordinator, sides = by_key[key]
+        if explicit_side is not None:
+            side = explicit_side
+        elif sides == {SIDE_LEFT}:
+            side = SIDE_LEFT
+        elif sides == {SIDE_RIGHT}:
+            side = SIDE_RIGHT
+        else:
+            # parent device (None), both children, or a mix -> whole bed.
+            side = SIDE_BOTH
+        targets.append((coordinator, side))
+    return targets, missing
+
+
+def _missing_device_error(device_id: str) -> ServiceValidationError:
+    """Build the error for a service target that resolved to no bed."""
+    return ServiceValidationError(
+        f"Could not find Adjustable Bed device with ID {device_id}",
+        translation_domain=DOMAIN,
+        translation_key="device_not_found",
+        translation_placeholders={"device_id": device_id},
+    )
 
 
 def _get_support_bundle_target_from_device(
@@ -118,10 +212,39 @@ def _get_support_bundle_target_from_device(
             continue
 
         address = entry.data.get(CONF_ADDRESS)
+        if not isinstance(address, str) and is_paired(entry.data):
+            # Paired entries keep addresses only in pair_children. Resolve to
+            # the targeted child sub-device's MAC (else the first member) so
+            # the bundle can still capture BLE/GATT for that side by address.
+            members = pair_member_addresses(entry.data)
+            device_macs = {ident[1].upper() for ident in device.identifiers if ident[0] == DOMAIN}
+            address = next((m for m in members if m in device_macs), None)
+            if address is None and members:
+                # The synthetic parent device (pair_id identifier) covers both
+                # sides; a bundle is per-address, so make the user pick one
+                # side's device instead of silently capturing only the first.
+                raise ServiceValidationError(
+                    f"{entry.title} is a paired bed; target one side's device "
+                    "for the support bundle.",
+                    translation_domain=DOMAIN,
+                    translation_key="bundle_needs_side_for_paired",
+                    translation_placeholders={"device_name": entry.title},
+                )
         if not isinstance(address, str):
             continue
 
-        coordinator = cast(AdjustableBedCoordinator | None, hass.data.get(DOMAIN, {}).get(entry_id))
+        coordinator: AdjustableBedCoordinator | None = None
+        stored = hass.data.get(DOMAIN, {}).get(entry_id)
+        if isinstance(stored, PairedBedCoordinator):
+            # Reuse the matching live child coordinator so the bundle pauses
+            # and reuses its connection instead of opening a second BLE link
+            # (single-connection beds can't take two).
+            for child in stored.children.values():
+                if child.address.upper() == address.upper():
+                    coordinator = child
+                    break
+        else:
+            coordinator = cast("AdjustableBedCoordinator | None", stored)
         return address, coordinator, entry
 
     return None
@@ -153,114 +276,264 @@ async def _get_controller_for_service(
     return controller
 
 
+async def _validation_controller(
+    coordinator: BedTarget,
+    target: AdjustableBedCoordinator,
+    preflighted: PreflightedSides,
+) -> BedController:
+    """Return a controller for capability VALIDATION without opening a BLE link
+    when avoidable.
+
+    Prefer the side's ``capability_controller`` - the live controller, or a
+    client-free one minted from config/snapshot - so we read capabilities
+    without connecting. That matters for single-connection (Octo) pairs: the
+    preflight validates EVERY targeted side before commanding any, and
+    connecting each side to validate would momentarily hold two BLE links,
+    which the sequential profile must never do. Only connect (and track the
+    side in ``preflighted`` for release on failure) when no capability
+    controller exists - a non-offline-mintable bed that is currently
+    disconnected.
+    """
+    controller = target.capability_controller
+    if controller is not None:
+        return controller
+    controller = await _get_controller_for_service(target)
+    preflighted.append((coordinator, target))
+    return controller
+
+
+def _command_targets(coordinator: BedTarget, side: str) -> list[AdjustableBedCoordinator]:
+    """Return the per-side coordinators a sided command must validate.
+
+    For a paired bed this is the child coordinator(s) for ``side``; the
+    caller validates each (pre-flight all sides before commanding any) and
+    then executes via the paired coordinator's fan-out. For a single bed,
+    ``left``/``right`` is rejected and ``both`` maps to the one controller.
+    """
+    if isinstance(coordinator, PairedBedCoordinator):
+        if side == SIDE_BOTH:
+            return list(coordinator.children.values())
+        child = coordinator.child_for_side(side)
+        if child is None:
+            raise ServiceValidationError(
+                f"This bed has no {side} side",
+                translation_domain=DOMAIN,
+                translation_key="side_not_available",
+                translation_placeholders={"side": side},
+            )
+        return [child]
+
+    if side != SIDE_BOTH:
+        raise ServiceValidationError(
+            "This is a single bed; the Left/Right/Both option only applies to paired beds.",
+            translation_domain=DOMAIN,
+            translation_key="side_not_supported",
+        )
+    return [coordinator]
+
+
+async def _execute_sided(
+    coordinator: BedTarget,
+    side: str,
+    command_fn: Callable[[BedController], Coroutine[Any, Any, None]],
+    *,
+    cancel_running: bool = True,
+) -> None:
+    """Run a command on the targeted side(s).
+
+    A paired bed fans out (with the both-failure stop-the-other contract); a
+    single bed runs exactly as before.
+    """
+    if isinstance(coordinator, PairedBedCoordinator):
+        await coordinator.async_execute_controller_command(
+            command_fn, side=side, cancel_running=cancel_running
+        )
+    else:
+        await coordinator.async_execute_controller_command(
+            command_fn, cancel_running=cancel_running
+        )
+
+
+async def _release_preflighted(preflighted: PreflightedSides) -> None:
+    """Give every bed/side connected during a failed pre-flight a normal idle
+    disconnect, so a validation abort doesn't leave a BLE link open with no
+    idle timer (the command finalizer that would reset it never ran). Applies
+    to single beds too, not just paired sides - both reconnect with
+    reset_timer=False during validation."""
+    for _coordinator, target in preflighted:
+        if target.is_connected:
+            with contextlib.suppress(Exception):
+                await target.async_ensure_connected(reset_timer=True)
+
+
+@contextlib.asynccontextmanager
+async def _release_idle_on_validation_failure(
+    coordinator: AdjustableBedCoordinator,
+) -> AsyncIterator[None]:
+    """Release a bed reconnected for a per-motor service if validation fails.
+
+    _get_controller_for_service reconnects with reset_timer=False; without
+    this an invalid set_position/timed_move would leave the BLE link open
+    with no idle timer (the preset preflight path already guards this way)."""
+    try:
+        yield
+    except ServiceValidationError:
+        if coordinator.is_connected:
+            with contextlib.suppress(Exception):
+                await coordinator.async_ensure_connected(reset_timer=True)
+        raise
+
+
+def _plan_key(target: AdjustableBedCoordinator) -> int:
+    """Stable per-side key for a validated plan (a proxy shares its child's identity)."""
+    return getattr(target, "operation_identity", id(target))
+
+
 async def handle_goto_preset(call: ServiceCall) -> None:
-    """Handle goto_preset service call."""
+    """Handle goto_preset service call with sided all-target preflight."""
     hass = call.hass
     preset = call.data[ATTR_PRESET]
     device_ids = call.data.get(CONF_DEVICE_ID, [])
+    explicit_side = call.data.get(ATTR_SIDE)
 
-    _LOGGER.info("Service goto_preset called: preset=%d", preset)
+    _LOGGER.info("Service goto_preset called: preset=%d (side=%s)", preset, explicit_side)
 
-    for device_id in device_ids:
-        coordinator = await _get_coordinator_from_device(hass, device_id)
-        if coordinator:
-            # Check if controller supports memory presets
-            controller = await _get_controller_for_service(coordinator)
-            if not controller.supports_memory_presets:
-                raise ServiceValidationError(
-                    f"Device '{coordinator.name}' does not support memory presets",
-                    translation_domain=DOMAIN,
-                    translation_key="memory_presets_not_supported",
-                    translation_placeholders={"device_name": coordinator.name},
-                )
-            # Validate preset against controller's memory slot count
-            slot_count = controller.memory_slot_count
-            if preset > slot_count:
-                raise ServiceValidationError(
-                    f"Device '{coordinator.name}' only supports memory presets 1-{slot_count}. "
-                    f"Preset {preset} is not available for this bed type.",
-                    translation_domain=DOMAIN,
-                    translation_key="invalid_preset_number",
-                    translation_placeholders={
-                        "device_name": coordinator.name,
-                        "max_preset": str(slot_count),
-                        "requested_preset": str(preset),
-                    },
-                )
-            await coordinator.async_execute_controller_command(
-                lambda ctrl, p=preset: ctrl.preset_memory(p)  # type: ignore[misc]
+    targets, missing = _resolve_sided_targets(hass, device_ids, explicit_side)
+    if missing:
+        raise _missing_device_error(missing[0])
+
+    # Phase 1: validate the preset on EVERY targeted side before moving any
+    # bed, so a multi-target call never half-executes.
+    preflighted: PreflightedSides = []
+    try:
+        for coordinator, side in targets:
+            for target in _command_targets(coordinator, side):
+                controller = await _validation_controller(coordinator, target, preflighted)
+                if not controller.supports_memory_presets:
+                    raise ServiceValidationError(
+                        f"Device '{target.name}' does not support memory presets",
+                        translation_domain=DOMAIN,
+                        translation_key="memory_presets_not_supported",
+                        translation_placeholders={"device_name": target.name},
+                    )
+                # Validate preset against controller's memory slot count
+                slot_count = controller.memory_slot_count
+                if preset > slot_count:
+                    raise ServiceValidationError(
+                        f"Device '{target.name}' only supports memory presets 1-{slot_count}. "
+                        f"Preset {preset} is not available for this bed type.",
+                        translation_domain=DOMAIN,
+                        translation_key="invalid_preset_number",
+                        translation_placeholders={
+                            "device_name": target.name,
+                            "max_preset": str(slot_count),
+                            "requested_preset": str(preset),
+                        },
+                    )
+    except ServiceValidationError:
+        await _release_preflighted(preflighted)
+        raise
+
+    # Phase 2: every target validated - now move them. If one bed's command
+    # fails, release the still-connected preflighted beds that never ran (and
+    # so never reset their idle timer) before propagating.
+    try:
+        for coordinator, side in targets:
+            await _execute_sided(
+                coordinator,
+                side,
+                lambda ctrl, p=preset: ctrl.preset_memory(p),  # type: ignore[misc]
             )
-        else:
-            raise ServiceValidationError(
-                f"Could not find Adjustable Bed device with ID {device_id}",
-                translation_domain=DOMAIN,
-                translation_key="device_not_found",
-                translation_placeholders={"device_id": device_id},
-            )
+    except Exception:
+        await _release_preflighted(preflighted)
+        raise
 
 
 async def handle_save_preset(call: ServiceCall) -> None:
-    """Handle save_preset service call."""
+    """Handle save_preset service call with sided all-target preflight."""
     hass = call.hass
     preset = call.data[ATTR_PRESET]
     device_ids = call.data.get(CONF_DEVICE_ID, [])
+    explicit_side = call.data.get(ATTR_SIDE)
 
-    _LOGGER.info("Service save_preset called: preset=%d", preset)
+    _LOGGER.info("Service save_preset called: preset=%d (side=%s)", preset, explicit_side)
 
-    for device_id in device_ids:
-        coordinator = await _get_coordinator_from_device(hass, device_id)
-        if coordinator:
-            # Check if controller supports programming memory presets
-            controller = await _get_controller_for_service(coordinator)
-            if not controller.supports_memory_programming:
-                raise ServiceValidationError(
-                    f"Device '{coordinator.name}' does not support programming memory presets",
-                    translation_domain=DOMAIN,
-                    translation_key="memory_programming_not_supported",
-                    translation_placeholders={"device_name": coordinator.name},
-                )
-            # Validate preset against controller's memory slot count
-            slot_count = controller.memory_slot_count
-            if preset > slot_count:
-                raise ServiceValidationError(
-                    f"Device '{coordinator.name}' only supports memory presets 1-{slot_count}. "
-                    f"Preset {preset} is not available for this bed type.",
-                    translation_domain=DOMAIN,
-                    translation_key="invalid_preset_number",
-                    translation_placeholders={
-                        "device_name": coordinator.name,
-                        "max_preset": str(slot_count),
-                        "requested_preset": str(preset),
-                    },
-                )
-            await coordinator.async_execute_controller_command(
+    targets, missing = _resolve_sided_targets(hass, device_ids, explicit_side)
+    if missing:
+        raise _missing_device_error(missing[0])
+
+    # Phase 1: validate that every targeted side can program this slot before
+    # programming any, so a multi-target call never half-executes.
+    preflighted: PreflightedSides = []
+    try:
+        for coordinator, side in targets:
+            for target in _command_targets(coordinator, side):
+                controller = await _validation_controller(coordinator, target, preflighted)
+                if not controller.supports_memory_programming:
+                    raise ServiceValidationError(
+                        f"Device '{target.name}' does not support programming memory presets",
+                        translation_domain=DOMAIN,
+                        translation_key="memory_programming_not_supported",
+                        translation_placeholders={"device_name": target.name},
+                    )
+                # Validate preset against controller's memory slot count
+                slot_count = controller.memory_slot_count
+                if preset > slot_count:
+                    raise ServiceValidationError(
+                        f"Device '{target.name}' only supports memory presets 1-{slot_count}. "
+                        f"Preset {preset} is not available for this bed type.",
+                        translation_domain=DOMAIN,
+                        translation_key="invalid_preset_number",
+                        translation_placeholders={
+                            "device_name": target.name,
+                            "max_preset": str(slot_count),
+                            "requested_preset": str(preset),
+                        },
+                    )
+    except ServiceValidationError:
+        await _release_preflighted(preflighted)
+        raise
+
+    # Phase 2: every target validated - now program them. Release any
+    # still-connected preflighted bed that never ran if one fails.
+    try:
+        for coordinator, side in targets:
+            await _execute_sided(
+                coordinator,
+                side,
                 lambda ctrl, p=preset: ctrl.program_memory(p),  # type: ignore[misc]
                 cancel_running=False,
             )
-        else:
-            raise ServiceValidationError(
-                f"Could not find Adjustable Bed device with ID {device_id}",
-                translation_domain=DOMAIN,
-                translation_key="device_not_found",
-                translation_placeholders={"device_id": device_id},
-            )
+    except Exception:
+        await _release_preflighted(preflighted)
+        raise
 
 
 async def handle_stop_all(call: ServiceCall) -> None:
     """Handle stop_all service call."""
     hass = call.hass
     device_ids = call.data.get(CONF_DEVICE_ID, [])
+    explicit_side = call.data.get(ATTR_SIDE)
 
-    _LOGGER.info("Service stop_all called")
+    _LOGGER.info("Service stop_all called (side=%s)", explicit_side)
 
-    missing_device_ids: list[str] = []
+    targets, missing_device_ids = _resolve_sided_targets(hass, device_ids, explicit_side)
 
-    for device_id in device_ids:
-        coordinator = await _get_coordinator_from_device(hass, device_id)
-        if coordinator:
-            await coordinator.async_stop_command()
+    async def _stop_one(coordinator: BedTarget, side: str) -> None:
+        # Validate that side applies (rejects left/right on a single bed).
+        _command_targets(coordinator, side)
+        if isinstance(coordinator, PairedBedCoordinator):
+            await coordinator.async_stop_command(side=side)
         else:
-            missing_device_ids.append(device_id)
+            await coordinator.async_stop_command()
+
+    # STOP is a safety action: attempt every target before surfacing an
+    # error, so one bed's failure never leaves another still moving.
+    results = await asyncio.gather(
+        *(_stop_one(coordinator, side) for coordinator, side in targets),
+        return_exceptions=True,
+    )
+    stop_errors = [r for r in results if isinstance(r, BaseException)]
 
     if missing_device_ids:
         raise ServiceValidationError(
@@ -270,32 +543,25 @@ async def handle_stop_all(call: ServiceCall) -> None:
             translation_placeholders={"device_ids": ", ".join(missing_device_ids)},
         )
 
+    if stop_errors:
+        # Every target was attempted; surface the first failure.
+        raise stop_errors[0]
 
-async def handle_set_position(call: ServiceCall) -> None:
-    """Handle set_position service call."""
-    hass = call.hass
-    device_ids = call.data.get(CONF_DEVICE_ID, [])
-    motor = call.data[ATTR_MOTOR]
-    position = call.data[ATTR_POSITION]
 
-    _LOGGER.info(
-        "Service set_position called: motor=%s, position=%.1f%%",
-        motor,
-        position,
-    )
+async def _set_position_plan(
+    parent: BedTarget,
+    coordinator: AdjustableBedCoordinator,
+    preflighted: PreflightedSides,
+    motor: str,
+    position: float,
+) -> dict[str, Any]:
+    """Validate one physical side and return its seek configuration."""
+    async with _release_idle_on_validation_failure(coordinator):
+        controller = await _validation_controller(parent, coordinator, preflighted)
 
-    for device_id in device_ids:
-        coordinator = await _get_coordinator_from_device(hass, device_id)
-        if not coordinator:
-            raise ServiceValidationError(
-                f"Could not find Adjustable Bed device with ID {device_id}",
-                translation_domain=DOMAIN,
-                translation_key="device_not_found",
-                translation_placeholders={"device_id": device_id},
-            )
-        controller = await _get_controller_for_service(coordinator)
-
-        # Get config entry for bed type and motor count
+        # Bed type / motor count come from the coordinator's own entry (the
+        # child's ChildEntryView for a paired-side target - children aren't in
+        # hass.data, so don't scan it).
         entry = coordinator.entry
         bed_type = entry.data.get(CONF_BED_TYPE)
         motor_count = entry.data.get(CONF_MOTOR_COUNT, DEFAULT_MOTOR_COUNT)
@@ -485,8 +751,42 @@ async def handle_set_position(call: ServiceCall) -> None:
                 },
             )
 
-        # Call async_seek_position
-        await coordinator.async_seek_position(
+        return config
+
+
+async def handle_set_position(call: ServiceCall) -> None:
+    """Handle set_position service call with sided all-target preflight."""
+    hass = call.hass
+    device_ids = call.data.get(CONF_DEVICE_ID, [])
+    motor = call.data[ATTR_MOTOR]
+    position = call.data[ATTR_POSITION]
+    explicit_side = call.data.get(ATTR_SIDE)
+
+    _LOGGER.info(
+        "Service set_position called: motor=%s, position=%.1f%% (side=%s)",
+        motor,
+        position,
+        explicit_side,
+    )
+    targets, missing = _resolve_sided_targets(hass, device_ids, explicit_side)
+    if missing:
+        raise _missing_device_error(missing[0])
+
+    preflighted: PreflightedSides = []
+    plans: dict[int, dict[str, Any]] = {}
+    try:
+        for coordinator, side in targets:
+            for target in _command_targets(coordinator, side):
+                plans[_plan_key(target)] = await _set_position_plan(
+                    coordinator, target, preflighted, motor, position
+                )
+    except ServiceValidationError:
+        await _release_preflighted(preflighted)
+        raise
+
+    async def seek(target: AdjustableBedCoordinator) -> None:
+        config = plans[_plan_key(target)]
+        await target.async_seek_position(
             position_key=cast(str, config["position_key"]),
             target_angle=position,
             move_up_fn=config["move_up_fn"],  # type: ignore[arg-type]
@@ -494,34 +794,31 @@ async def handle_set_position(call: ServiceCall) -> None:
             move_stop_fn=config["move_stop_fn"],  # type: ignore[arg-type]
         )
 
+    try:
+        for coordinator, side in targets:
+            if isinstance(coordinator, PairedBedCoordinator):
+                await coordinator.async_run_child_operation("set position", seek, side=side)
+            else:
+                await seek(coordinator)
+    except Exception:
+        await _release_preflighted(preflighted)
+        raise
 
-async def handle_timed_move(call: ServiceCall) -> None:
-    """Handle timed_move service call."""
-    hass = call.hass
-    device_ids = call.data.get(CONF_DEVICE_ID, [])
-    motor = call.data[ATTR_MOTOR]
-    direction = call.data[ATTR_DIRECTION]
-    duration_ms = call.data[ATTR_DURATION_MS]
 
-    _LOGGER.info(
-        "Service timed_move called: motor=%s, direction=%s, duration_ms=%d",
-        motor,
-        direction,
-        duration_ms,
-    )
+async def _timed_move_plan(
+    parent: BedTarget,
+    coordinator: AdjustableBedCoordinator,
+    preflighted: PreflightedSides,
+    motor: str,
+    direction: str,
+    duration_ms: int,
+) -> Callable[[BedController], Coroutine[Any, Any, None]]:
+    """Validate one physical side and build its timed command."""
+    # Create a narrowed reference for use in closures (mypy doesn't narrow across closures)
+    coordinator_: AdjustableBedCoordinator = coordinator
+    async with _release_idle_on_validation_failure(coordinator):
+        controller = await _validation_controller(parent, coordinator, preflighted)
 
-    for device_id in device_ids:
-        coordinator = await _get_coordinator_from_device(hass, device_id)
-        if not coordinator:
-            raise ServiceValidationError(
-                f"Could not find Adjustable Bed device with ID {device_id}",
-                translation_domain=DOMAIN,
-                translation_key="device_not_found",
-                translation_placeholders={"device_id": device_id},
-            )
-        # Create a narrowed reference for use in closures (mypy doesn't narrow across closures)
-        coordinator_: AdjustableBedCoordinator = coordinator
-        controller = await _get_controller_for_service(coordinator)
         motor_configs = {
             spec.key: {
                 "move_up_fn": spec.open_fn,
@@ -611,7 +908,53 @@ async def handle_timed_move(call: ServiceCall) -> None:
                 # Always send stop command
                 await asyncio.shield(_stop_fn(ctrl))
 
-        await coordinator.async_execute_controller_command(timed_movement)
+        return timed_movement
+
+
+async def handle_timed_move(call: ServiceCall) -> None:
+    """Handle timed_move service call with sided all-target preflight."""
+    hass = call.hass
+    device_ids = call.data.get(CONF_DEVICE_ID, [])
+    motor = call.data[ATTR_MOTOR]
+    direction = call.data[ATTR_DIRECTION]
+    duration_ms = call.data[ATTR_DURATION_MS]
+    explicit_side = call.data.get(ATTR_SIDE)
+
+    _LOGGER.info(
+        "Service timed_move called: motor=%s, direction=%s, duration_ms=%d (side=%s)",
+        motor,
+        direction,
+        duration_ms,
+        explicit_side,
+    )
+    targets, missing = _resolve_sided_targets(hass, device_ids, explicit_side)
+    if missing:
+        raise _missing_device_error(missing[0])
+
+    preflighted: PreflightedSides = []
+    plans: dict[int, Callable[[BedController], Coroutine[Any, Any, None]]] = {}
+    try:
+        for coordinator, side in targets:
+            for target in _command_targets(coordinator, side):
+                plans[_plan_key(target)] = await _timed_move_plan(
+                    coordinator, target, preflighted, motor, direction, duration_ms
+                )
+    except ServiceValidationError:
+        await _release_preflighted(preflighted)
+        raise
+
+    async def move(target: AdjustableBedCoordinator) -> None:
+        await target.async_execute_controller_command(plans[_plan_key(target)])
+
+    try:
+        for coordinator, side in targets:
+            if isinstance(coordinator, PairedBedCoordinator):
+                await coordinator.async_run_child_operation("timed move", move, side=side)
+            else:
+                await move(coordinator)
+    except Exception:
+        await _release_preflighted(preflighted)
+        raise
 
 
 async def handle_generate_support_bundle(call: ServiceCall) -> None:
@@ -870,6 +1213,7 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
                 hass.data[_LOG_NOTICE_OWNERS].pop(log_notification_id, None)
                 async_dismiss(hass, log_notification_id)
 
+
 async def async_register_services(hass: HomeAssistant) -> None:
     """Register the Adjustable Bed services (idempotent)."""
     if hass.services.has_service(DOMAIN, SERVICE_GOTO_PRESET):
@@ -883,6 +1227,7 @@ async def async_register_services(hass: HomeAssistant) -> None:
             {
                 vol.Required(CONF_DEVICE_ID): cv.ensure_list,
                 vol.Required(ATTR_PRESET): vol.All(vol.Coerce(int), vol.Range(min=1)),
+                **SIDE_FIELD,
             }
         ),
     )
@@ -894,6 +1239,7 @@ async def async_register_services(hass: HomeAssistant) -> None:
             {
                 vol.Required(CONF_DEVICE_ID): cv.ensure_list,
                 vol.Required(ATTR_PRESET): vol.All(vol.Coerce(int), vol.Range(min=1)),
+                **SIDE_FIELD,
             }
         ),
     )
@@ -904,6 +1250,7 @@ async def async_register_services(hass: HomeAssistant) -> None:
         schema=vol.Schema(
             {
                 vol.Required(CONF_DEVICE_ID): cv.ensure_list,
+                **SIDE_FIELD,
             }
         ),
     )
@@ -917,6 +1264,7 @@ async def async_register_services(hass: HomeAssistant) -> None:
                 vol.Required(ATTR_MOTOR): vol.In(["back", "legs", "head", "feet"]),
                 # No max cap here - per-motor validation handles bed-specific limits
                 vol.Required(ATTR_POSITION): vol.All(vol.Coerce(float), vol.Range(min=0)),
+                **SIDE_FIELD,
             }
         ),
     )
@@ -933,6 +1281,7 @@ async def async_register_services(hass: HomeAssistant) -> None:
                     vol.Coerce(int),
                     vol.Range(min=MIN_TIMED_MOVE_DURATION_MS, max=MAX_TIMED_MOVE_DURATION_MS),
                 ),
+                **SIDE_FIELD,
             }
         ),
     )

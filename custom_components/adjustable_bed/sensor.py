@@ -21,8 +21,7 @@ from .const import (
     BED_TYPE_ERGOMOTION,
     BED_TYPE_KEESON,
     BED_TYPE_OKIN_CST,
-    BEDS_WITH_PERCENTAGE_POSITIONS,
-    BEDS_WITHOUT_ANGLE_FEEDBACK,
+    BEDS_WITH_ANGLE_SENSING,
     CONF_BED_TYPE,
     CONF_HAS_MASSAGE,
     CONF_MOTOR_COUNT,
@@ -34,6 +33,7 @@ from .const import (
 )
 from .coordinator import AdjustableBedCoordinator
 from .entity import AdjustableBedEntity
+from .paired_coordinator import PairedBedCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -133,30 +133,40 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Adjustable Bed sensor entities."""
-    coordinator: AdjustableBedCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    if isinstance(coordinator, PairedBedCoordinator):
+        paired_entities: list[SensorEntity] = []
+        for child in coordinator.children.values():
+            paired_entities.extend(_sensor_entities_for(hass, child))
+        if paired_entities:
+            async_add_entities(paired_entities)
+        return
+    async_add_entities(_sensor_entities_for(hass, coordinator))
+
+
+def _sensor_entities_for(
+    hass: HomeAssistant, coordinator: AdjustableBedCoordinator
+) -> list[SensorEntity]:
+    """Build sensor entities for a single (child or standalone) coordinator."""
+    entry = coordinator.entry  # ChildEntryView for a paired child; real entry otherwise
     motor_count = entry.data.get(CONF_MOTOR_COUNT, DEFAULT_MOTOR_COUNT)
     bed_type = entry.data.get(CONF_BED_TYPE)
     has_massage = entry.data.get(CONF_HAS_MASSAGE, False)
-    controller = coordinator.controller
+    # capability_controller: an offline paired side still gets its sensors built
+    # from a client-free controller minted from config (see coordinator).
+    controller = coordinator.capability_controller
 
     entities: list[SensorEntity] = []
 
-    # Beds that never report degree angles (e.g. Sleep Number MCR/BAM) must not keep
-    # angle sensors. Remove any an earlier version registered (when angle sensing was
-    # enabled by default) so existing installs stop showing dead "unknown" entities
-    # after upgrading, regardless of the current disable_angle_sensing value (#322).
-    if bed_type in BEDS_WITHOUT_ANGLE_FEEDBACK:
+    # Only protocols in the explicit angle-sensing capability set may expose degree
+    # sensors. Clean up entities created by older permissive logic so unsupported
+    # beds cannot leave dead "unknown" angles in Home Assistant or the card.
+    if bed_type not in BEDS_WITH_ANGLE_SENSING:
         _async_remove_stale_angle_entities(hass, coordinator)
 
-    # Set up angle sensors (only for non-percentage beds with angle sensing enabled)
+    # Set up angle sensors only when both the protocol and configuration support it.
     if not coordinator.disable_angle_sensing:
-        # Skip angle sensors for beds that report percentage instead of angles
-        # (Keeson/Ergomotion/Serta report 0-100% position, not degrees)
-        if bed_type in BEDS_WITH_PERCENTAGE_POSITIONS:
-            _LOGGER.debug("Skipping angle sensors for %s - reports percentage, not angle", bed_type)
-        # Skip beds that report no degree-angle data at all (e.g. Sleep Number MCR/BAM),
-        # which would otherwise create sensors stuck at "unknown" forever (#322).
-        elif bed_type in BEDS_WITHOUT_ANGLE_FEEDBACK:
+        if bed_type not in BEDS_WITH_ANGLE_SENSING:
             _LOGGER.debug("Skipping angle sensors for %s - no angle feedback", bed_type)
         else:
             sensor_descriptions = SENSOR_DESCRIPTIONS
@@ -190,24 +200,18 @@ async def async_setup_entry(
             for massage_desc in MASSAGE_SENSOR_DESCRIPTIONS:
                 entities.append(AdjustableBedMassageSensor(coordinator, massage_desc))
 
-    if entities:
-        async_add_entities(entities)
+    return entities
 
 
 def _async_remove_stale_angle_entities(
     hass: HomeAssistant,
     coordinator: AdjustableBedCoordinator,
 ) -> None:
-    """Remove angle sensor entities the integration no longer creates.
-
-    Beds in BEDS_WITHOUT_ANGLE_FEEDBACK (e.g. Sleep Number MCR/BAM) report no
-    angles, but an earlier version registered back/legs/head/feet angle sensors
-    for them; those would otherwise linger as dead "unknown" entities (#322).
-    """
+    """Remove stale angle entities for protocols without degree feedback."""
     registry = er.async_get(hass)
     for description in SENSOR_DESCRIPTIONS:
         entity_id = registry.async_get_entity_id(
-            "sensor", DOMAIN, f"{coordinator.address}_{description.key}"
+            "sensor", DOMAIN, coordinator.entity_unique_id(description.key)
         )
         if entity_id is not None:
             registry.async_remove(entity_id)
@@ -226,7 +230,8 @@ class AdjustableBedAngleSensor(AdjustableBedEntity, SensorEntity):
         """Initialize the sensor."""
         super().__init__(coordinator)
         self.entity_description = description
-        self._attr_unique_id = f"{coordinator.address}_{description.key}"
+        self._set_sided_translation_key(description.translation_key, description.key)
+        self._attr_unique_id = coordinator.entity_unique_id(description.key)
         self._unregister_callback: Callable[[], None] | None = None
 
     async def async_added_to_hass(self) -> None:
@@ -272,7 +277,8 @@ class AdjustableBedMassageSensor(AdjustableBedEntity, SensorEntity):
         """Initialize the massage sensor."""
         super().__init__(coordinator)
         self.entity_description = description
-        self._attr_unique_id = f"{coordinator.address}_{description.key}"
+        self._set_sided_translation_key(description.translation_key, description.key)
+        self._attr_unique_id = coordinator.entity_unique_id(description.key)
         self._unregister_callback: Callable[[], None] | None = None
 
     async def async_added_to_hass(self) -> None:

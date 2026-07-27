@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import IntFlag
-from typing import Final
+from typing import Final, overload
 
 DOMAIN: Final = "adjustable_bed"
 
@@ -93,6 +93,47 @@ CONF_KAIDI_ADV_TYPE: Final = "kaidi_adv_type"
 CONF_KAIDI_RESOLVED_VARIANT: Final = "kaidi_resolved_variant"
 CONF_KAIDI_VARIANT_SOURCE: Final = "kaidi_variant_source"
 
+# Paired-bed (Dual Bed 4.0) keys — see docs/design/dual-bed-4.0-plan.md.
+# A paired entry stores a synthetic pair_id plus an ordered list of two child
+# descriptors. Single-bed entries never carry CONF_PAIR_ID and are unaffected.
+CONF_PAIR_ID: Final = "pair_id"
+CONF_PAIR_MODE: Final = "pair_mode"
+CONF_PAIR_CHILDREN: Final = "pair_children"
+CONF_PAIR_MEMBER_ADDRESSES: Final = "pair_member_addresses"
+CONF_PAIR_SCHEMA_VERSION: Final = "pair_schema_version"
+# Per-child descriptor key for which physical side the child drives.
+CONF_SIDE: Final = "side"
+
+# pair_mode values: one shared BLE link vs two separate per-side links.
+PAIR_MODE_SINGLE_ADDRESS: Final = "single_address"
+PAIR_MODE_SEPARATE_ADDRESS: Final = "separate_address"
+PAIR_MODES: Final = (PAIR_MODE_SINGLE_ADDRESS, PAIR_MODE_SEPARATE_ADDRESS)
+
+# Side vocabulary — central, so no module invents ad-hoc magic strings.
+SIDE_LEFT: Final = "left"
+SIDE_RIGHT: Final = "right"
+SIDE_BOTH: Final = "both"
+# The two physical sides, in stable order (left first, right second).
+PAIR_SIDES: Final = (SIDE_LEFT, SIDE_RIGHT)
+
+# Internal forward-compat marker for the paired-entry data shape within v4.
+PAIR_SCHEMA_VERSION: Final = 1
+
+# How the two sides' BLE links are driven. ``auto``/``concurrent`` hold both
+# links at once (correct for independent two-device beds like Linak — both sides
+# run truly simultaneously). ``sequential`` switches the active connection per
+# command (the Octo profile, where the firmware allows only one active link).
+CONF_PAIR_CONNECTION_MODE: Final = "pair_connection_mode"
+PAIR_CONNECTION_MODE_AUTO: Final = "auto"
+PAIR_CONNECTION_MODE_CONCURRENT: Final = "concurrent"
+PAIR_CONNECTION_MODE_SEQUENTIAL: Final = "sequential"
+PAIR_CONNECTION_MODES: Final = (
+    PAIR_CONNECTION_MODE_AUTO,
+    PAIR_CONNECTION_MODE_CONCURRENT,
+    PAIR_CONNECTION_MODE_SEQUENTIAL,
+)
+DEFAULT_PAIR_CONNECTION_MODE: Final = PAIR_CONNECTION_MODE_AUTO
+
 # Default angle limits (from Linak beds)
 DEFAULT_BACK_MAX_ANGLE: Final = 68.0
 DEFAULT_LEGS_MAX_ANGLE: Final = 45.0
@@ -158,7 +199,6 @@ BED_TYPE_SOLACE: Final = "solace"
 BED_TYPE_MOTOSLEEP: Final = "motosleep"
 
 BEDS_WITH_PASSIVE_POSITION_RECONCILIATION: Final = frozenset({BED_TYPE_LINAK})
-
 
 def supports_passive_position_reconciliation(bed_type: str | None) -> bool:
     """Return True if the bed type supports passive position reconciliation."""
@@ -303,6 +343,73 @@ SUPPORTED_BED_TYPES: Final = [
     # Logicdata SimplicityFrame (SILVERmotion)
     BED_TYPE_LOGICDATA,
 ]
+
+
+# Bed types whose entity-gating capabilities are FULLY determined by stored config
+# (bed_type + options) with NO live BLE connection — the only beds safe to mint a
+# client-free "capability" controller for an OFFLINE paired side (Phase 2.1).
+# DELIBERATELY CONSERVATIVE (deny-by-default): a type must be EXCLUDED if it
+#   (a) auto-detects its variant/profile from live GATT services or BLE
+#       advertisement (Keeson "auto", Richmat non-Nordic, Leggett & Platt "auto",
+#       CB24, Kaidi, CoolBase) — offline it silently resolves the WRONG profile;
+#   (b) can be connect-time corrected to a DIFFERENT bed_type (CB35<->BOX25,
+#       Malouf new/legacy, the OKIN shared-UUID set, Nordic-UART) — the stored
+#       type is not final; or
+#   (c) mutates its capabilities from a post-connect config query / feature
+#       discovery (Octo, Jensen, Sleep Number 360/i8, Limoss, Vibradorm). NB the
+#       MCR variant (BED_TYPE_SLEEP_NUMBER_MCR) is SAFE and IS in the set below —
+#       its query_config only hydrates firmness/light STATE, not which entities
+#       exist; only the Climate-360/i8 BED_TYPE_SLEEP_NUMBER is excluded.
+# Every member below was verified against (a)-(c) in a per-bed-type capability
+# audit. A regression test asserts create_controller(client=None) succeeds for
+# every member, so adding a post-connect mutation later fails loudly.
+OFFLINE_CAPABILITY_SAFE_BED_TYPES: Final = frozenset(
+    {
+        BED_TYPE_LINAK,
+        BED_TYPE_OKIN_HANDLE,
+        BED_TYPE_DEWERTOKIN,
+        BED_TYPE_OKIN_ORE,
+        BED_TYPE_LEGGETT_GEN2,
+        BED_TYPE_LEGGETT_WILINKE,
+        BED_TYPE_SOLACE,
+        BED_TYPE_MOTOSLEEP,
+        BED_TYPE_REVERIE,
+        BED_TYPE_REVERIE_NIGHTSTAND,
+        BED_TYPE_JIECANG,
+        BED_TYPE_COMFORT_MOTION,
+        BED_TYPE_ERGOMOTION,
+        BED_TYPE_SERTA,
+        BED_TYPE_OKIN_FFE,
+        BED_TYPE_BEDTECH,
+        BED_TYPE_SLEEP_NUMBER_MCR,
+        BED_TYPE_SLEEPYS_BOX15,
+        BED_TYPE_SLEEPYS_BOX24,
+        BED_TYPE_SVANE,
+        BED_TYPE_RONDURE,
+        BED_TYPE_REMACRO,
+        BED_TYPE_SCOTT_LIVING,
+        BED_TYPE_SBI,
+        BED_TYPE_SUTA,
+        BED_TYPE_TIMOTION_AHF,
+        BED_TYPE_LOGICDATA,
+    }
+)
+
+
+# Bed types whose firmware allows only ONE concurrent BLE link, so a paired bed
+# of this type must use the SEQUENTIAL active-connection profile (connect one
+# side, act, disconnect, switch to the other) instead of holding both links at
+# once. Verified from the Octo app: it holds a single connected-device slot and
+# switches sequentially (disconnect-then-connect). This is a SEPARATE marker from
+# BEDS_REQUIRING_PAIRING — Octo PIN-auths per connection, it does not OS-bond.
+SINGLE_CONNECTION_BED_TYPES: Final = frozenset({BED_TYPE_OCTO})
+
+
+def requires_sequential_pairing(bed_type: str | None) -> bool:
+    """Return True if a paired bed of this type must use the sequential
+    active-connection profile (only one BLE link held at a time)."""
+    return bed_type in SINGLE_CONNECTION_BED_TYPES
+
 
 # Mapping from legacy bed types to their protocol-based equivalents
 # Used by controller_factory to resolve the correct controller
@@ -1121,6 +1228,44 @@ LEGGETT_VARIANTS: Final = {
     LEGGETT_VARIANT_OKIN: "Okin (requires BLE pairing)",
     LEGGETT_VARIANT_MLRM: "MlRM (WiLinke protocol, discrete massage control)",
 }
+
+
+@overload
+def resolve_explicit_bed_type(
+    bed_type: str, protocol_variant: str | None
+) -> str: ...
+
+
+@overload
+def resolve_explicit_bed_type(
+    bed_type: None, protocol_variant: str | None
+) -> None: ...
+
+
+def resolve_explicit_bed_type(
+    bed_type: str | None, protocol_variant: str | None
+) -> str | None:
+    """Resolve a legacy umbrella bed type to the concrete type an EXPLICIT
+    protocol variant selects.
+
+    The offline-capability path must agree across three places — the pairing
+    gate, offline minting (``async_prime_offline_controller``), and the pair
+    child descriptors — so they all funnel a stored bed type + variant through
+    this one resolver. Currently only ``leggett_platt`` needs it: an explicit
+    variant maps to leggett_wilinke (mlrm) / leggett_okin (okin) / leggett_gen2
+    (gen2), mirroring the explicit-variant branches of
+    ``controller_factory.create_controller``. ``auto``/unset can only be resolved
+    from a live connection, so the umbrella type is returned unchanged (and stays
+    offline-unsafe, which is correct — it can't be minted without connecting).
+    """
+    if bed_type == BED_TYPE_LEGGETT_PLATT:
+        if protocol_variant == LEGGETT_VARIANT_MLRM:
+            return BED_TYPE_LEGGETT_WILINKE
+        if protocol_variant == LEGGETT_VARIANT_OKIN:
+            return BED_TYPE_LEGGETT_OKIN
+        if protocol_variant == LEGGETT_VARIANT_GEN2:
+            return BED_TYPE_LEGGETT_GEN2
+    return bed_type
 
 # Richmat protocol variants (auto-detected, but can be overridden)
 RICHMAT_VARIANT_NORDIC: Final = "nordic"

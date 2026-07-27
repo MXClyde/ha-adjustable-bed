@@ -448,6 +448,19 @@ class TestPairingPersistence:
         assert "either way" in result["description_placeholders"]["outcome"]
 
     @pytest.mark.parametrize("step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"])
+    async def test_an_existing_host_bond_is_the_default_action(
+        self, hass: HomeAssistant, step: str
+    ) -> None:
+        """Submitting the unchanged form must not pair over a proven bond."""
+        flow = self._new_pairing_flow(hass)
+        inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+        with _patch_inventory(inventory), _patch_local_prediction():
+            result = await getattr(flow, step)(None)
+
+        action_field = next(iter(result["data_schema"].schema))
+        assert action_field.default() == "use_existing_bond"
+
+    @pytest.mark.parametrize("step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"])
     async def test_a_bond_on_another_local_adapter_is_not_offered(
         self, hass: HomeAssistant, step: str
     ) -> None:
@@ -1076,7 +1089,7 @@ async def _open_options_form(hass: HomeAssistant, entry_id: str) -> Any:
     result = await hass.config_entries.options.async_init(entry_id)
     assert result["type"] == FlowResultType.MENU
     return await hass.config_entries.options.async_configure(
-        result["flow_id"], user_input={"next_step_id": "configure"}
+        result["flow_id"], user_input={"next_step_id": "settings"}
     )
 
 
@@ -2960,7 +2973,7 @@ class TestOptionsFlow:
             result = await _open_options_form(hass, mock_config_entry.entry_id)
 
         assert result["type"] == FlowResultType.FORM
-        assert result["step_id"] == "configure"
+        assert result["step_id"] == "settings"
 
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
@@ -3418,6 +3431,33 @@ async def test_the_probe_runs_once_even_if_the_progress_step_is_re_entered(
     assert connects.await_count == 1
 
 
+async def test_consumed_setup_progress_does_not_start_another_probe(
+    hass: HomeAssistant,
+) -> None:
+    """A late completion callback must keep returning progress-done."""
+    flow = AdjustableBedConfigFlow()
+    flow.hass = hass
+    flow._pending_entry = {
+        CONF_ADDRESS: "AA:BB:CC:DD:EE:01",
+        CONF_NAME: "Test Bed",
+    }
+    flow.async_begin_operation()
+    flow.operation.terminal_consumed = True
+
+    with (
+        patch.object(flow, "_async_start_probe_operation") as start_probe,
+        patch.object(
+            flow,
+            "async_run_operation_step",
+            new=AsyncMock(return_value={"type": FlowResultType.SHOW_PROGRESS_DONE}),
+        ),
+    ):
+        result = await flow.async_step_setup_progress()
+
+    assert result["type"] == FlowResultType.SHOW_PROGRESS_DONE
+    start_probe.assert_not_called()
+
+
 async def test_a_not_advertising_bed_offers_retry_and_still_allows_finishing(
     hass: HomeAssistant,
     mock_bluetooth_service_info: BluetoothServiceInfoBleak,
@@ -3438,6 +3478,7 @@ async def test_a_not_advertising_bed_offers_retry_and_still_allows_finishing(
         assert verify["step_id"] == "verify_connection"
         caps = verify["description_placeholders"]["capabilities"]
         assert "not currently advertising" in caps
+        assert "select **Check again**" in caps
         # Nothing may reach the BLE stack once the gate has refused.
         connects.assert_not_called()
 
@@ -3574,10 +3615,10 @@ def _transport_coordinator(error: Exception | None = None) -> tuple[Any, list[st
     return coordinator, entered
 
 
-async def _open_unpair(hass: HomeAssistant, entry_id: str) -> Any:
+async def _open_remove_bond(hass: HomeAssistant, entry_id: str) -> Any:
     result = await hass.config_entries.options.async_init(entry_id)
     return await hass.config_entries.options.async_configure(
-        result["flow_id"], user_input={"next_step_id": "unpair"}
+        result["flow_id"], user_input={"next_step_id": "remove_bond"}
     )
 
 
@@ -3588,9 +3629,9 @@ async def test_unpair_requires_confirmation_and_names_the_transport(
     mock_config_entry.add_to_hass(hass)
     inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
     with _patch_inventory(inventory):
-        result = await _open_unpair(hass, mock_config_entry.entry_id)
+        result = await _open_remove_bond(hass, mock_config_entry.entry_id)
     assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "unpair"
+    assert result["step_id"] == "remove_bond"
     placeholders = result["description_placeholders"]
     assert placeholders["address"] == _BONDED_ADDRESS
     assert placeholders["transport"] == "11:22:33:44:55:66"
@@ -3606,7 +3647,7 @@ async def test_cancelling_unpair_removes_nothing(
         _patch_inventory(inventory),
         patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
     ):
-        await _open_unpair(hass, mock_config_entry.entry_id)
+        await _open_remove_bond(hass, mock_config_entry.entry_id)
     removal.assert_not_called()
 
 
@@ -3631,9 +3672,9 @@ async def test_a_proxy_owned_bond_offers_no_host_side_removal(
         _patch_inventory(inventory),
         patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
     ):
-        result = await _open_unpair(hass, mock_config_entry.entry_id)
+        result = await _open_remove_bond(hass, mock_config_entry.entry_id)
     assert result["type"] == FlowResultType.ABORT
-    assert result["reason"] == "unpair_proxy_owned"
+    assert result["reason"] == "remove_bond_proxy_owned"
     removal.assert_not_called()
 
 
@@ -3647,9 +3688,9 @@ async def test_an_unreadable_bluez_refuses_to_unpair(
         _patch_inventory(inventory),
         patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
     ):
-        result = await _open_unpair(hass, mock_config_entry.entry_id)
+        result = await _open_remove_bond(hass, mock_config_entry.entry_id)
     assert result["type"] == FlowResultType.ABORT
-    assert result["reason"] == "unpair_bluez_unavailable"
+    assert result["reason"] == "remove_bond_bluez_unavailable"
     removal.assert_not_called()
 
 
@@ -3659,9 +3700,9 @@ async def test_no_bond_reports_nothing_to_do(
     mock_config_entry.add_to_hass(hass)
     inventory = LocalBondInventory(status=BluezReadStatus.OK, records=())
     with _patch_inventory(inventory):
-        result = await _open_unpair(hass, mock_config_entry.entry_id)
+        result = await _open_remove_bond(hass, mock_config_entry.entry_id)
     assert result["type"] == FlowResultType.ABORT
-    assert result["reason"] == "unpair_no_bond"
+    assert result["reason"] == "remove_bond_no_bond"
 
 
 async def test_a_confirmed_unpair_clears_the_bond_marker(
@@ -3681,7 +3722,7 @@ async def test_a_confirmed_unpair_clears_the_bond_marker(
             AsyncMock(return_value=removed),
         ),
     ):
-        confirm = await _open_unpair(hass, mock_config_entry.entry_id)
+        confirm = await _open_remove_bond(hass, mock_config_entry.entry_id)
         progress = await hass.config_entries.options.async_configure(
             confirm["flow_id"], user_input={}
         )
@@ -3694,9 +3735,55 @@ async def test_a_confirmed_unpair_clears_the_bond_marker(
         while progress["type"] == FlowResultType.SHOW_PROGRESS:
             progress = await hass.config_entries.options.async_configure(progress["flow_id"])
 
-    assert progress["step_id"] == "unpair_result"
+    assert progress["step_id"] == "remove_bond_result"
     assert "removed" in progress["description_placeholders"]["outcome"]
     assert CONF_BLE_BOND_ESTABLISHED not in mock_config_entry.data
+
+
+async def test_a_confirmed_unpair_does_not_reload_and_recreate_the_bond(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    """Persisting an explicit unpair must not reconnect with pairing enabled."""
+    from custom_components.adjustable_bed.__init__ import _async_update_listener
+    from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        data={**mock_config_entry.data, CONF_BLE_BOND_ESTABLISHED: True},
+    )
+    coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+    remove_listener = mock_config_entry.add_update_listener(_async_update_listener)
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+    removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=_bond_record())
+
+    try:
+        with (
+            _stubbed_coordinator(hass, mock_config_entry.entry_id, coordinator),
+            _patch_inventory(inventory),
+            patch(
+                "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
+                AsyncMock(return_value=removed),
+            ),
+            patch.object(
+                hass.config_entries, "async_reload", new_callable=AsyncMock
+            ) as reload_entry,
+        ):
+            confirm = await _open_remove_bond(hass, mock_config_entry.entry_id)
+            progress = await hass.config_entries.options.async_configure(
+                confirm["flow_id"], user_input={}
+            )
+            while progress["type"] == FlowResultType.SHOW_PROGRESS:
+                await hass.async_block_till_done()
+                progress = await hass.config_entries.options.async_configure(
+                    progress["flow_id"]
+                )
+
+            reload_entry.assert_not_awaited()
+    finally:
+        remove_listener()
+
+    assert CONF_BLE_BOND_ESTABLISHED not in mock_config_entry.data
+    assert coordinator._ble_bond_established is False
 
 
 async def test_an_unconfirmed_removal_keeps_the_bond_marker(
@@ -3720,7 +3807,7 @@ async def test_an_unconfirmed_removal_keeps_the_bond_marker(
             AsyncMock(return_value=failed),
         ),
     ):
-        confirm = await _open_unpair(hass, mock_config_entry.entry_id)
+        confirm = await _open_remove_bond(hass, mock_config_entry.entry_id)
         progress = await hass.config_entries.options.async_configure(
             confirm["flow_id"], user_input={}
         )
@@ -3728,7 +3815,7 @@ async def test_an_unconfirmed_removal_keeps_the_bond_marker(
             await hass.async_block_till_done()
             progress = await hass.config_entries.options.async_configure(progress["flow_id"])
 
-    assert progress["step_id"] == "unpair_result"
+    assert progress["step_id"] == "remove_bond_result"
     assert "not removed" in progress["description_placeholders"]["outcome"]
     assert mock_config_entry.data[CONF_BLE_BOND_ESTABLISHED] is True
 
@@ -3751,7 +3838,7 @@ async def test_unpair_releases_the_bed_before_touching_the_bond(
             AsyncMock(return_value=removed),
         ),
     ):
-        confirm = await _open_unpair(hass, mock_config_entry.entry_id)
+        confirm = await _open_remove_bond(hass, mock_config_entry.entry_id)
         progress = await hass.config_entries.options.async_configure(
             confirm["flow_id"], user_input={}
         )
@@ -3776,7 +3863,7 @@ async def test_a_bed_that_cannot_be_released_is_not_unpaired(
         _patch_inventory(inventory),
         patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
     ):
-        confirm = await _open_unpair(hass, mock_config_entry.entry_id)
+        confirm = await _open_remove_bond(hass, mock_config_entry.entry_id)
         progress = await hass.config_entries.options.async_configure(
             confirm["flow_id"], user_input={}
         )
@@ -4325,7 +4412,7 @@ async def test_unpair_removes_the_adapter_provenance_names_not_the_first(
             AsyncMock(return_value=removed),
         ) as removal,
     ):
-        confirm = await _open_unpair(hass, mock_config_entry.entry_id)
+        confirm = await _open_remove_bond(hass, mock_config_entry.entry_id)
         assert confirm["description_placeholders"]["transport"] == "AA:AA:AA:AA:AA:AA"
         progress = await hass.config_entries.options.async_configure(
             confirm["flow_id"], user_input={}
@@ -4350,10 +4437,10 @@ async def test_unpair_refuses_when_provenance_names_an_adapter_with_no_bond(
         _patch_inventory(inventory),
         patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
     ):
-        result = await _open_unpair(hass, mock_config_entry.entry_id)
+        result = await _open_remove_bond(hass, mock_config_entry.entry_id)
 
     assert result["type"] == FlowResultType.ABORT
-    assert result["reason"] == "unpair_ambiguous"
+    assert result["reason"] == "remove_bond_ambiguous"
     removal.assert_not_called()
 
 
@@ -4368,11 +4455,36 @@ async def test_unpair_refuses_two_bonds_with_no_provenance(
         _patch_inventory(inventory),
         patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
     ):
-        result = await _open_unpair(hass, mock_config_entry.entry_id)
+        result = await _open_remove_bond(hass, mock_config_entry.entry_id)
 
     assert result["type"] == FlowResultType.ABORT
-    assert result["reason"] == "unpair_ambiguous"
+    assert result["reason"] == "remove_bond_ambiguous"
     removal.assert_not_called()
+
+
+async def test_a_legacy_entry_uses_its_predicted_local_adapter_to_unpair(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    """A selected local path disambiguates legacy entries with two host bonds."""
+    first = _record_on("/org/bluez/hci0", "11:22:33:44:55:66")
+    second = _record_on("/org/bluez/hci1", "AA:AA:AA:AA:AA:AA")
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        data={
+            **mock_config_entry.data,
+            CONF_PREFERRED_ADAPTER: "AA:AA:AA:AA:AA:AA",
+        },
+    )
+    mock_config_entry.add_to_hass(hass)
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(first, second))
+    with (
+        _patch_inventory(inventory),
+        _patch_local_prediction("AA:AA:AA:AA:AA:AA", "hci1"),
+    ):
+        result = await _open_remove_bond(hass, mock_config_entry.entry_id)
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["description_placeholders"]["transport"] == "AA:AA:AA:AA:AA:AA"
 
 
 async def test_a_legacy_entry_with_one_bond_can_still_unpair_but_says_so(
@@ -4388,7 +4500,7 @@ async def test_a_legacy_entry_with_one_bond_can_still_unpair_but_says_so(
     only = _record_on("/org/bluez/hci0", "11:22:33:44:55:66")
     inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(only,))
     with _patch_inventory(inventory):
-        result = await _open_unpair(hass, mock_config_entry.entry_id)
+        result = await _open_remove_bond(hass, mock_config_entry.entry_id)
 
     assert result["type"] == FlowResultType.FORM
     assert (
@@ -4415,14 +4527,14 @@ async def test_unpair_refuses_when_the_bond_state_changed_after_confirmation(
         ),
         patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
     ):
-        confirm = await _open_unpair(hass, mock_config_entry.entry_id)
+        confirm = await _open_remove_bond(hass, mock_config_entry.entry_id)
         assert confirm["description_placeholders"]["transport"] == "11:22:33:44:55:66"
         result = await hass.config_entries.options.async_configure(
             confirm["flow_id"], user_input={}
         )
 
     assert result["type"] == FlowResultType.ABORT
-    assert result["reason"] == "unpair_changed"
+    assert result["reason"] == "remove_bond_changed"
     removal.assert_not_called()
 
 
@@ -4536,7 +4648,7 @@ async def test_a_replayed_confirmation_cannot_leave_a_removed_bond_marked(
             AsyncMock(return_value=removed),
         ),
     ):
-        confirm = await _open_unpair(hass, mock_config_entry.entry_id)
+        confirm = await _open_remove_bond(hass, mock_config_entry.entry_id)
         progress = await hass.config_entries.options.async_configure(
             confirm["flow_id"], user_input={}
         )
@@ -4555,11 +4667,15 @@ async def test_pairing_refuses_rather_than_bonding_through_another_adapter(
     """A bond belongs to whichever transport made it.
 
     Falling back to some other adapter would store it somewhere the user did not
-    choose, while the marker claimed pairing was done.
+    choose, while the marker claimed pairing was done. The refusal comes from
+    the freshness lookup rather than the prediction: only the lookup checks the
+    non-connectable bucket, which is where some proxies file a bed they can
+    connect to perfectly well.
     """
     flow = _pairing_flow(hass)
     flow._manual_data[CONF_PREFERRED_ADAPTER] = "hci0"
     elsewhere = ConnectionPath(source="proxy", transport=TransportClass.PROXY)
+    unavailable = AdvertisementEvidence(status=FreshnessStatus.SOURCE_UNAVAILABLE)
     with (
         patch(
             "custom_components.adjustable_bed.config_flow.async_predict_path",
@@ -4571,13 +4687,61 @@ async def test_pairing_refuses_rather_than_bonding_through_another_adapter(
             ),
         ),
         patch("bleak_retry_connector.establish_connection") as connects,
-        patch("custom_components.adjustable_bed.config_flow.async_wait_for_advertisement") as wait,
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
+            AsyncMock(return_value=(unavailable, None)),
+        ) as wait,
         pytest.raises(NotAdvertisingError),
     ):
         await flow._attempt_pairing("AA:BB:CC:DD:EE:01")
 
-    wait.assert_not_called()
+    # The pinned adapter is what was asked about, and nothing connected.
+    assert wait.await_args.kwargs["source"] == "hci0"
     connects.assert_not_called()
+
+
+async def test_a_pinned_proxy_seen_only_as_non_connectable_can_still_pair(
+    hass: HomeAssistant,
+) -> None:
+    """Some ESPHome proxies file a connectable bed in the non-connectable bucket.
+
+    The prediction only enumerates connectable scanners, so deciding there would
+    block pairing over exactly the proxy that Automatic mode uses happily.
+    """
+    flow = _pairing_flow(hass)
+    flow._manual_data[CONF_PREFERRED_ADAPTER] = "bedroom_proxy"
+    fresh = AdvertisementEvidence(
+        status=FreshnessStatus.FRESH, age_seconds=1.0, rssi=-60, source="bedroom_proxy"
+    )
+    device = MagicMock()
+    client = MagicMock()
+    client.pair = AsyncMock()
+    client.disconnect = AsyncMock()
+    with (
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_predict_path",
+            return_value=PathPrediction(
+                chosen=None,
+                paths=(),
+                preferred_adapter="bedroom_proxy",
+                preferred_available=False,
+            ),
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
+            AsyncMock(return_value=(fresh, device)),
+        ) as wait,
+        patch(
+            "bleak_retry_connector.establish_connection",
+            new=AsyncMock(return_value=client),
+        ) as connects,
+    ):
+        await flow._attempt_pairing("AA:BB:CC:DD:EE:01")
+
+    # Asked about the pinned proxy, and connected through it rather than
+    # refusing on the prediction's say-so.
+    assert wait.await_args.kwargs["source"] == "bedroom_proxy"
+    assert connects.await_args.args[1] is device
 
 
 async def test_a_legacy_entry_now_routing_through_a_proxy_cannot_unpair(
@@ -4599,10 +4763,10 @@ async def test_a_legacy_entry_now_routing_through_a_proxy_cannot_unpair(
         ),
         patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
     ):
-        result = await _open_unpair(hass, mock_config_entry.entry_id)
+        result = await _open_remove_bond(hass, mock_config_entry.entry_id)
 
     assert result["type"] == FlowResultType.ABORT
-    assert result["reason"] == "unpair_proxy_owned"
+    assert result["reason"] == "remove_bond_proxy_owned"
     removal.assert_not_called()
 
 
@@ -4753,7 +4917,7 @@ async def test_a_confirmed_unpair_persists_without_the_result_screen(
             AsyncMock(return_value=removed),
         ),
     ):
-        confirm = await _open_unpair(hass, mock_config_entry.entry_id)
+        confirm = await _open_remove_bond(hass, mock_config_entry.entry_id)
         progress = await hass.config_entries.options.async_configure(
             confirm["flow_id"], user_input={}
         )
@@ -5010,3 +5174,215 @@ async def test_bond_replacement_reuses_the_device_it_already_resolved(
     # Resolved once, before the removal, and carried into the replacement.
     assert wait.await_count == 1
     assert attempt.await_args.kwargs["device"] is device
+
+
+async def test_a_detected_usable_bond_is_the_default_action(hass: HomeAssistant) -> None:
+    """Submitting the form unchanged must not re-pair on top of a good bond."""
+    flow = _pairing_flow(hass)
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+
+    with _patch_inventory(inventory), _patch_local_prediction():
+        result = await flow.async_step_manual_pairing(None)
+
+    key = next(iter(result["data_schema"].schema))
+    assert key.default() == "use_existing_bond"
+
+
+async def test_a_legacy_entry_can_unpair_the_adapter_it_is_pinned_to(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    """Without provenance, the route the bed will use answers "which adapter"."""
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        data={
+            **mock_config_entry.data,
+            CONF_BLE_BOND_ESTABLISHED: True,
+            CONF_PREFERRED_ADAPTER: "11:22:33:44:55:66",
+        },
+    )
+    # Two bonded adapters and no recorded owner: ambiguous unless the chosen
+    # route is allowed to pick.
+    inventory = LocalBondInventory(
+        status=BluezReadStatus.OK,
+        records=(
+            _bond_record(adapter_address="11:22:33:44:55:66"),
+            LocalBondRecord(
+                address=_BONDED_ADDRESS,
+                device_path="/org/bluez/hci1/dev_AA_BB_CC_DD_EE_FF",
+                adapter_path="/org/bluez/hci1",
+                adapter_address="22:33:44:55:66:77",
+                paired=True,
+                bonded=True,
+            ),
+        ),
+    )
+    with _patch_inventory(inventory), _patch_local_prediction("11:22:33:44:55:66", "hci0"):
+        result = await _open_remove_bond(hass, mock_config_entry.entry_id)
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "remove_bond"
+    assert result["description_placeholders"]["transport"] == "11:22:33:44:55:66"
+
+
+async def test_a_confirmed_removal_survives_a_cancelled_dialog(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    """Cancelling mid-removal must not strand the entry's bond markers.
+
+    BlueZ may already have accepted RemoveDevice when the user closes the
+    dialog, and an entry that still claims a bond makes every later connection
+    skip pairing.
+    """
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        data={**mock_config_entry.data, CONF_BLE_BOND_ESTABLISHED: True},
+    )
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+    removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=_bond_record())
+    inside = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_removal(_record: LocalBondRecord) -> BondRemovalResult:
+        inside.set()
+        await release.wait()
+        return removed
+
+    with (
+        _patch_inventory(inventory),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
+            _slow_removal,
+        ),
+    ):
+        confirm = await _open_remove_bond(hass, mock_config_entry.entry_id)
+        progress = await hass.config_entries.options.async_configure(
+            confirm["flow_id"], user_input={}
+        )
+        assert progress["type"] == FlowResultType.SHOW_PROGRESS
+        await inside.wait()
+        # The user closes the dialog while BlueZ is mid-removal.
+        hass.config_entries.options.async_abort(progress["flow_id"])
+        release.set()
+
+
+async def test_cancelling_after_removal_starts_still_applies_the_confirmed_result(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    """Closing progress cannot strand state after BlueZ may have removed the bond."""
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        data={**mock_config_entry.data, CONF_BLE_BOND_ESTABLISHED: True},
+    )
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+    removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=_bond_record())
+    removal_started = asyncio.Event()
+    finish_removal = asyncio.Event()
+
+    async def _slow_confirmed_removal(_record: LocalBondRecord) -> BondRemovalResult:
+        removal_started.set()
+        await finish_removal.wait()
+        return removed
+
+    with (
+        _patch_inventory(inventory),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
+            side_effect=_slow_confirmed_removal,
+        ),
+    ):
+        confirm = await _open_remove_bond(hass, mock_config_entry.entry_id)
+        progress = await hass.config_entries.options.async_configure(
+            confirm["flow_id"], user_input={}
+        )
+        async with asyncio.timeout(5):
+            await removal_started.wait()
+
+        hass.config_entries.options.async_abort(progress["flow_id"])
+        finish_removal.set()
+        await hass.async_block_till_done()
+
+    assert CONF_BLE_BOND_ESTABLISHED not in mock_config_entry.data
+
+
+def test_shown_option_values_coerces_defaults():
+    """String schema defaults are coerced like user_input, so an unchanged
+    numeric field is not mistaken for a change in the paired-options save."""
+    import voluptuous as vol
+
+    from custom_components.adjustable_bed.config_flow import _shown_option_values
+
+    schema = {
+        vol.Optional("pulse", default="10"): vol.Coerce(int),
+        vol.Optional("angle", default="68.0"): vol.Coerce(float),
+    }
+    assert _shown_option_values(schema) == {"pulse": 10, "angle": 68.0}
+
+
+async def test_the_probe_hands_its_client_to_the_operation_cleanup(
+    hass: HomeAssistant,
+) -> None:
+    """A cancelled flow must still have something to close.
+
+    The probe's own disconnect is an ordinary await and can be interrupted, so
+    the operation has to own the client from the moment it exists or the bed's
+    single connection stays open until the transport gives up on it.
+    """
+    flow = AdjustableBedConfigFlow()
+    flow.hass = hass
+    client = _fake_connected_client()
+    tracked: list[Any] = []
+
+    with (
+        _patch_gate("hci0", -55),
+        patch("bleak_retry_connector.establish_connection", AsyncMock(return_value=client)),
+        patch(
+            "custom_components.adjustable_bed.config_flow.discover_services",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.read_ble_device_info",
+            AsyncMock(return_value=(None, None)),
+        ),
+    ):
+        await flow._probe_capabilities(
+            "AA:BB:CC:DD:EE:01",
+            "auto",
+            BED_TYPE_OKIMAT,
+            client_tracker=tracked.append,
+        )
+
+    # Registered while live, cleared only after the disconnect completed.
+    assert tracked == [client, None]
+
+
+async def test_an_interrupted_disconnect_leaves_the_probe_client_tracked(
+    hass: HomeAssistant,
+) -> None:
+    """Clearing the tracker before the link is really closed would orphan it."""
+    flow = AdjustableBedConfigFlow()
+    flow.hass = hass
+    client = _fake_connected_client()
+    client.disconnect = AsyncMock(side_effect=asyncio.CancelledError)
+    tracked: list[Any] = []
+
+    with (
+        _patch_gate("hci0", -55),
+        patch("bleak_retry_connector.establish_connection", AsyncMock(return_value=client)),
+        patch(
+            "custom_components.adjustable_bed.config_flow.discover_services",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.read_ble_device_info",
+            AsyncMock(return_value=(None, None)),
+        ),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await flow._probe_capabilities(
+            "AA:BB:CC:DD:EE:01",
+            "auto",
+            BED_TYPE_OKIMAT,
+            client_tracker=tracked.append,
+        )
+
+    assert tracked == [client]
