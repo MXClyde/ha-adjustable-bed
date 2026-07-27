@@ -150,6 +150,8 @@ def _async_sighting_from_scanner(
     hass: HomeAssistant,
     address: str,
     source: str,
+    *,
+    connectable: bool = True,
 ) -> _Sighting | None:
     """Return what one specific scanner last heard from ``address``.
 
@@ -159,7 +161,7 @@ def _async_sighting_from_scanner(
     """
     try:
         scanner_devices = bluetooth.async_scanner_devices_by_address(
-            hass, address, connectable=True
+            hass, address, connectable=connectable
         )
     except Exception:  # noqa: BLE001 - fall back to the merged history
         _LOGGER.debug("Per-scanner freshness lookup failed for %s", address, exc_info=True)
@@ -185,7 +187,6 @@ def _async_sighting_from_scanner(
 def _async_sighting(
     hass: HomeAssistant,
     address: str,
-    source: str | None,
     *,
     connectable: bool = True,
 ) -> _Sighting | None:
@@ -232,6 +233,13 @@ def async_check_advertisement(
     if source:
         sighting = _async_sighting_from_scanner(hass, normalized, source)
         if sighting is None:
+            # Same proxy quirk as below: a scanner can report a connectable bed
+            # as non-connectable, and a pinned adapter deserves that fallback
+            # just as much as the merged view does.
+            sighting = _async_sighting_from_scanner(
+                hass, normalized, source, connectable=False
+            )
+        if sighting is None:
             # The chosen transport cannot see the bed. Report that specifically
             # rather than falling back to a scanner the user did not select: a
             # proxy across the house still hearing the bed says nothing about
@@ -241,14 +249,14 @@ def async_check_advertisement(
                 status=FreshnessStatus.SOURCE_UNAVAILABLE, source=source
             )
     else:
-        sighting = _async_sighting(hass, normalized, source)
+        sighting = _async_sighting(hass, normalized)
         if sighting is None:
             # Some ESPHome proxies have been observed classifying a perfectly
             # connectable bed as non-connectable. The integration has always
             # allowed that fallback, so losing it here would stop setup working
             # on exactly the hardware it was added for. The freshness rules
             # still apply to whatever is found.
-            sighting = _async_sighting(hass, normalized, source, connectable=False)
+            sighting = _async_sighting(hass, normalized, connectable=False)
         if sighting is None:
             _LOGGER.debug("No advertisement history for %s", address)
             return AdvertisementEvidence(status=FreshnessStatus.MISSING, source=source)

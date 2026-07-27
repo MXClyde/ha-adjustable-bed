@@ -57,6 +57,7 @@ from .bluetooth_transport import ConnectionPath, PathPrediction, TransportClass
 
 if TYPE_CHECKING:
     from bleak import BleakClient
+    from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -192,6 +193,19 @@ class BluetoothOperationMixin:
     _operation: SetupOperationState | None = None
     _operation_task: asyncio.Task[OperationResult] | None = None
     _operation_client: BleakClient | None = None
+
+    if TYPE_CHECKING:
+        # Supplied by the flow handler this is mixed into. Declared rather than
+        # inherited so the mixin stays usable with ConfigFlow, OptionsFlow and
+        # RepairsFlow, which do not share a base that carries these.
+        hass: HomeAssistant
+        flow_id: str
+
+        def async_update_progress(self, progress: float) -> None: ...
+
+        def async_show_progress(self, **kwargs: Any) -> Any: ...
+
+        def async_show_progress_done(self, *, next_step_id: str) -> Any: ...
     _refresh_task: asyncio.Task[None] | None = None
     _refresh_pending: bool = False
 
@@ -224,6 +238,16 @@ class BluetoothOperationMixin:
         what makes double submits harmless.
         """
         previous = self._operation
+        # Defensive: a caller should only start an operation when none is
+        # running, but replacing the state while a task still holds a client
+        # would orphan both, so tear the old one down first.
+        if self._operation_task is not None and not self._operation_task.done():
+            self._operation_task.cancel()
+        if self._operation_client is not None:
+            stray, self._operation_client = self._operation_client, None
+            hass = getattr(self, "hass", None)
+            if hass is not None:
+                hass.async_create_task(_async_disconnect_quietly(stray))
         self._operation = SetupOperationState(
             generation=(previous.generation + 1) if previous is not None else 1,
             action=action,
@@ -259,7 +283,7 @@ class BluetoothOperationMixin:
         if progress is not None:
             state.progress = progress
             with contextlib.suppress(Exception):
-                self.async_update_progress(progress)  # type: ignore[attr-defined]
+                self.async_update_progress(progress)
         if changed:
             self.async_refresh_progress_view()
 
@@ -365,14 +389,14 @@ class BluetoothOperationMixin:
         state = self.operation
 
         if self._operation_task is None and not state.terminal_consumed:
-            self._operation_task = self.hass.async_create_task(  # type: ignore[attr-defined]
+            self._operation_task = self.hass.async_create_task(
                 self._async_guarded_worker(worker),
                 eager_start=False,
             )
 
         task = self._operation_task
         if task is not None and not task.done():
-            return self.async_show_progress(  # type: ignore[attr-defined]
+            return self.async_show_progress(
                 step_id=step_id,
                 progress_action=state.action.value,
                 progress_task=task,
@@ -399,7 +423,7 @@ class BluetoothOperationMixin:
                     detail=str(err) or err.__class__.__name__,
                 )
 
-        return self.async_show_progress_done(next_step_id=next_step_id)  # type: ignore[attr-defined]
+        return self.async_show_progress_done(next_step_id=next_step_id)
 
     async def _async_guarded_worker(self, worker: OperationWorker) -> OperationResult:
         """Run a worker, guaranteeing the BLE client is released afterwards."""

@@ -1829,7 +1829,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 "address": address,
                 "setup_note": f"\n{octo_split_note}" if octo_split_note else "",
                 "transport": await self._async_transport_note(
-                    address, ADAPTER_AUTO, defaults_bed_type
+                    address,
+                    discovery_source,
+                    defaults_bed_type,
+                    preselected_protocol_variant,
                 ),
             },
         )
