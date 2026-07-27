@@ -60,6 +60,11 @@ custom_components/adjustable_bed/
 │       select.py / number.py / binary_sensor.py   # HA entity platforms
 ├── diagnostics.py        # HA diagnostics download support
 ├── ble_diagnostics.py    # BLE protocol capture for new bed support
+├── bluetooth_transport.py # Which path (host adapter vs proxy) reaches a bed
+├── bluetooth_freshness.py # Refuses to connect on stale advertisement history
+├── bluetooth_bond.py     # Exact host BlueZ bond inspection and removal
+├── bond_verification.py  # Strict bond proof + who owns the bond
+├── setup_operation.py    # Progress-backed background operations for flows
 └── ...                   # Helpers: adapter, validators, redaction, support_report, etc.
 ```
 
