@@ -16,8 +16,9 @@ fully unit-testable. See ``docs/design/dual-bed-4.0-plan.md``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -880,6 +881,22 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
 
     async def async_disconnect(self, reason: str = "intentional") -> None:
         await self._single_inner.async_disconnect(reason)
+
+    @contextlib.asynccontextmanager
+    async def async_transport_operation(self, operation: str) -> AsyncIterator[None]:
+        """Hold the one physical link still for a whole transport operation.
+
+        This surface keeps the entry's own address, so it is offered the bond
+        actions. The locks and the link both live on the inner coordinator, so
+        the gate has to be its gate rather than a second one that guards
+        nothing.
+        """
+        async with self._single_inner.async_transport_operation(operation):
+            yield
+
+    def apply_confirmed_bond_removal(self) -> None:
+        """Clear the bond state held by the coordinator that owns the link."""
+        self._single_inner.apply_confirmed_bond_removal()
 
     async def async_shutdown(self) -> None:
         for unsub in self._child_unsubs:

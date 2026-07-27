@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 from copy import copy
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -35,6 +36,9 @@ from custom_components.adjustable_bed.bluetooth_bond import (
 from custom_components.adjustable_bed.bluetooth_freshness import (
     AdvertisementEvidence,
     FreshnessStatus,
+)
+from custom_components.adjustable_bed.bluetooth_freshness import (
+    _monotonic as freshness_monotonic,
 )
 from custom_components.adjustable_bed.bluetooth_transport import (
     ConnectionPath,
@@ -3498,6 +3502,75 @@ async def test_a_not_advertising_bed_offers_retry_and_still_allows_finishing(
     assert created["data"][CONF_ADDRESS] == mock_bluetooth_service_info.address
 
 
+async def test_an_advertising_bed_that_cannot_be_resolved_offers_retry(
+    hass: HomeAssistant,
+    mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+    enable_custom_integrations,
+) -> None:
+    """A resolution gap must be retryable, not reported as "device not found".
+
+    The bed is advertising, but Home Assistant's scanner view changes between
+    the freshness check and the device lookup, so no BLEDevice comes back. That
+    is the case that most deserves a Check again, and it used to be the one case
+    that did not get one: the report stayed FRESH with no device, which fell
+    through to the plain "device not found" branch and offered no retry action.
+
+    The real gate and wait helper run here (only the device resolution is
+    faked), so the assertions cover the whole path rather than a hand-built
+    report. The advertisement is timestamped against the gate's own clock, which
+    is left running so the bounded wait below can actually expire.
+    """
+    _freshness = "custom_components.adjustable_bed.bluetooth_freshness"
+    advertising = SimpleNamespace(
+        source="hci0",
+        rssi=-60,
+        time=freshness_monotonic() - 1.0,
+        address=mock_bluetooth_service_info.address,
+    )
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=mock_bluetooth_service_info
+    )
+    with (
+        patch.object(AdjustableBedConfigFlow, "_verification_possible", return_value=True),
+        patch("bleak_retry_connector.establish_connection") as connects,
+        patch(f"{_freshness}.async_path_for_source", return_value=None),
+        patch(
+            f"{_freshness}.bluetooth.async_last_service_info", return_value=advertising
+        ),
+        # The bed is advertising; only the handle to it is missing.
+        patch(f"{_freshness}.async_resolve_ble_device", return_value=None),
+        # Keep the built-in wait from holding the test for its full duration.
+        patch(
+            "custom_components.adjustable_bed.config_flow"
+            "._PROBE_ADVERTISEMENT_WAIT_SECONDS",
+            0.01,
+        ),
+    ):
+        progress = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={CONF_PREFERRED_ADAPTER: "auto"}
+        )
+        verify = await _advance_progress(hass, progress)
+        assert verify["step_id"] == "verify_connection"
+
+        caps = verify["description_placeholders"]["capabilities"]
+        assert "could not open a connection" in caps
+        assert "**Check again**" in caps
+        # The bed answered a scan, so neither of the old messages applies.
+        assert "not currently advertising" not in caps
+        assert "Device not found" not in caps
+        # Nothing may reach the BLE stack without a resolved device.
+        connects.assert_not_called()
+
+        # The retry affordance must actually be on the form.
+        assert "action" in {str(key) for key in verify["data_schema"].schema}
+
+        created = await hass.config_entries.flow.async_configure(
+            verify["flow_id"], user_input={"action": "finish"}
+        )
+    assert created["type"] == FlowResultType.CREATE_ENTRY
+
+
 async def test_abandoning_the_flow_mid_probe_leaves_no_connected_client(
     hass: HomeAssistant,
     mock_bluetooth_service_info: BluetoothServiceInfoBleak,
@@ -4083,7 +4156,7 @@ async def test_unverified_bond_removal_does_not_claim_the_bond_remains(
     attempt.assert_not_called()
     assert result.outcome is OperationOutcome.UNPAIR_UNCONFIRMED
     outcome = await flow._async_pairing_outcome_note(result, None)
-    assert "not confirm whether it is gone" in outcome
+    assert "could not confirm what happened to the existing bond" in outcome
 
 
 async def test_a_sleeping_bed_never_loses_its_bond_to_a_replacement(
@@ -4970,7 +5043,11 @@ async def test_replacement_revalidates_the_bond_under_the_address_lock(
 
     async def changed_inventory(_address: str) -> LocalBondInventory:
         assert lock.locked()
-        return LocalBondInventory(status=BluezReadStatus.OK)
+        # A bond is still there, it is simply not the one that was confirmed.
+        return LocalBondInventory(
+            status=BluezReadStatus.OK,
+            records=(_bond_record(adapter_address="AA:AA:AA:AA:AA:AA"),),
+        )
 
     with (
         patch(
@@ -4986,6 +5063,55 @@ async def test_replacement_revalidates_the_bond_under_the_address_lock(
     attempt.assert_not_called()
     assert result.outcome is OperationOutcome.UNPAIR_FAILED
     assert result.detail == "bond_changed_before_removal"
+
+
+async def test_an_unreadable_revalidation_does_not_claim_the_bond_survived(
+    hass: HomeAssistant,
+) -> None:
+    """A failed BlueZ read proves nothing, so it must not be reported as a failure.
+
+    "The old bond is still in place" is a claim about BlueZ that a read which
+    never answered cannot support, and it sends the user looking for a bond that
+    may not be there.
+    """
+    flow = _pairing_flow(hass)
+    address = flow._manual_data[CONF_ADDRESS]
+
+    with (
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.UNAVAILABLE)),
+        patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
+        patch.object(flow, "_attempt_pairing") as attempt,
+    ):
+        result = await flow._async_replace_bond(address, _bond_record())
+
+    # Nothing was removed and nothing was paired, so neither may be claimed.
+    removal.assert_not_called()
+    attempt.assert_not_called()
+    assert result.outcome is OperationOutcome.UNPAIR_UNCONFIRMED
+    assert result.detail == "bond_unreadable_before_removal"
+
+
+async def test_a_bond_already_gone_pairs_instead_of_refusing(
+    hass: HomeAssistant,
+) -> None:
+    """Nothing destructive is left to do, and the user still asked to pair."""
+    flow = _pairing_flow(hass)
+    address = flow._manual_data[CONF_ADDRESS]
+
+    with (
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK)),
+        patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
+        patch.object(
+            flow, "_attempt_pairing", AsyncMock(return_value=_verified_evidence())
+        ) as attempt,
+    ):
+        result = await flow._async_replace_bond(address, _bond_record())
+
+    # Removing a record that is not there would be the only thing that could
+    # fail here, so it is skipped rather than attempted and reported.
+    removal.assert_not_called()
+    attempt.assert_awaited_once()
+    assert result.outcome is OperationOutcome.SUCCESS
 
 
 async def test_replacement_holds_the_address_lock_until_pairing_finishes(

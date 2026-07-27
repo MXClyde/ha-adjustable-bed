@@ -5026,6 +5026,46 @@ class TestBondProvenanceAndTransportGate:
 
         await coordinator.async_shutdown()
 
+    async def test_a_repair_pairing_discards_the_previous_bonds_evidence(
+        self, hass: HomeAssistant, mock_config_entry
+    ) -> None:
+        """A repair persists the owner this attempt proved, so it must be fresh.
+
+        Pairing a live link reports success straight after client.pair(), with
+        no new authenticated read, so evidence left by the previous bond would
+        be persisted as provenance for its replacement.
+        """
+        from custom_components.adjustable_bed.bluetooth_transport import TransportClass
+        from custom_components.adjustable_bed.bond_verification import (
+            BondEvidence,
+            BondOwner,
+            BondVerificationStatus,
+        )
+        from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+
+        mock_config_entry.add_to_hass(hass)
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._last_bond_evidence = BondEvidence(
+            status=BondVerificationStatus.VERIFIED,
+            owner=BondOwner(
+                transport=TransportClass.LOCAL, source="old-adapter", adapter="hci9"
+            ),
+            operation="runtime_authenticated_read",
+            observed_at="2026-07-01T00:00:00+00:00",
+        )
+        client = MagicMock()
+        client.is_connected = True
+        client.pair = AsyncMock(return_value=True)
+        client.disconnect = AsyncMock()
+        coordinator._client = client
+
+        assert await coordinator.async_pair_now() is True
+
+        # Pairing succeeded but nothing proved who owns the new bond.
+        assert coordinator.last_bond_evidence is None
+
+        await coordinator.async_shutdown()
+
     async def test_a_confirmed_removal_stops_suppressing_the_next_pairing(
         self, hass: HomeAssistant, mock_config_entry
     ) -> None:

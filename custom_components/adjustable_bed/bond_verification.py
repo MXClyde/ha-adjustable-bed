@@ -39,6 +39,7 @@ from .bluetooth_transport import ConnectionPath, TransportClass
 from .const import (
     BED_TYPE_OKIMAT,
     BED_TYPE_OKIN_UUID,
+    CONF_BLE_BOND_CONTEXT,
     DEVICE_INFO_CHARS,
     DEVICE_INFO_READ_TIMEOUT,
 )
@@ -48,10 +49,6 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-# Entry-data key holding who owns the bond and how it was proven. Kept separate
-# from the legacy boolean so an entry written by an older version is never
-# mistaken for one with real provenance.
-CONF_BLE_BOND_CONTEXT = "ble_bond_context"
 
 BOND_CONTEXT_VERSION = 1
 

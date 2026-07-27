@@ -1382,6 +1382,12 @@ class AdjustableBedCoordinator:
             self._clear_ble_bond_established()
             self._skip_pair_next_attempt = False
             self._bond_probe_timed_out = False
+            # A repair persists the owner this attempt proves. Pairing a live
+            # link can succeed without running a new authenticated read, so an
+            # observation left by the previous bond - possibly one that has
+            # since been removed - would otherwise be persisted as provenance
+            # for its replacement.
+            self._last_bond_evidence = None
 
             if self._client is not None and self._client.is_connected:
                 pairing_details: dict[str, Any] = {}

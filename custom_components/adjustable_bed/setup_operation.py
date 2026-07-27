@@ -89,6 +89,10 @@ class OperationOutcome(StrEnum):
 
     SUCCESS = "success"
     NOT_ADVERTISING = "not_advertising"
+    # The bed *was* advertising, but Home Assistant could not turn that into a
+    # connectable device in time. Kept apart from NOT_ADVERTISING so the advice
+    # is "try again" rather than "go wake your bed".
+    DEVICE_UNRESOLVED = "device_unresolved"
     CONNECTION_FAILED = "connection_failed"
     CONNECTION_IN_USE = "connection_in_use"
     NO_CONNECTION_SLOTS = "no_connection_slots"

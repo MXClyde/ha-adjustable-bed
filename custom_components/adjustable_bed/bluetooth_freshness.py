@@ -33,7 +33,7 @@ import logging
 import math
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -83,6 +83,10 @@ class FreshnessStatus(StrEnum):
     The failures are kept apart rather than collapsed into one "not seen":
     diagnostics need to distinguish "Home Assistant has never heard of this
     address" from "the record it has carries a timestamp we cannot trust".
+
+    ``DEVICE_UNRESOLVED`` is the odd one out: the advertising evidence was good,
+    but no ``BLEDevice`` could be built from it. That is a transient gap rather
+    than a silent bed, so it must not be reported as "not advertising".
     """
 
     FRESH = "fresh"
@@ -92,6 +96,7 @@ class FreshnessStatus(StrEnum):
     INVALID_TIMESTAMP = "invalid_timestamp"
     SOURCE_UNAVAILABLE = "source_unavailable"
     BEFORE_REQUIRED_TIME = "before_required_time"
+    DEVICE_UNRESOLVED = "device_unresolved"
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +125,14 @@ class AdvertisementEvidence:
 
     @property
     def error_key(self) -> str:
-        """Return the translation key describing why the bed is unreachable."""
+        """Return the translation key describing why the bed is unreachable.
+
+        A bed that advertised but could not be resolved into a ``BLEDevice`` is
+        reported separately: telling that user the bed is not advertising would
+        send them off to wake a bed that is already awake.
+        """
+        if self.status is FreshnessStatus.DEVICE_UNRESOLVED:
+            return "device_unresolved"
         return "not_advertising"
 
 
@@ -384,6 +396,12 @@ def async_gate_connection(
 
     The device is resolved *after* the check and never reused from discovery, so
     a connection attempt always targets the scanner that just heard the bed.
+
+    Guarantees that ``evidence.is_fresh`` implies a device: Home Assistant's
+    scanner view can change between the history check and the resolution, and a
+    caller told "fresh" while holding ``None`` would have to invent its own
+    reason for the failure. That is exactly how a momentary resolution gap ends
+    up presented as "this bed is not advertising".
     """
     evidence = async_check_advertisement(
         hass,
@@ -394,7 +412,10 @@ def async_gate_connection(
     )
     if not evidence.is_fresh:
         return evidence, None
-    return evidence, async_resolve_ble_device(hass, address, evidence.source or source)
+    device = async_resolve_ble_device(hass, address, evidence.source or source)
+    if device is None:
+        return replace(evidence, status=FreshnessStatus.DEVICE_UNRESOLVED), None
+    return evidence, device
 
 
 async def async_wait_for_advertisement(

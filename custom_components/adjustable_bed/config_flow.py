@@ -379,9 +379,10 @@ _PAIRING_OUTCOME_FALLBACKS: Final[dict[str, str]] = {
         "on the Home Assistant host."
     ),
     "removal_unconfirmed": (
-        "⚠️ Home Assistant asked BlueZ to remove the existing bond but could "
-        "not confirm whether it is gone, so pairing was not attempted. Check "
-        "the host's Bluetooth settings, then select **Try again**."
+        "⚠️ Home Assistant could not confirm what happened to the existing "
+        "bond, so pairing was not attempted and the bond may still be in "
+        "place. Check the host's Bluetooth settings, then select **Try "
+        "again**."
     ),
     "removal_failed": (
         "❌ The existing bond could not be removed, so pairing was not attempted "
@@ -3180,15 +3181,40 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             )
         async with async_get_connect_lock(self.hass, address):
             current = await async_read_local_bonds(address)
-            if current.sole_bond != record:
+            # Three different things can make this re-read disagree with the
+            # confirmation, and only one of them is "the bond is still there".
+            if not current.readable:
+                # A failed or timed-out read proves nothing either way. Nothing
+                # was removed, so say the state could not be confirmed rather
+                # than assert the old bond survived.
                 _LOGGER.warning(
-                    "Not replacing the bond for %s: the confirmed BlueZ record changed",
+                    "Not replacing the bond for %s: the host's bonds could not be read (%s)",
                     address,
+                    current.status,
                 )
                 return OperationResult(
-                    outcome=OperationOutcome.UNPAIR_FAILED,
-                    detail="bond_changed_before_removal",
+                    outcome=OperationOutcome.UNPAIR_UNCONFIRMED,
+                    detail="bond_unreadable_before_removal",
                 )
+            if current.sole_bond != record:
+                if current.bonded_records:
+                    _LOGGER.warning(
+                        "Not replacing the bond for %s: the confirmed BlueZ record changed",
+                        address,
+                    )
+                    return OperationResult(
+                        outcome=OperationOutcome.UNPAIR_FAILED,
+                        detail="bond_changed_before_removal",
+                    )
+                # Readable and empty: something else already removed the bond,
+                # so the destructive half of this transaction has nothing left to
+                # do. Refusing here would deny the pairing the user asked for
+                # over a record that is already gone.
+                _LOGGER.info(
+                    "The bond for %s was already gone; pairing without removing anything",
+                    address,
+                )
+                return await self._async_pair_and_classify(address, "replace_local", device)
             self.async_report_action(SetupAction.UNPAIRING)
             removal = await async_remove_local_bond(record)
             if not removal.succeeded:
@@ -3624,7 +3650,9 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             path_reporter=self.async_report_path,
             client_tracker=self.async_track_client,
         )
-        if report.freshness is not None and report.freshness is not FreshnessStatus.FRESH:
+        if report.freshness is FreshnessStatus.DEVICE_UNRESOLVED:
+            outcome = OperationOutcome.DEVICE_UNRESOLVED
+        elif report.freshness is not None and report.freshness is not FreshnessStatus.FRESH:
             outcome = OperationOutcome.NOT_ADVERTISING
         elif not report.connected:
             outcome = OperationOutcome.CONNECTION_FAILED
@@ -3727,7 +3755,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         report.freshness = evidence.status
         report.rssi = evidence.rssi
         if not evidence.is_fresh or device is None:
-            report.error = "not_advertising"
+            # The gate reports an unresolvable device as its own status, so the
+            # error key distinguishes "the bed is silent" from "we briefly lost
+            # the handle to a bed that is advertising fine".
+            report.error = evidence.error_key
             _LOGGER.debug("Skipping the capability probe for %s: %s", address, evidence.status)
             return report
 
@@ -3814,6 +3845,20 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
     async def _format_capabilities(self, report: CapabilityReport) -> str:
         """Build the ✅/❌/⚠️/ℹ️ markdown checklist shown in verify_connection."""
         lines: list[str] = []
+
+        if report.freshness is FreshnessStatus.DEVICE_UNRESOLVED:
+            # The bed answered a scan, so "wake it up" would be wrong advice.
+            # Home Assistant simply had no connectable handle for it at that
+            # instant, which is what Check again is for.
+            lines.append(
+                "⚠️ This bed is advertising, but Home Assistant could not open a connection "
+                "to it just now, so no connection was attempted."
+            )
+            lines.append(
+                "This is usually momentary. Select **Check again**, or finish setup and let "
+                "the integration keep trying."
+            )
+            return "\n".join(lines)
 
         if report.freshness is not None and report.freshness is not FreshnessStatus.FRESH:
             # Distinguished from a failed connection on purpose: the bed never

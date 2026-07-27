@@ -77,6 +77,19 @@ CONF_BLE_BOND_ESTABLISHED: Final = "ble_bond_established"
 # stacks (notably ESPHome proxies) do not carry a bond across connections, so
 # trusting the marker there costs a guaranteed-failed attempt on every connect.
 CONF_BLE_BOND_MARKER_UNRELIABLE: Final = "ble_bond_marker_unreliable"
+# Entry-data key holding who owns the bond and how it was proven. Kept separate
+# from the legacy boolean so an entry written by an older version is never
+# mistaken for one with real provenance. Defined here rather than in
+# bond_verification so the pure paired-bed helpers can carry bond state across
+# a split without importing the Bluetooth stack.
+CONF_BLE_BOND_CONTEXT: Final = "ble_bond_context"
+# Bond state belongs to one BLE address, not to a config entry: whatever a side
+# proved or removed while it was part of a paired bed stays true afterwards.
+RUNTIME_BOND_KEYS: Final = (
+    CONF_BLE_BOND_ESTABLISHED,
+    CONF_BLE_BOND_MARKER_UNRELIABLE,
+    CONF_BLE_BOND_CONTEXT,
+)
 # Provenance for the motor pulse settings: True once the user has saved them from
 # the options flow. Legacy config flows persisted generated defaults into entry
 # data, so the mere presence of the pulse keys proves nothing, and a protocol
