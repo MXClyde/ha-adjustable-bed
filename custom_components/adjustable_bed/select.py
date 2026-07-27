@@ -14,11 +14,11 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
-    CONF_HAS_MASSAGE,
     DOMAIN,
 )
 from .coordinator import AdjustableBedCoordinator
 from .entity import AdjustableBedEntity
+from .paired_coordinator import PairedBedCoordinator, PairedSideProxy
 
 if TYPE_CHECKING:
     from .beds.base import BedController
@@ -142,9 +142,30 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Adjustable Bed select entities."""
-    coordinator: AdjustableBedCoordinator = hass.data[DOMAIN][entry.entry_id]
-    has_massage = entry.data.get(CONF_HAS_MASSAGE, False)
-    controller = coordinator.controller
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    if isinstance(coordinator, PairedBedCoordinator):
+        entities: list[SelectEntity] = []
+        for side, child in coordinator.children.items():
+            entities.extend(
+                _select_entities_for(
+                    hass,
+                    cast(
+                        "AdjustableBedCoordinator",
+                        PairedSideProxy(coordinator, child, side),
+                    ),
+                )
+            )
+        async_add_entities(entities)
+        return
+    async_add_entities(_select_entities_for(hass, coordinator))
+
+
+def _select_entities_for(
+    hass: HomeAssistant, coordinator: AdjustableBedCoordinator
+) -> list[SelectEntity]:
+    """Build select entities for a single (child or standalone) coordinator."""
+    has_massage = coordinator.has_massage
+    controller = coordinator.capability_controller
     if controller is not None and controller.auto_enable_massage:
         has_massage = True
 
@@ -296,8 +317,7 @@ async def async_setup_entry(
                 )
             )
 
-    if entities:
-        async_add_entities(entities)
+    return entities
 
 
 def _async_remove_stale_select_entity(
@@ -310,7 +330,7 @@ def _async_remove_stale_select_entity(
     entity_id = registry.async_get_entity_id(
         "select",
         DOMAIN,
-        f"{coordinator.address}_{key}",
+        coordinator.entity_unique_id(key),
     )
     if entity_id is not None:
         registry.async_remove(entity_id)
@@ -330,7 +350,8 @@ class AdjustableBedMassageTimerSelect(AdjustableBedEntity, SelectEntity):
         """Initialize the massage timer select entity."""
         super().__init__(coordinator)
         self.entity_description = description
-        self._attr_unique_id = f"{coordinator.address}_{description.key}"
+        self._set_sided_translation_key(description.translation_key, description.key)
+        self._attr_unique_id = coordinator.entity_unique_id(description.key)
         self._timer_options = timer_options
 
         # Build options list: "Off" plus timer durations
@@ -401,7 +422,8 @@ class AdjustableBedControllerStateSelect(AdjustableBedEntity, SelectEntity):
         """Initialize the controller-state-backed select entity."""
         super().__init__(coordinator)
         self.entity_description = description
-        self._attr_unique_id = f"{coordinator.address}_{description.key}"
+        self._set_sided_translation_key(description.translation_key, description.key)
+        self._attr_unique_id = coordinator.entity_unique_id(description.key)
         self._timer_options = timer_options
 
         # Use options directly from controller (already formatted)
@@ -474,7 +496,8 @@ class AdjustableBedSideStateSelect(AdjustableBedEntity, SelectEntity):
         """Initialize the side-specific select entity."""
         super().__init__(coordinator)
         self.entity_description = description
-        self._attr_unique_id = f"{coordinator.address}_{description.key}"
+        self._set_sided_translation_key(description.translation_key, description.key)
+        self._attr_unique_id = coordinator.entity_unique_id(description.key)
         self._attr_options = options
         self._unregister_callback: Callable[[], None] | None = None
 

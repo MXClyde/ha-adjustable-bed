@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.components.cover import (
     CoverDeviceClass,
@@ -24,6 +24,7 @@ from .const import (
 )
 from .coordinator import AdjustableBedCoordinator
 from .entity import AdjustableBedEntity
+from .paired_coordinator import PairedBedCoordinator, PairedSideProxy
 
 if TYPE_CHECKING:
     from .beds.base import BedController, MotorControlSpec
@@ -185,41 +186,70 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Adjustable Bed cover entities."""
-    coordinator: AdjustableBedCoordinator = hass.data[DOMAIN][entry.entry_id]
-    controller = coordinator.controller
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    # Paired beds expose per-side motors: build the same covers against each
+    # child coordinator (each attaches to its own side sub-device). There is no
+    # combined cover (synthesized position is a non-goal); combined motion is
+    # exposed as "both" buttons instead.
+    if isinstance(coordinator, PairedBedCoordinator):
+        entities: list[AdjustableBedCover] = []
+        for side, child in coordinator.children.items():
+            entities.extend(
+                _cover_entities_for(
+                    hass,
+                    cast(
+                        "AdjustableBedCoordinator",
+                        PairedSideProxy(coordinator, child, side),
+                    ),
+                )
+            )
+        async_add_entities(entities)
+        return
+
+    async_add_entities(_cover_entities_for(hass, coordinator))
+
+
+def _cover_entities_for(
+    hass: HomeAssistant, coordinator: AdjustableBedCoordinator
+) -> list[AdjustableBedCover]:
+    """Build the motor cover entities for a single (child or standalone) coordinator."""
+    # capability_controller, not controller: a paired side that is offline at
+    # setup still exposes its covers (built from a client-free controller minted
+    # from config), with byte-identical unique_ids, so they survive reconnect
+    # without a reload.
+    controller = coordinator.capability_controller
+
+    if controller is None:
+        _LOGGER.warning("Skipping motor covers for %s - controller not available", coordinator.name)
+        return []
 
     # Skip motor cover entities if bed doesn't support motor control. Still run
     # stale cleanup first, so covers left over from an older config (e.g. a Gen2
     # entry that resolved to a no-actuator profile) are removed rather than left
     # registered and unavailable.
-    if controller is not None and not controller.supports_motor_control:
+    if not controller.supports_motor_control:
         _LOGGER.debug(
             "Skipping motor covers for %s - bed only supports presets",
             coordinator.name,
         )
         _async_remove_stale_cover_entities(hass, coordinator, controller)
-        return
+        return []
 
     # Skip motor cover entities if bed uses discrete motor control (buttons instead)
-    if controller is not None and controller.has_discrete_motor_control:
+    if controller.has_discrete_motor_control:
         _LOGGER.debug(
             "Skipping motor covers for %s - bed uses discrete motor control (buttons instead)",
             coordinator.name,
         )
-        return
-
-    if controller is None:
-        _LOGGER.warning("Skipping motor covers for %s - controller not available", coordinator.name)
-        return
+        return []
 
     _async_remove_stale_cover_entities(hass, coordinator, controller)
 
-    entities = [
+    return [
         AdjustableBedCover(coordinator, _build_cover_description(spec))
         for spec in controller.motor_control_specs
     ]
-
-    async_add_entities(entities)
 
 
 def _build_cover_description(
@@ -262,7 +292,7 @@ def _async_remove_stale_cover_entities(
         if key in active_keys:
             continue
 
-        unique_id = f"{coordinator.address}_{key}"
+        unique_id = coordinator.entity_unique_id(key)
         entity_id = registry.async_get_entity_id("cover", DOMAIN, unique_id)
         if entity_id is not None:
             registry.async_remove(entity_id)
@@ -285,7 +315,8 @@ class AdjustableBedCover(AdjustableBedEntity, CoverEntity):
         """Initialize the cover."""
         super().__init__(coordinator)
         self.entity_description = description
-        self._attr_unique_id = f"{coordinator.address}_{description.key}"
+        self._set_sided_translation_key(description.translation_key, description.key)
+        self._attr_unique_id = coordinator.entity_unique_id(description.key)
         self._is_moving = False
         self._move_direction: str | None = None
         self._movement_generation: int = 0  # Track active movement to handle cancellation
@@ -413,6 +444,11 @@ class AdjustableBedCover(AdjustableBedEntity, CoverEntity):
 
         try:
             _LOGGER.debug("Sending stop command for %s", self.entity_description.key)
+            # cancel_running=True (the default) cancels the in-flight movement
+            # first, then sends this motor's specific stop. For a paired side this
+            # routes through the proxy → the parent preempts the in-flight pulse
+            # (round-16 cancel) before the lock, so the stop is both immediate and
+            # motor-specific (not a side-wide stop_all).
             await self._coordinator.async_execute_controller_command(
                 self.entity_description.stop_fn
             )

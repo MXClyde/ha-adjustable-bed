@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.components.climate import (
     ClimateEntity,
@@ -21,6 +21,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import DOMAIN
 from .coordinator import AdjustableBedCoordinator
 from .entity import AdjustableBedEntity
+from .paired_coordinator import PairedBedCoordinator, PairedSideProxy
 
 if TYPE_CHECKING:
     from .beds.base import BedController
@@ -152,10 +153,31 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Adjustable Bed climate entities."""
-    coordinator: AdjustableBedCoordinator = hass.data[DOMAIN][entry.entry_id]
-    controller = coordinator.controller
-    if controller is None:
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    if isinstance(coordinator, PairedBedCoordinator):
+        entities: list[AdjustableBedClimate] = []
+        for side, child in coordinator.children.items():
+            entities.extend(
+                _climate_entities_for(
+                    hass,
+                    cast(
+                        "AdjustableBedCoordinator",
+                        PairedSideProxy(coordinator, child, side),
+                    ),
+                )
+            )
+        async_add_entities(entities)
         return
+    async_add_entities(_climate_entities_for(hass, coordinator))
+
+
+def _climate_entities_for(
+    hass: HomeAssistant, coordinator: AdjustableBedCoordinator
+) -> list[AdjustableBedClimate]:
+    """Build climate entities for a single (child or standalone) coordinator."""
+    controller = coordinator.capability_controller
+    if controller is None:
+        return []
 
     entities: list[AdjustableBedClimate] = []
 
@@ -193,8 +215,7 @@ async def async_setup_entry(
     elif getattr(controller, FOOTWARMING_CLIMATE_DESCRIPTION.required_capability, False):
         entities.append(AdjustableBedClimate(coordinator, FOOTWARMING_CLIMATE_DESCRIPTION))
 
-    if entities:
-        async_add_entities(entities)
+    return entities
 
 
 def _async_remove_stale_split_climate_entity(
@@ -207,7 +228,7 @@ def _async_remove_stale_split_climate_entity(
     entity_id = registry.async_get_entity_id(
         "climate",
         DOMAIN,
-        f"{coordinator.address}_{key}",
+        coordinator.entity_unique_id(key),
     )
     if entity_id is not None:
         registry.async_remove(entity_id)
@@ -243,7 +264,8 @@ class AdjustableBedClimate(AdjustableBedEntity, ClimateEntity):
         """Initialize the climate entity."""
         super().__init__(coordinator)
         self.entity_description = description
-        self._attr_unique_id = f"{coordinator.address}_{description.key}"
+        self._set_sided_translation_key(description.translation_key, description.key)
+        self._attr_unique_id = coordinator.entity_unique_id(description.key)
         self._attr_supported_features = (
             ClimateEntityFeature.PRESET_MODE
             | ClimateEntityFeature.TURN_ON

@@ -12,6 +12,9 @@ interface Recorder {
   pulses: Array<{ key: string; dir: Direction }>;
   stoppedCovers: string[];
   bedStops: number;
+  // Which stop each bedStop pressed. On a paired bed each side has its own, so
+  // "a stop happened" is not enough: it has to be the held side's.
+  stoppedBeds: Array<string | undefined>;
   // Lets a test decide when the in-flight pulse resolves, which is the whole
   // point: a hold ends while a pulse is still running.
   release: () => void;
@@ -29,6 +32,7 @@ function recorder(opts: { reject?: boolean; missingEntity?: boolean } = {}): Rec
     pulses,
     stoppedCovers,
     bedStops: 0,
+    stoppedBeds: [],
     release: () => resolvePending?.(),
     actions: {
       pulse: (m, dir) => {
@@ -42,8 +46,9 @@ function recorder(opts: { reject?: boolean; missingEntity?: boolean } = {}): Rec
         });
       },
       stopCover: (cover) => stoppedCovers.push(cover),
-      stopBed: () => {
+      stopBed: (stopEntityId) => {
         rec.bedStops += 1;
+        rec.stoppedBeds.push(stopEntityId);
       },
     },
   };
@@ -305,4 +310,42 @@ test("a motor with no entity for that direction never pulses", async () => {
   expect(rec.pulses.length).toBe(0);
   hold.end(upOnly);
   expect(rec.bedStops).toBe(1);
+});
+
+// A paired bed renders one section per side, each with its own stop. Pressing
+// the parent's stop, or none at all, would leave the released side running.
+test("releasing a hold stops the side the motor belongs to", async () => {
+  const rec = recorder();
+  const hold = new MotorHold(rec.actions);
+
+  hold.start(buttonMotor, "up", 1, "button.left_stop");
+  await tick();
+  hold.end(buttonMotor);
+
+  expect(rec.stoppedBeds).toEqual(["button.left_stop"]);
+});
+
+test("a side's stop button stops that side, not the held one", async () => {
+  const rec = recorder();
+  const hold = new MotorHold(rec.actions);
+
+  hold.start(buttonMotor, "up", 1, "button.left_stop");
+  await tick();
+  // The pressed button carries its own stop, which wins: it is the bed the
+  // user actually asked to stop.
+  hold.stopAll("button.right_stop");
+
+  expect(rec.stoppedBeds).toEqual(["button.right_stop"]);
+  expect(hold.heldKey).toBeNull();
+});
+
+test("abandoning mid-hold stops the held side", async () => {
+  const rec = recorder();
+  const hold = new MotorHold(rec.actions);
+
+  hold.start(buttonMotor, "up", 1, "button.left_stop");
+  await tick();
+  hold.abandon();
+
+  expect(rec.stoppedBeds).toEqual(["button.left_stop"]);
 });

@@ -6,16 +6,25 @@ import asyncio
 import json
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from bleak.exc import BleakError
-from homeassistant.const import CONF_ADDRESS, CONF_NAME
-from homeassistant.core import HomeAssistant
+from homeassistant.components.repairs import repairs_flow_manager
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.const import CONF_ADDRESS, CONF_NAME, EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.issue_registry import IssueSeverity
+from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.adjustable_bed.bluetooth_bond import LocalBondRecord
+from custom_components.adjustable_bed.bluetooth_bond import (
+    BluezReadStatus,
+    LocalBondInventory,
+    LocalBondRecord,
+)
 from custom_components.adjustable_bed.bluetooth_transport import (
     ConnectionPath,
     TransportClass,
@@ -28,14 +37,27 @@ from custom_components.adjustable_bed.bond_verification import (
 )
 from custom_components.adjustable_bed.const import (
     BED_TYPE_LEGGETT_GEN2,
+    BED_TYPE_OKIMAT,
     CONF_BED_TYPE,
     CONF_BLE_BOND_ESTABLISHED,
     CONF_BLE_BOND_MARKER_UNRELIABLE,
+    CONF_PAIR_ID,
+    CONF_PAIR_MEMBER_ADDRESSES,
     DOMAIN,
 )
+from custom_components.adjustable_bed.pairing_candidates import (
+    CONF_PAIR_SELECTION,
+    decode_pair_selection,
+    encode_pair_selection,
+)
 from custom_components.adjustable_bed.repairs import (
+    COMBINE_BEDS_ISSUE_ID,
+    CombineBedsRepairFlow,
     PairingRequiredRepairFlow,
     async_create_fix_flow,
+    async_refresh_combine_beds_issue,
+    async_setup_combine_beds_issue,
+    async_track_combine_beds_issue,
 )
 from custom_components.adjustable_bed.setup_operation import (
     OperationOutcome,
@@ -46,6 +68,293 @@ from .conftest import TEST_ADDRESS, TEST_NAME
 
 BLEAK_DEVICE = "custom_components.adjustable_bed.repairs.bluetooth.async_ble_device_from_address"
 ESTABLISH = "bleak_retry_connector.establish_connection"
+
+
+def _bed_entry(
+    hass: HomeAssistant,
+    *,
+    address: str,
+    name: str,
+    state: ConfigEntryState = ConfigEntryState.LOADED,
+) -> MockConfigEntry:
+    """Add a standalone bed entry in the requested lifecycle state."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=name,
+        data={
+            CONF_ADDRESS: address,
+            CONF_NAME: name,
+            CONF_BED_TYPE: "linak",
+        },
+        unique_id=address,
+        version=4,
+        state=state,
+    )
+    entry.add_to_hass(hass)
+    return entry
+
+
+async def test_combine_suggestion_tracks_active_standalone_entries(
+    hass: HomeAssistant,
+) -> None:
+    """The warning appears at two loaded beds and clears when one unloads."""
+    hass.set_state(CoreState.running)
+    left = _bed_entry(
+        hass,
+        address="AA:BB:CC:DD:EE:01",
+        name="Left",
+        state=ConfigEntryState.NOT_LOADED,
+    )
+    right = _bed_entry(
+        hass,
+        address="AA:BB:CC:DD:EE:02",
+        name="Right",
+        state=ConfigEntryState.NOT_LOADED,
+    )
+    async_track_combine_beds_issue(hass, left)
+    async_track_combine_beds_issue(hass, right)
+    registry = ir.async_get(hass)
+
+    left._async_set_state(hass, ConfigEntryState.LOADED, None)
+    assert registry.async_get_issue(DOMAIN, COMBINE_BEDS_ISSUE_ID) is None
+
+    right._async_set_state(hass, ConfigEntryState.LOADED, None)
+    issue = registry.async_get_issue(DOMAIN, COMBINE_BEDS_ISSUE_ID)
+    assert issue is not None
+    assert issue.translation_key == "combine_two_beds"
+    assert issue.severity is IssueSeverity.WARNING
+    assert issue.is_fixable is True
+    assert issue.data == {"entry_count": 2}
+
+    right._async_set_state(hass, ConfigEntryState.UNLOAD_IN_PROGRESS, None)
+    assert registry.async_get_issue(DOMAIN, COMBINE_BEDS_ISSUE_ID) is None
+
+
+async def test_combine_suggestion_preserves_dismissal_during_startup(
+    hass: HomeAssistant,
+) -> None:
+    """Transient startup states do not recreate a dismissed persistent issue."""
+    left = _bed_entry(hass, address="AA:BB:CC:DD:EE:01", name="Left")
+    right = _bed_entry(hass, address="AA:BB:CC:DD:EE:02", name="Right")
+    async_refresh_combine_beds_issue(hass)
+    registry = ir.async_get(hass)
+    registry.async_ignore(DOMAIN, COMBINE_BEDS_ISSUE_ID, True)
+    issue = registry.async_get_issue(DOMAIN, COMBINE_BEDS_ISSUE_ID)
+    assert issue is not None
+    dismissed_version = issue.dismissed_version
+
+    hass.set_state(CoreState.starting)
+    async_setup_combine_beds_issue(hass)
+    async_track_combine_beds_issue(hass, left)
+    async_track_combine_beds_issue(hass, right)
+    right._async_set_state(hass, ConfigEntryState.NOT_LOADED, None)
+
+    issue = registry.async_get_issue(DOMAIN, COMBINE_BEDS_ISSUE_ID)
+    assert issue is not None
+    assert issue.dismissed_version == dismissed_version
+
+    right._async_set_state(hass, ConfigEntryState.LOADED, None)
+    hass.set_state(CoreState.running)
+    hass.bus.async_fire_internal(EVENT_HOMEASSISTANT_STARTED)
+    issue = registry.async_get_issue(DOMAIN, COMBINE_BEDS_ISSUE_ID)
+    assert issue is not None
+    assert issue.dismissed_version == dismissed_version
+
+
+async def test_combine_suggestion_excludes_entries_claimed_by_pair(
+    hass: HomeAssistant,
+) -> None:
+    """Original singles are not suggested once a paired entry claims them."""
+    addresses = ["AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"]
+    for index, address in enumerate(addresses):
+        _bed_entry(hass, address=address, name=f"Side {index}")
+    MockConfigEntry(
+        domain=DOMAIN,
+        title="Combined",
+        data={
+            CONF_PAIR_ID: "pair_test",
+            CONF_PAIR_MEMBER_ADDRESSES: addresses,
+        },
+        unique_id="pair_test",
+        version=4,
+    ).add_to_hass(hass)
+
+    async_refresh_combine_beds_issue(hass)
+
+    assert ir.async_get(hass).async_get_issue(DOMAIN, COMBINE_BEDS_ISSUE_ID) is None
+
+
+async def test_combine_repair_flow_shows_active_bed_picker(
+    hass: HomeAssistant,
+) -> None:
+    """The suggestion opens directly on the Left/Right selector."""
+    left = _bed_entry(hass, address="AA:BB:CC:DD:EE:01", name="Left")
+    right = _bed_entry(hass, address="AA:BB:CC:DD:EE:02", name="Right")
+    flow = CombineBedsRepairFlow()
+    flow.hass = hass
+
+    # RepairsFlowManager passes its internal issue payload to the init step.
+    result = await flow.async_step_init({"issue_id": COMBINE_BEDS_ISSUE_ID})
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "pair_beds"
+    assert result["description_placeholders"] == {
+        "count": "2",
+        "names": "Left, Right",
+    }
+    schema = result.get("data_schema")
+    assert schema is not None
+    defaults = schema({})
+    assert isinstance(defaults, dict)
+    assert decode_pair_selection(defaults[CONF_PAIR_SELECTION]) == (
+        left.entry_id,
+        right.entry_id,
+    )
+
+
+async def test_combine_repair_opens_through_repairs_manager(
+    hass: HomeAssistant,
+    enable_custom_integrations,
+) -> None:
+    """The Repairs manager's issue metadata is not treated as form input."""
+    assert await async_setup_component(hass, "repairs", {})
+    assert await async_setup_component(hass, DOMAIN, {})
+    left = _bed_entry(hass, address="AA:BB:CC:DD:EE:01", name="Left")
+    right = _bed_entry(hass, address="AA:BB:CC:DD:EE:02", name="Right")
+    async_refresh_combine_beds_issue(hass)
+    manager = repairs_flow_manager(hass)
+    assert manager is not None
+
+    result = await manager.async_init(
+        DOMAIN,
+        data={"issue_id": COMBINE_BEDS_ISSUE_ID},
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "pair_beds"
+    schema = result.get("data_schema")
+    assert schema is not None
+    defaults = schema({})
+    assert isinstance(defaults, dict)
+    assert decode_pair_selection(defaults[CONF_PAIR_SELECTION]) == (
+        left.entry_id,
+        right.entry_id,
+    )
+
+
+async def test_combine_repair_flow_delegates_creation_to_config_flow(
+    hass: HomeAssistant,
+) -> None:
+    """Submitting Repairs uses the canonical pairing config-flow transaction."""
+    left = _bed_entry(hass, address="AA:BB:CC:DD:EE:01", name="Left")
+    right = _bed_entry(hass, address="AA:BB:CC:DD:EE:02", name="Right")
+    flow = CombineBedsRepairFlow()
+    flow.hass = hass
+    config_form = {
+        "type": FlowResultType.FORM,
+        "flow_id": "config-flow-id",
+        "handler": DOMAIN,
+        "step_id": "pair_beds",
+    }
+    config_created = {
+        "type": FlowResultType.CREATE_ENTRY,
+        "flow_id": "config-flow-id",
+        "handler": DOMAIN,
+        "title": "Combined",
+        "data": {},
+    }
+
+    with (
+        patch.object(
+            hass.config_entries.flow,
+            "async_init",
+            new=AsyncMock(return_value=config_form),
+        ) as init,
+        patch.object(
+            hass.config_entries.flow,
+            "async_configure",
+            new=AsyncMock(return_value=config_created),
+        ) as configure,
+    ):
+        pair_selection = encode_pair_selection(left.entry_id, right.entry_id)
+        result = await flow.async_step_pair_beds(
+            {
+                CONF_PAIR_SELECTION: pair_selection,
+                CONF_NAME: "Combined",
+            }
+        )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    init.assert_awaited_once_with(
+        DOMAIN,
+        context={"source": "user"},
+        data={CONF_ADDRESS: "pair_beds"},
+    )
+    configure.assert_awaited_once_with(
+        "config-flow-id",
+        {
+            CONF_PAIR_SELECTION: pair_selection,
+            CONF_NAME: "Combined",
+        },
+    )
+
+
+async def test_combine_repair_reuses_nested_flow_after_validation_error(
+    hass: HomeAssistant,
+) -> None:
+    """A corrected submission continues the same delegated config flow."""
+    left = _bed_entry(hass, address="AA:BB:CC:DD:EE:01", name="Left")
+    right = _bed_entry(hass, address="AA:BB:CC:DD:EE:02", name="Right")
+    flow = CombineBedsRepairFlow()
+    flow.hass = hass
+    config_form = {
+        "type": FlowResultType.FORM,
+        "flow_id": "config-flow-id",
+        "handler": DOMAIN,
+        "step_id": "pair_beds",
+    }
+    validation_error = {
+        **config_form,
+        "errors": {"base": "incompatible"},
+    }
+    config_created = {
+        "type": FlowResultType.CREATE_ENTRY,
+        "flow_id": "config-flow-id",
+        "handler": DOMAIN,
+        "title": "Combined",
+        "data": {},
+    }
+    pair_selection = encode_pair_selection(left.entry_id, right.entry_id)
+    invalid_input = {CONF_PAIR_SELECTION: pair_selection}
+    corrected_input = {
+        CONF_PAIR_SELECTION: pair_selection,
+        CONF_NAME: "Combined",
+    }
+
+    with (
+        patch.object(
+            hass.config_entries.flow,
+            "async_init",
+            new=AsyncMock(return_value=config_form),
+        ) as init,
+        patch.object(
+            hass.config_entries.flow,
+            "async_configure",
+            new=AsyncMock(side_effect=[validation_error, config_created]),
+        ) as configure,
+    ):
+        first = await flow.async_step_pair_beds(invalid_input)
+        second = await flow.async_step_pair_beds(corrected_input)
+
+    assert first["type"] is FlowResultType.FORM
+    assert first["errors"] == {"base": "incompatible"}
+    assert second["type"] is FlowResultType.CREATE_ENTRY
+    init.assert_awaited_once()
+    assert configure.await_args_list == [
+        call("config-flow-id", invalid_input),
+        call("config-flow-id", corrected_input),
+    ]
+    assert flow._pairing_flow_id is None
 
 
 async def test_async_create_fix_flow_builds_pairing_flow(hass: HomeAssistant) -> None:
@@ -72,6 +381,19 @@ async def test_async_create_fix_flow_builds_pairing_flow(hass: HomeAssistant) ->
     assert flow._evidence.status is BondVerificationStatus.AUTH_FAILED
     assert flow._evidence.owner.transport is TransportClass.PROXY
     assert flow._evidence.owner.source == "bedroom-proxy"
+
+
+async def test_async_create_fix_flow_routes_combine_suggestion(
+    hass: HomeAssistant,
+) -> None:
+    """The stable suggestion issue id opens the Dual Bed repair flow."""
+    flow = await async_create_fix_flow(
+        hass,
+        COMBINE_BEDS_ISSUE_ID,
+        {"entry_count": 2},
+    )
+
+    assert isinstance(flow, CombineBedsRepairFlow)
 
 
 async def test_confirm_step_shows_form_first(hass: HomeAssistant) -> None:
@@ -672,3 +994,259 @@ async def test_a_reconnect_between_confirm_and_removal_does_not_block_recovery(
     # Replacing the dongle reuses hci0, and with it every path in this record.
     # The bond the user approved was the one on the adapter that is now gone.
     assert not pinned.is_same_bond_as(replace(pinned, adapter_address="AA:00:00:00:00:01"))
+
+
+async def test_a_reverified_same_adapter_bond_keeps_its_provenance(
+    hass: HomeAssistant,
+) -> None:
+    """An unchanged context means "same owner, re-proven", not "nothing proven".
+
+    The coordinator deliberately skips rewriting provenance when the owner is
+    identical, so treating "unchanged" as "unproven" deleted a perfectly valid
+    record and left later unpairs guessing.
+    """
+    context = {
+        "version": 1,
+        "transport": "local",
+        "source": "11:22:33:44:55:66",
+        "adapter": "hci0",
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_LEGGETT_GEN2,
+            CONF_BLE_BOND_ESTABLISHED: True,
+            CONF_BLE_BOND_CONTEXT: context,
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_same_owner_entry",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = MagicMock()
+    coordinator.async_pair_now = AsyncMock(return_value=True)
+    coordinator.last_bond_evidence = BondEvidence(
+        status=BondVerificationStatus.VERIFIED,
+        owner=BondOwner(
+            transport=TransportClass.LOCAL, source="11:22:33:44:55:66", adapter="hci0"
+        ),
+        operation="runtime_authenticated_read",
+        observed_at="2026-07-27T00:00:00+00:00",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, entry.entry_id)
+    flow.hass = hass
+    try:
+        assert await flow._async_pair_via_coordinator() is True
+    finally:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+
+    stored = entry.data[CONF_BLE_BOND_CONTEXT]
+    assert stored["transport"] == "local"
+    assert stored["source"] == "11:22:33:44:55:66"
+    assert stored["adapter"] == "hci0"
+
+
+async def test_a_reverified_same_adapter_bond_is_not_rewritten(
+    hass: HomeAssistant,
+) -> None:
+    """Restating a bond's owner is still a change to the entry.
+
+    This path only runs for beds that grant one connection per pairing window,
+    and the coordinator has already recorded the same owner through an internal
+    write. An untagged rewrite here reads as an options change, and the reload
+    it triggers takes away the link the bed will not grant again.
+    """
+    context = {
+        "version": 1,
+        "transport": "local",
+        "source": "11:22:33:44:55:66",
+        "adapter": "hci0",
+        "operation": "runtime_authenticated_read",
+        "verified_at": "2026-07-27T00:00:00+00:00",
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_LEGGETT_GEN2,
+            CONF_BLE_BOND_ESTABLISHED: True,
+            CONF_BLE_BOND_CONTEXT: context,
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_no_rewrite_entry",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = MagicMock()
+    coordinator.async_pair_now = AsyncMock(return_value=True)
+    coordinator.last_bond_evidence = BondEvidence(
+        status=BondVerificationStatus.VERIFIED,
+        owner=BondOwner(
+            transport=TransportClass.LOCAL, source="11:22:33:44:55:66", adapter="hci0"
+        ),
+        operation="runtime_authenticated_read",
+        observed_at="2026-07-27T12:00:00+00:00",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, entry.entry_id)
+    flow.hass = hass
+    with patch.object(
+        hass.config_entries, "async_update_entry", wraps=hass.config_entries.async_update_entry
+    ) as update:
+        try:
+            assert await flow._async_pair_via_coordinator() is True
+        finally:
+            hass.data[DOMAIN].pop(entry.entry_id, None)
+
+    update.assert_not_called()
+    assert entry.data[CONF_BLE_BOND_CONTEXT] == context
+
+
+async def test_an_unproven_coordinator_repair_drops_the_old_provenance(
+    hass: HomeAssistant,
+) -> None:
+    """Nothing established an owner, so the pre-repair record cannot stand."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_LEGGETT_GEN2,
+            CONF_BLE_BOND_ESTABLISHED: True,
+            CONF_BLE_BOND_CONTEXT: {
+                "version": 1,
+                "transport": "local",
+                "source": "11:22:33:44:55:66",
+                "adapter": "hci0",
+            },
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_unproven_owner_entry",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = MagicMock()
+    coordinator.async_pair_now = AsyncMock(return_value=True)
+    coordinator.last_bond_evidence = BondEvidence(
+        status=BondVerificationStatus.INCONCLUSIVE,
+        owner=BondOwner(),
+        operation="runtime_authenticated_read",
+        observed_at="2026-07-27T00:00:00+00:00",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, entry.entry_id)
+    flow.hass = hass
+    try:
+        assert await flow._async_pair_via_coordinator() is True
+    finally:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+
+    assert CONF_BLE_BOND_CONTEXT not in entry.data
+
+
+def _stale_bond_issue_data() -> dict[str, str]:
+    """Issue data whose evidence points squarely at this host's BlueZ."""
+    return {
+        "address": TEST_ADDRESS,
+        "name": TEST_NAME,
+        "evidence_status": BondVerificationStatus.AUTH_FAILED.value,
+        "evidence_transport": TransportClass.LOCAL.value,
+        "evidence_source": "11:22:33:44:55:66",
+        "evidence_adapter": "hci0",
+    }
+
+
+def _host_bond_inventory() -> LocalBondInventory:
+    """One unambiguous host bond for the bed under test."""
+    return LocalBondInventory(
+        status=BluezReadStatus.OK,
+        records=(
+            LocalBondRecord(
+                address=TEST_ADDRESS,
+                device_path="/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+                adapter_path="/org/bluez/hci0",
+                adapter_address="11:22:33:44:55:66",
+                paired=True,
+                bonded=True,
+            ),
+        ),
+    )
+
+
+async def test_a_standalone_bed_with_host_evidence_is_offered_recovery(
+    hass: HomeAssistant,
+) -> None:
+    """The control case for the combined-pair refusal below."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_OKIMAT,
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_single_stale_bond_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(
+        TEST_ADDRESS, TEST_NAME, entry.entry_id, issue_data=_stale_bond_issue_data()
+    )
+    flow.hass = hass
+
+    with patch(
+        "custom_components.adjustable_bed.bond_recovery.async_read_local_bonds",
+        AsyncMock(return_value=_host_bond_inventory()),
+    ):
+        result = await flow.async_step_init()
+
+    assert result["step_id"] == "stale_bond_confirm"
+
+
+async def test_a_combined_pair_is_never_offered_stale_bond_recovery(
+    hass: HomeAssistant,
+) -> None:
+    """A pair keeps each side's address and bond state on a child descriptor.
+
+    Recovery writes its markers at entry level and drives the sequence through
+    the entry's coordinator, and a combined pair has neither: the parent
+    coordinator exposes no per-side transport, and no child ever reads a
+    top-level bond marker. Offering the destructive branch here would remove a
+    real host bond and then report success for state nothing consumes, so the
+    guided pairing branch is used instead.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_OKIMAT,
+            CONF_PAIR_ID: "pair_abc123",
+            CONF_PAIR_MEMBER_ADDRESSES: [TEST_ADDRESS, "AA:BB:CC:DD:EE:01"],
+        },
+        unique_id="pair_abc123",
+        entry_id="repair_combined_pair_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(
+        TEST_ADDRESS, TEST_NAME, entry.entry_id, issue_data=_stale_bond_issue_data()
+    )
+    flow.hass = hass
+
+    read_bonds = AsyncMock(return_value=_host_bond_inventory())
+    with patch(
+        "custom_components.adjustable_bed.bond_recovery.async_read_local_bonds",
+        read_bonds,
+    ):
+        result = await flow.async_step_init()
+
+    assert result["step_id"] == "confirm"
+    # The host's bond store is never even consulted for a pair.
+    read_bonds.assert_not_awaited()

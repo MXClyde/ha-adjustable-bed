@@ -1,7 +1,13 @@
 // Unit tests for entity discovery across different bed shapes.
 // Run with: bun test
 import { expect, test } from "bun:test";
-import { bedEntitiesForDevice, bedIsEmpty } from "./discovery";
+import {
+  bedEntitiesForDevice,
+  bedIsEmpty,
+  isSingleAddressPairedDevice,
+  pairedChildDeviceIds,
+  resolvePairedParentId,
+} from "./discovery";
 import type { EntityRegistryDisplayEntry, HomeAssistant } from "./types";
 
 function entry(
@@ -58,6 +64,59 @@ test("2-motor bed with light switch and no massage/climate", () => {
   expect(bed.climate.entities).toHaveLength(0);
   expect(bed.memory).toEqual([{ slot: 1, save: "button.seng_save_1" }]);
   expect(bedIsEmpty(bed)).toBe(false);
+});
+
+test("paired parent's stop_both maps to the stop slot", () => {
+  const hass = hassWith([entry("button.master_bed_stop_both", "stop_both")]);
+  const bed = bedEntitiesForDevice(hass, "dev1");
+  expect(bed.stop).toBe("button.master_bed_stop_both");
+});
+
+test("single-address paired entities split by bed_side on one device", () => {
+  const hass = hassWith([
+    entry("cover.b_back_left", "back"),
+    entry("cover.b_back_right", "back"),
+    entry("button.b_flat_both", "preset_flat"),
+  ]);
+  const sideState = (entity_id: string, bed_side: "left" | "right" | "both") => {
+    hass.states[entity_id] = {
+      entity_id,
+      state: "unknown",
+      attributes: { bed_side },
+      last_changed: "",
+      last_updated: "",
+    };
+  };
+  sideState("cover.b_back_left", "left");
+  sideState("cover.b_back_right", "right");
+  sideState("button.b_flat_both", "both");
+
+  expect(isSingleAddressPairedDevice(hass, "dev1")).toBe(true);
+  expect(bedEntitiesForDevice(hass, "dev1", "left").motors[0].cover).toBe(
+    "cover.b_back_left",
+  );
+  expect(bedEntitiesForDevice(hass, "dev1", "right").motors[0].cover).toBe(
+    "cover.b_back_right",
+  );
+  expect(bedEntitiesForDevice(hass, "dev1", "both").presets).toEqual([
+    "button.b_flat_both",
+  ]);
+});
+
+test("side-suffixed translation keys remain a supported fallback", () => {
+  const hass = hassWith([
+    entry("button.b_head_up_left", "head_up_left"),
+    entry("button.b_head_up_right", "head_up_right"),
+    entry("button.b_stop_both", "stop_both"),
+  ]);
+
+  expect(bedEntitiesForDevice(hass, "dev1", "left").motors[0].up).toBe(
+    "button.b_head_up_left",
+  );
+  expect(bedEntitiesForDevice(hass, "dev1", "right").motors[0].up).toBe(
+    "button.b_head_up_right",
+  );
+  expect(isSingleAddressPairedDevice(hass, "dev1")).toBe(true);
 });
 
 test("Okin utility buttons (sync / child lock) bucket into utility", () => {
@@ -216,4 +275,37 @@ test("presence-only device is treated as empty (no presence section)", () => {
 test("empty for unknown device", () => {
   const hass = hassWith([entry("cover.b_back", "back", "dev1")]);
   expect(bedIsEmpty(bedEntitiesForDevice(hass, "nope"))).toBe(true);
+});
+
+test("pairedChildDeviceIds returns sided children ordered by name", () => {
+  const hass = hassWith([]);
+  hass.devices = {
+    parent: { id: "parent", name: "Master Bed" },
+    right: { id: "right", name: "Master Bed Right", via_device_id: "parent" },
+    left: { id: "left", name: "Master Bed Left", via_device_id: "parent" },
+    other: { id: "other", name: "Unrelated" },
+  };
+  // Both sides, ordered Left before Right; unrelated devices excluded.
+  expect(pairedChildDeviceIds(hass, "parent")).toEqual(["left", "right"]);
+  // A single (non-parent) device has no children -> single-device rendering.
+  expect(pairedChildDeviceIds(hass, "left")).toEqual([]);
+  expect(pairedChildDeviceIds(hass, undefined)).toEqual([]);
+});
+
+test("resolvePairedParentId resolves a side device up to its parent", () => {
+  const hass = hassWith([]);
+  hass.devices = {
+    parent: { id: "parent", name: "Master Bed" },
+    left: { id: "left", name: "Master Bed Left", via_device_id: "parent" },
+    right: { id: "right", name: "Master Bed Right", via_device_id: "parent" },
+    single: { id: "single", name: "Guest Bed" },
+    stale: { id: "stale", name: "Orphan", via_device_id: "ghost" },
+  };
+  // A side device resolves to the parent; the parent and a single device stay.
+  expect(resolvePairedParentId(hass, "left")).toBe("parent");
+  expect(resolvePairedParentId(hass, "parent")).toBe("parent");
+  expect(resolvePairedParentId(hass, "single")).toBe("single");
+  expect(resolvePairedParentId(hass, undefined)).toBeUndefined();
+  // A stale via_device_id (parent gone from the registry) stays on the device.
+  expect(resolvePairedParentId(hass, "stale")).toBe("stale");
 });
