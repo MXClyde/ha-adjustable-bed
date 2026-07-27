@@ -24,7 +24,8 @@
         },
         "data_description": {
           "action": "«Sjekk på nytt» sjekker sengen en gang til uten at du mister innstillingene du nettopp fylte ut."
-        }
+        },
+        "description": "Sjekket tilkoblingen til **{name}** før oppsettet fullføres:\n\n{capabilities}\n\nÅ sende inn fullfører oppsettet. En mislykket sjekk blokkerer det aldri, og integrasjonen fortsetter å prøve å koble til etterpå."
       },
       "setup_progress": {
         "title": "Sjekker tilkoblingen",

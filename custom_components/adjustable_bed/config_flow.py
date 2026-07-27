@@ -1182,9 +1182,13 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             "address": self._discovery_info.address.upper(),
             "transport": await self._async_transport_note(
                 self._discovery_info.address,
-                ADAPTER_AUTO,
-                bed_type,
-                VARIANT_AUTO,
+                # On a redisplay after a validation error the user's adapter and
+                # protocol choices are known. Previewing the defaults instead
+                # can warn about a proxy for someone who picked a local adapter,
+                # or drop the pairing warning for the type they actually chose.
+                (user_input or {}).get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO),
+                (user_input or {}).get(CONF_BED_TYPE) or bed_type,
+                (user_input or {}).get(CONF_PROTOCOL_VARIANT, VARIANT_AUTO),
             ),
         }
 
@@ -1830,9 +1834,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 "setup_note": f"\n{octo_split_note}" if octo_split_note else "",
                 "transport": await self._async_transport_note(
                     address,
-                    discovery_source,
-                    defaults_bed_type,
-                    preselected_protocol_variant,
+                    (user_input or {}).get(CONF_PREFERRED_ADAPTER, discovery_source),
+                    (user_input or {}).get(CONF_BED_TYPE) or defaults_bed_type,
+                    (user_input or {}).get(
+                        CONF_PROTOCOL_VARIANT, preselected_protocol_variant
+                    ),
                 ),
             },
         )
@@ -2503,7 +2509,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         (issue #457).
         """
         assert self._pending_entry is not None
-        if self._operation is None or self._operation.terminal_consumed:
+        if self._operation is None:
             self._async_start_probe_operation()
         return await self.async_run_operation_step(
             step_id="setup_progress",

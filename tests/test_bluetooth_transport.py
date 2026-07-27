@@ -197,6 +197,30 @@ class TestConnectionPaths:
         ):
             assert async_connection_paths(hass, TEST_ADDRESS) == ()
 
+    async def test_empty_connectable_view_uses_non_connectable_proxy_paths(
+        self, hass: HomeAssistant
+    ) -> None:
+        """Prediction must describe the same fallback path resolution can use."""
+        scanner_device = _scanner_device(
+            _scanner("proxy", scanner_type="remote", connectable=False), -55
+        )
+
+        def lookup(
+            _hass: HomeAssistant, _address: str, *, connectable: bool
+        ) -> list[Any]:
+            return [] if connectable else [scanner_device]
+
+        with patch(
+            f"{_TRANSPORT}.bluetooth.async_scanner_devices_by_address",
+            side_effect=lookup,
+        ):
+            paths = async_connection_paths(hass, TEST_ADDRESS)
+
+        assert len(paths) == 1
+        assert paths[0].source == "proxy"
+        assert paths[0].transport is TransportClass.PROXY
+        assert paths[0].connectable is False
+
 
 class TestPathPrediction:
     """The prediction shown before setup must match what HA will really do."""

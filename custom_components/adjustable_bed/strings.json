@@ -268,7 +268,7 @@
       },
       "verify_connection": {
         "title": "Verify Connection",
-        "description": "Checked the connection to **{name}** before finishing setup:\n\n{capabilities}\n\nChoose what to do next, then submit. You can finish even if something failed, or retry the connection checks without losing your settings.",
+        "description": "Checked the connection to **{name}** before finishing setup:\n\n{capabilities}\n\nSubmitting finishes setup. A failed check never blocks it, and the integration keeps trying to connect afterwards.",
         "submit": "Finish setup",
         "data": {
           "action": "What next"

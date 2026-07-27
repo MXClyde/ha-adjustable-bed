@@ -75,6 +75,29 @@ class TestFreshnessStatus:
         assert evidence.status is FreshnessStatus.STALE
         assert not evidence.is_fresh
 
+    async def test_fresh_non_connectable_view_wins_over_stale_connectable_history(
+        self, hass: HomeAssistant
+    ) -> None:
+        """A stale strict snapshot must not hide a proxy's current fallback view."""
+
+        def lookup(
+            _hass: HomeAssistant, _address: str, *, connectable: bool
+        ) -> Any:
+            return _service_info(
+                age=1.0 if not connectable else MAX_ADVERTISEMENT_AGE_SECONDS + 1,
+                source="proxy",
+            )
+
+        with patch(
+            f"{_FRESHNESS}.bluetooth.async_last_service_info",
+            side_effect=lookup,
+        ):
+            evidence = async_check_advertisement(hass, TEST_ADDRESS)
+
+        assert evidence.status is FreshnessStatus.FRESH
+        assert evidence.source == "proxy"
+        assert evidence.age_seconds == pytest.approx(1.0)
+
     async def test_advertisement_exactly_at_the_limit_still_passes(
         self, hass: HomeAssistant
     ) -> None:
@@ -255,9 +278,10 @@ class TestGateConnection:
         """Retry must work without restarting the flow."""
         stale = _service_info(age=MAX_ADVERTISEMENT_AGE_SECONDS + 5)
         fresh = _service_info(age=1.0)
+        # Each check consults both scanner views, so two lookups per call.
         with patch(
             f"{_FRESHNESS}.bluetooth.async_last_service_info",
-            side_effect=[stale, fresh],
+            side_effect=[stale, stale, fresh, fresh],
         ):
             assert not async_check_advertisement(hass, TEST_ADDRESS).is_fresh
             assert async_check_advertisement(hass, TEST_ADDRESS).is_fresh
@@ -293,8 +317,8 @@ class TestWaitForAdvertisement:
             evidence, resolved = await async_wait_for_advertisement(hass, TEST_ADDRESS)
         assert evidence.is_fresh
         assert resolved is device
-        # One glance at the history, no polling.
-        assert lookup.call_count == 1
+        # One glance at the history - both scanner views, but no polling.
+        assert lookup.call_count == 2
 
     async def test_an_advertisement_arriving_during_the_wait_is_accepted(
         self, hass: HomeAssistant

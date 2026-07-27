@@ -275,12 +275,14 @@ def _path_from_scanner_device(
 
 @callback
 def async_connection_paths(hass: HomeAssistant, address: str) -> tuple[ConnectionPath, ...]:
-    """Return every currently connectable path to ``address``, best first.
+    """Return every connection path Home Assistant may use, best first.
 
     The ordering reproduces ``habluetooth``'s routing: RSSI first, then a
     re-sort by ``score_connection_path`` using the gap between the two strongest
     signals, so slot exhaustion and recent failures move a path down exactly as
-    they would during a real connect.
+    they would during a real connect. When the connectable view is empty, use
+    the same non-connectable fallback as device resolution for proxies that
+    misclassify an otherwise connectable bed.
     """
     try:
         scanner_devices = list(
@@ -291,7 +293,19 @@ def async_connection_paths(hass: HomeAssistant, address: str) -> tuple[Connectio
         return ()
 
     if not scanner_devices:
-        return ()
+        try:
+            scanner_devices = list(
+                bluetooth.async_scanner_devices_by_address(
+                    hass, address.upper(), connectable=False
+                )
+            )
+        except Exception:  # noqa: BLE001 - a missing manager must not block setup
+            _LOGGER.debug(
+                "Could not enumerate fallback scanners for %s", address, exc_info=True
+            )
+            return ()
+        if not scanner_devices:
+            return ()
 
     scanner_devices.sort(key=_sort_rssi, reverse=True)
     rssi_diff = 0
@@ -512,8 +526,12 @@ _DEFAULT_STRINGS: dict[str, str] = {
         "appears."
     ),
     "transport_local_alternative": (
+        # Deliberately does not claim the local signal is weaker. Home Assistant
+        # ranks paths on connection slots and recent failures as well as signal,
+        # so a proxy can win while the host adapter is in fact stronger. The
+        # translations carry this same wording.
         "A Bluetooth adapter on this Home Assistant host ({scanner}) can also "
-        "see it, with a weaker signal."
+        "see it."
     ),
     "transport_preferred_unavailable": (
         "⚠️ The selected adapter ({adapter}) is not currently available for this "

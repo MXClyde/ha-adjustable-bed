@@ -3201,6 +3201,33 @@ async def test_the_probe_runs_once_even_if_the_progress_step_is_re_entered(
     assert connects.await_count == 1
 
 
+async def test_consumed_setup_progress_does_not_start_another_probe(
+    hass: HomeAssistant,
+) -> None:
+    """A late completion callback must keep returning progress-done."""
+    flow = AdjustableBedConfigFlow()
+    flow.hass = hass
+    flow._pending_entry = {
+        CONF_ADDRESS: "AA:BB:CC:DD:EE:01",
+        CONF_NAME: "Test Bed",
+    }
+    flow.async_begin_operation()
+    flow.operation.terminal_consumed = True
+
+    with (
+        patch.object(flow, "_async_start_probe_operation") as start_probe,
+        patch.object(
+            flow,
+            "async_run_operation_step",
+            new=AsyncMock(return_value={"type": FlowResultType.SHOW_PROGRESS_DONE}),
+        ),
+    ):
+        result = await flow.async_step_setup_progress()
+
+    assert result["type"] == FlowResultType.SHOW_PROGRESS_DONE
+    start_probe.assert_not_called()
+
+
 async def test_a_not_advertising_bed_offers_retry_and_still_allows_finishing(
     hass: HomeAssistant,
     mock_bluetooth_service_info: BluetoothServiceInfoBleak,

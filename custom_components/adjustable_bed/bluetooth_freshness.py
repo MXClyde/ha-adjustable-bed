@@ -215,6 +215,24 @@ def _coerce_rssi(value: Any) -> int | None:
         return None
 
 
+def _newest_sighting(*sightings: _Sighting | None) -> _Sighting | None:
+    """Return the freshest sighting whose timestamp can be compared."""
+    available = [sighting for sighting in sightings if sighting is not None]
+    if not available:
+        return None
+
+    aged = [
+        (age, sighting)
+        for sighting in available
+        if (age := _coerce_age(sighting.seen_at)) is not None
+    ]
+    if aged:
+        return min(aged, key=lambda item: item[0])[1]
+    # Preserve the existing invalid-timestamp result when neither view carries
+    # a timestamp that can prove freshness.
+    return available[0]
+
+
 @callback
 def async_check_advertisement(
     hass: HomeAssistant,
@@ -231,14 +249,15 @@ def async_check_advertisement(
     """
     normalized = address.upper()
     if source:
-        sighting = _async_sighting_from_scanner(hass, normalized, source)
-        if sighting is None:
-            # Same proxy quirk as below: a scanner can report a connectable bed
-            # as non-connectable, and a pinned adapter deserves that fallback
-            # just as much as the merged view does.
-            sighting = _async_sighting_from_scanner(
+        # A proxy can keep a stale connectable snapshot while publishing current
+        # advertisements only in its non-connectable view. Compare both so the
+        # stale record cannot hide the live one.
+        sighting = _newest_sighting(
+            _async_sighting_from_scanner(hass, normalized, source),
+            _async_sighting_from_scanner(
                 hass, normalized, source, connectable=False
-            )
+            ),
+        )
         if sighting is None:
             # The chosen transport cannot see the bed. Report that specifically
             # rather than falling back to a scanner the user did not select: a
@@ -249,14 +268,15 @@ def async_check_advertisement(
                 status=FreshnessStatus.SOURCE_UNAVAILABLE, source=source
             )
     else:
-        sighting = _async_sighting(hass, normalized)
-        if sighting is None:
-            # Some ESPHome proxies have been observed classifying a perfectly
-            # connectable bed as non-connectable. The integration has always
-            # allowed that fallback, so losing it here would stop setup working
-            # on exactly the hardware it was added for. The freshness rules
-            # still apply to whatever is found.
-            sighting = _async_sighting(hass, normalized, connectable=False)
+        # Some ESPHome proxies have been observed classifying a perfectly
+        # connectable bed as non-connectable. Compare both histories because an
+        # old connectable snapshot can coexist with a current non-connectable
+        # one; falling back only when the first view is empty would reject a bed
+        # that is actively advertising.
+        sighting = _newest_sighting(
+            _async_sighting(hass, normalized),
+            _async_sighting(hass, normalized, connectable=False),
+        )
         if sighting is None:
             _LOGGER.debug("No advertisement history for %s", address)
             return AdvertisementEvidence(status=FreshnessStatus.MISSING, source=source)
