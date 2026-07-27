@@ -25,8 +25,10 @@ from custom_components.adjustable_bed.bond_verification import (
 )
 from custom_components.adjustable_bed.const import (
     BED_TYPE_LINAK,
+    BED_TYPE_LOGICDATA,
     BED_TYPE_OKIMAT,
     BED_TYPE_OKIN_CST,
+    BED_TYPE_OKIN_UUID,
 )
 
 _LOCAL = ConnectionPath(source="hci0", transport=TransportClass.LOCAL, adapter="hci0")
@@ -46,8 +48,9 @@ def _client(read: Any = None) -> MagicMock:
 class TestVerifierApplicability:
     """A read only proves a bond where the read is known to be bond-gated."""
 
-    def test_a_pairing_required_bed_has_a_verifier(self) -> None:
-        assert has_evidence_backed_verifier(BED_TYPE_OKIMAT, None)
+    @pytest.mark.parametrize("bed_type", [BED_TYPE_OKIMAT, BED_TYPE_OKIN_UUID])
+    def test_okin_uuid_protocol_has_a_verifier(self, bed_type: str) -> None:
+        assert has_evidence_backed_verifier(bed_type, None)
 
     def test_a_bed_that_never_bonds_has_no_verifier(self) -> None:
         """A successful read on an unbonded protocol proves nothing at all."""
@@ -55,6 +58,10 @@ class TestVerifierApplicability:
 
     def test_okin_cst_has_no_positive_verifier(self) -> None:
         assert not has_evidence_backed_verifier(BED_TYPE_OKIN_CST, None)
+
+    def test_pairing_requirement_alone_does_not_supply_a_verifier(self) -> None:
+        """Logicdata gates its command characteristic, not this DIS read."""
+        assert not has_evidence_backed_verifier(BED_TYPE_LOGICDATA, None)
 
     async def test_no_verifier_reports_unsupported_without_reading(self) -> None:
         client = _client()

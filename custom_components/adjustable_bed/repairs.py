@@ -324,10 +324,11 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
         )
 
     async def _async_persist_recovered_bond(self, result: OperationResult | None) -> None:
-        """Record the new bond and its owner, then reload the entry."""
+        """Record the new bond and its owner, then ensure the entry reloads."""
         entry = self._entry()
         if entry is None or result is None or result.payload is None:
             return
+        coordinator = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
         data = {
             **entry.data,
             CONF_BLE_BOND_ESTABLISHED: True,
@@ -335,7 +336,10 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
         }
         data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
         self.hass.config_entries.async_update_entry(entry, data=data)
-        await self.hass.config_entries.async_reload(entry.entry_id)
+        if coordinator is None:
+            # A loaded entry has an update listener which schedules the reload.
+            # Setup-retry entries have no listener yet, so reload those here.
+            await self.hass.config_entries.async_reload(entry.entry_id)
 
     async def async_step_confirm(
         self, user_input: dict[str, Any] | None = None

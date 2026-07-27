@@ -50,7 +50,6 @@ from .bluetooth_bond import (
 )
 from .bluetooth_freshness import (
     ADVERTISEMENT_WAIT_SECONDS,
-    advertisement_time_marker,
     async_wait_for_advertisement,
 )
 from .bluetooth_transport import (
@@ -360,15 +359,22 @@ async def _async_recovery_transaction(
                 payload=removal,
             )
         # RemoveDevice invalidates the BlueZ Device1 object used by the
-        # preflight connection. Require a later advertisement so the reconnect
-        # receives a newly resolved BLEDevice instead of the vanished object.
-        seen_after = advertisement_time_marker()
+        # preflight connection. Require an advertisement after the RPC
+        # completed so the reconnect receives a newly resolved BLEDevice. The
+        # removal helper records that point before its follow-up object-tree
+        # verification, which may itself overlap the advertisement we need.
+        if removal.removed_at is None:
+            return OperationResult(
+                outcome=OperationOutcome.BOND_VERIFICATION_FAILED,
+                detail="removal_completion_time_unavailable",
+                payload=removal,
+            )
         _report(SetupAction.LOCATING)
         evidence, device = await async_wait_for_advertisement(
             hass,
             address,
             source=target_source,
-            seen_after=seen_after,
+            seen_after=removal.removed_at,
             wait_timeout=ADVERTISEMENT_WAIT_SECONDS,
             on_progress=report_progress,
         )

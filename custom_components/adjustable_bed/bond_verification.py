@@ -37,10 +37,10 @@ from typing import TYPE_CHECKING, Any
 from .ble_auth import is_ble_authentication_error
 from .bluetooth_transport import ConnectionPath, TransportClass
 from .const import (
-    BED_TYPE_OKIN_CST,
+    BED_TYPE_OKIMAT,
+    BED_TYPE_OKIN_UUID,
     DEVICE_INFO_CHARS,
     DEVICE_INFO_READ_TIMEOUT,
-    requires_pairing,
 )
 
 if TYPE_CHECKING:
@@ -138,17 +138,12 @@ def _now() -> str:
 def has_evidence_backed_verifier(bed_type: str | None, protocol_variant: str | None) -> bool:
     """Return True when this protocol has a known authentication-gated read.
 
-    Only beds this integration already treats as bond-gated qualify. For those,
-    an unbonded link is observed in the field to fail the Device Information
-    read with GATT error 5. For anything else there is no evidence that the read
-    is gated at all, so a successful read would prove nothing and must not be
-    dressed up as verification.
+    The standard Device Information model-number read is known to be bond-gated
+    for the Okin UUID protocol and its legacy alias. Requiring pairing is not
+    sufficient evidence: other protocols gate a different characteristic, so a
+    successful model-number read would prove nothing about their bond.
     """
-    # This receiver never answers the Device Information read, even when bonded,
-    # so recovery could destroy its old bond but could never prove a replacement.
-    return bed_type != BED_TYPE_OKIN_CST and requires_pairing(
-        bed_type or "", protocol_variant
-    )
+    return bed_type in (BED_TYPE_OKIMAT, BED_TYPE_OKIN_UUID)
 
 
 async def async_verify_authenticated_access(

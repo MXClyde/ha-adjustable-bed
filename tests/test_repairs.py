@@ -20,6 +20,8 @@ from custom_components.adjustable_bed.bluetooth_transport import (
 )
 from custom_components.adjustable_bed.bond_verification import (
     CONF_BLE_BOND_CONTEXT,
+    BondEvidence,
+    BondOwner,
     BondVerificationStatus,
 )
 from custom_components.adjustable_bed.const import (
@@ -32,7 +34,10 @@ from custom_components.adjustable_bed.repairs import (
     PairingRequiredRepairFlow,
     async_create_fix_flow,
 )
-from custom_components.adjustable_bed.setup_operation import OperationOutcome
+from custom_components.adjustable_bed.setup_operation import (
+    OperationOutcome,
+    OperationResult,
+)
 
 from .conftest import TEST_ADDRESS, TEST_NAME
 
@@ -147,6 +152,92 @@ async def test_stale_recovery_stops_when_the_issue_was_cleared(
     assert result.outcome is OperationOutcome.UNPAIR_FAILED
     assert result.detail == "pairing_issue_no_longer_exists"
     recover.assert_not_called()
+
+
+def _verified_local_bond() -> BondEvidence:
+    return BondEvidence(
+        status=BondVerificationStatus.VERIFIED,
+        owner=BondOwner(
+            transport=TransportClass.LOCAL,
+            source="11:22:33:44:55:66",
+            adapter="hci0",
+        ),
+        operation="stale_bond_recovery",
+        observed_at="2026-07-27T00:00:00+00:00",
+    )
+
+
+async def test_recovery_persistence_relies_on_the_loaded_entry_listener(
+    hass: HomeAssistant,
+) -> None:
+    """A loaded entry's update listener must be the only reload source."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: "okimat",
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="loaded_recovery_entry",
+    )
+    entry.add_to_hass(hass)
+    coordinator = MagicMock()
+    coordinator.consume_internal_entry_update.return_value = False
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    async def reload_listener(
+        _hass: HomeAssistant, updated_entry: MockConfigEntry
+    ) -> None:
+        await hass.config_entries.async_reload(updated_entry.entry_id)
+
+    entry.add_update_listener(reload_listener)
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, entry.entry_id)
+    flow.hass = hass
+    result = OperationResult(
+        outcome=OperationOutcome.SUCCESS,
+        payload=_verified_local_bond(),
+    )
+
+    with patch.object(
+        hass.config_entries, "async_reload", new=AsyncMock()
+    ) as mock_reload:
+        await flow._async_persist_recovered_bond(result)
+        await hass.async_block_till_done()
+
+    mock_reload.assert_awaited_once_with(entry.entry_id)
+
+
+async def test_recovery_persistence_reloads_an_unloaded_entry(
+    hass: HomeAssistant,
+) -> None:
+    """A setup-retry entry has no update listener, so persistence reloads it."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: "okimat",
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="unloaded_recovery_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, entry.entry_id)
+    flow.hass = hass
+    result = OperationResult(
+        outcome=OperationOutcome.SUCCESS,
+        payload=_verified_local_bond(),
+    )
+
+    with patch.object(
+        hass.config_entries, "async_reload", new=AsyncMock()
+    ) as mock_reload:
+        await flow._async_persist_recovered_bond(result)
+
+    mock_reload.assert_awaited_once_with(entry.entry_id)
 
 
 def test_pairing_repair_translations_cover_every_progress_and_result() -> None:

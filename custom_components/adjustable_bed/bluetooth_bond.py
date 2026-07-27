@@ -37,6 +37,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from .bluetooth_freshness import advertisement_time_marker
+
 _LOGGER = logging.getLogger(__name__)
 
 _BLUEZ_SERVICE = "org.bluez"
@@ -222,6 +224,7 @@ class BondRemovalResult:
     status: BondRemovalStatus
     record: LocalBondRecord | None = None
     error: str | None = None
+    removed_at: float | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -374,6 +377,10 @@ async def async_remove_local_bond(record: LocalBondRecord) -> BondRemovalResult:
                     body=[record.device_path],
                 )
             )
+            # Capture the cutoff as soon as RemoveDevice completes. The object
+            # tree verification below can overlap a new advertisement whose
+            # recreated Device1 object is already safe to reconnect through.
+            removed_at = advertisement_time_marker()
     except Exception as err:  # noqa: BLE001 - any failure means "not removed"
         _LOGGER.warning("Could not remove the host bond for %s: %s", record.address, err)
         return BondRemovalResult(
@@ -417,7 +424,11 @@ async def async_remove_local_bond(record: LocalBondRecord) -> BondRemovalResult:
             )
 
     _LOGGER.info("Removed the host Bluetooth bond for %s", record.address)
-    return BondRemovalResult(status=BondRemovalStatus.REMOVED, record=record)
+    return BondRemovalResult(
+        status=BondRemovalStatus.REMOVED,
+        record=record,
+        removed_at=removed_at,
+    )
 
 
 async def async_remove_host_bond(

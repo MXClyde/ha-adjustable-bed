@@ -575,10 +575,10 @@ class TestPairingPersistence:
             ) as mock_establish,
         ):
             evidence = await flow._attempt_pairing(flow._manual_data[CONF_ADDRESS])
-        # A MagicMock client makes the auth-gated read non-awaitable, so
-        # verification lands in its generic-error branch. Pin that rather than
-        # "not AUTH_FAILED", which would keep passing if verification broke.
-        assert evidence.status is BondVerificationStatus.INCONCLUSIVE
+        # This protocol has no evidence-backed Device Information verifier.
+        # Pairing still runs after service discovery, but an unrelated read
+        # must not be presented as proof that the resulting bond works.
+        assert evidence.status is BondVerificationStatus.UNSUPPORTED
 
         assert events == ["connect", "pair", "disconnect"]
         # The keyword is omitted rather than passed False: this bed bonds after

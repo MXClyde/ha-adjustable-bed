@@ -43,6 +43,7 @@ from custom_components.adjustable_bed.setup_operation import OperationOutcome
 
 TEST_ADDRESS = "AA:BB:CC:DD:EE:FF"
 _RECOVERY = "custom_components.adjustable_bed.bond_recovery"
+_REMOVED_AT = 123.0
 
 
 def _record(
@@ -328,7 +329,11 @@ class TestRunningRecovery:
     ) -> None:
         """Rerouting after removal must not create a bond on a proxy."""
         fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
-        removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=_record())
+        removed = BondRemovalResult(
+            status=BondRemovalStatus.REMOVED,
+            record=_record(),
+            removed_at=_REMOVED_AT,
+        )
         preflight_client = _client()
         recovery_client = _client("proxy-source")
         with (
@@ -412,12 +417,60 @@ class TestRunningRecovery:
         connect.assert_awaited_once()
         assert result.outcome is OperationOutcome.UNPAIR_FAILED
 
+    async def test_removal_without_a_completion_time_stops_before_reconnect(
+        self, hass: HomeAssistant
+    ) -> None:
+        """Never reuse the vanished Device1 without a trustworthy cutoff."""
+        fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
+        removed = BondRemovalResult(
+            status=BondRemovalStatus.REMOVED,
+            record=_record(),
+        )
+        client = _client()
+        wait = AsyncMock(return_value=(fresh, MagicMock()))
+        with (
+            patch(f"{_RECOVERY}.async_wait_for_advertisement", wait),
+            patch(
+                f"{_RECOVERY}.async_remove_local_bond",
+                AsyncMock(return_value=removed),
+            ),
+            patch(
+                "bleak_retry_connector.establish_connection",
+                AsyncMock(return_value=client),
+            ) as connect,
+            patch(f"{_RECOVERY}.async_path_for_source", return_value=_local_path()),
+            patch(
+                f"{_RECOVERY}.async_verify_authenticated_access",
+                AsyncMock(
+                    return_value=_bond(
+                        BondVerificationStatus.AUTH_FAILED, "preflight"
+                    )
+                ),
+            ),
+        ):
+            result = await async_recover_local_bond(
+                hass,
+                address=TEST_ADDRESS,
+                name="Bed",
+                offer=self._offer(),
+                bed_type=BED_TYPE_OKIMAT,
+                protocol_variant=None,
+            )
+        connect.assert_awaited_once()
+        wait.assert_awaited_once()
+        assert result.outcome is OperationOutcome.BOND_VERIFICATION_FAILED
+        assert result.detail == "removal_completion_time_unavailable"
+
     async def test_an_unverified_new_bond_is_not_a_success(
         self, hass: HomeAssistant
     ) -> None:
         """The old bond is gone; claiming success would close a live problem."""
         fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
-        removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=_record())
+        removed = BondRemovalResult(
+            status=BondRemovalStatus.REMOVED,
+            record=_record(),
+            removed_at=_REMOVED_AT,
+        )
         preflight_client = _client()
         recovery_client = _client()
         with (
@@ -459,7 +512,11 @@ class TestRunningRecovery:
         self, hass: HomeAssistant
     ) -> None:
         fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
-        removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=_record())
+        removed = BondRemovalResult(
+            status=BondRemovalStatus.REMOVED,
+            record=_record(),
+            removed_at=_REMOVED_AT,
+        )
         preflight_client = _client()
         recovery_client = _client()
         with (
@@ -505,7 +562,11 @@ class TestRunningRecovery:
         fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
         old_device = MagicMock(name="old_device")
         new_device = MagicMock(name="new_device")
-        removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=_record())
+        removed = BondRemovalResult(
+            status=BondRemovalStatus.REMOVED,
+            record=_record(),
+            removed_at=_REMOVED_AT,
+        )
         preflight_client = _client()
         recovery_client = _client()
         connect = AsyncMock(side_effect=[preflight_client, recovery_client])
@@ -541,13 +602,17 @@ class TestRunningRecovery:
         assert result.succeeded
         assert connect.await_args_list[0].args[1] is old_device
         assert connect.await_args_list[1].args[1] is new_device
-        assert wait.await_args_list[1].kwargs["seen_after"] is not None
+        assert wait.await_args_list[1].kwargs["seen_after"] == _REMOVED_AT
 
     async def test_cancellation_after_removal_still_verifies_and_persists(
         self, hass: HomeAssistant
     ) -> None:
         fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
-        removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=_record())
+        removed = BondRemovalResult(
+            status=BondRemovalStatus.REMOVED,
+            record=_record(),
+            removed_at=_REMOVED_AT,
+        )
         removal_started = asyncio.Event()
         release_removal = asyncio.Event()
         gate_events: list[str] = []
