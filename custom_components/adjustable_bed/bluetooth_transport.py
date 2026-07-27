@@ -490,7 +490,7 @@ _DEFAULT_STRINGS: dict[str, str] = {
     "transport_proxy": "Bluetooth proxy",
     "transport_unknown": "Bluetooth",
     "transport_likely": "Likely connection: {kind} · {scanner}{signal}",
-    "transport_signal": " · {rssi} dBm",
+    "transport_signal": "· {rssi} dBm",
     "transport_none": (
         "⚠️ No Bluetooth adapter or proxy can currently see this device. "
         "You can still finish setup; Home Assistant will connect when it "
@@ -557,7 +557,11 @@ async def _async_describe_path(hass: HomeAssistant, path: ConnectionPath, key: s
     """Render one path as "<kind> · <scanner> · <rssi> dBm"."""
     signal = ""
     if path.rssi is not None:
-        signal = (await _async_string(hass, "transport_signal")).format(rssi=path.rssi)
+        # The separator lives here rather than in the string, because hassfest
+        # rejects translation values with leading or trailing spaces.
+        signal = " " + (await _async_string(hass, "transport_signal")).format(
+            rssi=path.rssi
+        )
     return (await _async_string(hass, key)).format(
         kind=await _async_kind(hass, path),
         scanner=path.display_name,
