@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -22,6 +24,7 @@ from custom_components.adjustable_bed.repairs import (
     PairingRequiredRepairFlow,
     async_create_fix_flow,
 )
+from custom_components.adjustable_bed.setup_operation import OperationOutcome
 
 from .conftest import TEST_ADDRESS, TEST_NAME
 
@@ -75,6 +78,54 @@ async def test_confirm_step_aborts_on_failed_pair(hass: HomeAssistant) -> None:
 
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "pairing_failed"
+
+
+async def test_stale_recovery_stops_when_the_issue_was_cleared(
+    hass: HomeAssistant,
+) -> None:
+    """An open confirmation cannot act after its evidence-bearing issue is gone."""
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, None)
+    flow.hass = hass
+    flow._offer = MagicMock()
+
+    with patch(
+        "custom_components.adjustable_bed.repairs.async_recover_local_bond"
+    ) as recover:
+        result = await flow._async_recovery_worker()
+
+    assert result.outcome is OperationOutcome.UNPAIR_FAILED
+    assert result.detail == "pairing_issue_no_longer_exists"
+    recover.assert_not_called()
+
+
+def test_pairing_repair_translations_cover_every_progress_and_result() -> None:
+    """The Repairs namespace must localize phases and terminal guidance."""
+    root = Path(__file__).parents[1] / "custom_components/adjustable_bed"
+    required_progress = {
+        "locating",
+        "connecting",
+        "pairing",
+        "verifying_bond",
+        "disconnecting",
+        "unpairing",
+    }
+    required_results = {
+        "recovery_success",
+        "recovery_not_run",
+        "recovery_not_advertising",
+        "recovery_unpair_failed",
+        "recovery_failed_unchanged",
+        "recovery_partial",
+    }
+    for relative in ("strings.json", "translations/en.json", "translations/nb.json"):
+        data = json.loads((root / relative).read_text())
+        pairing = data["issues"]["pairing_required"]
+        flow = pairing["fix_flow"]
+        assert required_progress <= flow["progress"].keys()
+        assert required_results <= flow["abort"].keys()
+        assert "title" in pairing
+        assert "confirm" in flow["step"]
+        assert "pairing_failed" in flow["abort"]
 
 
 async def test_try_pair_returns_false_when_device_not_in_range(hass: HomeAssistant) -> None:

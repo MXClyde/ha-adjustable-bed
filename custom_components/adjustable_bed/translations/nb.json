@@ -119,8 +119,13 @@
   },
   "issues": {
     "pairing_required": {
+      "title": "Bluetooth-paring kreves for {name}",
       "fix_flow": {
         "step": {
+          "confirm": {
+            "title": "Par den justerbare sengen",
+            "description": "**{name}** ({address}) trenger en Bluetooth-kobling før den kan styres.\n\n1. Sett sengen i paremodus. **OKIN-baser** (Okimat, Okin CST, Nectar OKIN-*, Mattress Firm 900-O): slå kontrollboksen av og på ved å trekke ut kontakten i omtrent 30 sekunder og sette den inn igjen (lyset blinker blått og blir deretter grønt). De har ingen Bluetooth-pareknapp. **Leggett & Platt Smart Bed (LP Comfort Connect)**: trekk ut sengens strømledning, fjern eventuelle batterier fra strømforsyningen, og koble deretter til igjen. Vent på en lyd og et pulserende blått lys under sengen. **Andre senger**: hold inne pareknappen på kontrollboksen eller fjernkontrollen til lyset blinker.\n2. Trykk **Send inn** mens sengen er i paremodus for å pare.\n\nParingen skjer på Home Assistant-verten eller Bluetooth-proxyen, ikke på telefonen. ESPHome-proxyer må bruke ESPHome 2024.3.0 eller nyere."
+          },
           "proxy_bond": {
             "title": "Koblingen er lagret på en Bluetooth-proxy",
             "description": "**{name}** ({address}) klarte sist ikke å autentisere via **{transport}**, som er en Bluetooth-proxy og ikke denne Home Assistant-verten.\n\nEn proxy har sine egne Bluetooth-koblinger, og Home Assistant kan verken lese eller fjerne dem, så det er ingenting denne reparasjonen trygt kan endre.\n\nSlik rydder du opp: flash proxyen på nytt eller tilbakestill den, slik at den glemmer koblingene sine, og sett så sengen i paremodus så den pares igjen. Alternativt kan du sette sengens foretrukne adapter til en Bluetooth-adapter på Home Assistant-verten og pare der, hvor koblingen kan administreres."
@@ -134,9 +139,24 @@
             "description": "**{name}**\n\n{outcome}"
           }
         },
+        "progress": {
+          "locating": "Leter etter sengen…",
+          "connecting": "Kobler til over Bluetooth…",
+          "pairing": "Parer med sengen…",
+          "verifying_bond": "Bekrefter Bluetooth-koblingen…",
+          "disconnecting": "Kobler fra…",
+          "unpairing": "Fjerner Bluetooth-koblingen…"
+        },
         "abort": {
+          "pairing_failed": "Paringen ble ikke fullført. Sett sengen i paremodus igjen (OKIN-baser: trekk ut kontakten til kontrollboksen i omtrent 30 sekunder og sett den inn igjen; Leggett & Platt Smart Bed: trekk ut sengens strømledning, fjern batteriene fra strømforsyningen, koble til igjen og vent på lyden og det pulserende blå lyset; andre senger: hold inne pareknappen), kontroller at sengen er innenfor rekkevidde av Home Assistant-adapteren eller en ESPHome-proxy med 2024.3.0 eller nyere, og kjør deretter reparasjonen på nytt.",
           "proxy_bond_guidance": "Ingenting ble endret. Bluetooth-koblingen for denne sengen ligger på en proxy, der Home Assistant ikke når den.",
-          "stale_bond_recovery_failed": "Koblingen kunne ikke gjenopprettes, så denne reparasjonen forblir åpen. Sett sengen i paremodus og kjør den på nytt."
+          "stale_bond_recovery_failed": "Koblingen kunne ikke gjenopprettes, så denne reparasjonen forblir åpen. Sett sengen i paremodus og kjør den på nytt.",
+          "recovery_success": "✅ Bluetooth-koblingen ble bekreftet. Sengen skal nå reagere normalt.",
+          "recovery_not_run": "❌ Gjenopprettingen ble ikke kjørt.",
+          "recovery_not_advertising": "❌ Sengen sender ikke ut Bluetooth-signal, så ingenting ble endret og den gamle koblingen er fortsatt lagret. Sett sengen i paremodus og kjør reparasjonen på nytt.",
+          "recovery_unpair_failed": "❌ Den gamle koblingen kunne ikke fjernes, så ingenting annet ble forsøkt.",
+          "recovery_failed_unchanged": "❌ Den eksisterende koblingen kunne ikke kontrolleres på en trygg måte, så ingenting ble endret. Kontroller at sengen er innenfor rekkevidde, og kjør reparasjonen på nytt.",
+          "recovery_partial": "❌ Den gamle koblingen ble fjernet, men den nye kunne ikke bekreftes. Reparasjonen forblir derfor åpen. Sett sengen i paremodus og kjør den på nytt."
         }
       }
     }

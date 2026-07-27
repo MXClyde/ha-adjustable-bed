@@ -32,8 +32,11 @@ keep the link it was going to recover through. Those beds get guidance instead.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -45,22 +48,26 @@ from .bluetooth_bond import (
     async_remove_local_bond,
     select_local_bond,
 )
-from .bluetooth_freshness import ADVERTISEMENT_WAIT_SECONDS, async_wait_for_advertisement
+from .bluetooth_freshness import (
+    ADVERTISEMENT_WAIT_SECONDS,
+    advertisement_time_marker,
+    async_wait_for_advertisement,
+)
 from .bluetooth_transport import (
     ConnectionPath,
     TransportClass,
     async_path_for_source,
-    async_predict_path,
     client_source,
 )
 from .bond_verification import (
+    BondEvidence,
     BondOwner,
     BondVerificationStatus,
     async_verify_authenticated_access,
     build_bond_context,
+    has_evidence_backed_verifier,
 )
 from .const import (
-    ADAPTER_AUTO,
     CONNECTION_PROFILES,
     DEFAULT_CONNECTION_PROFILE,
     grants_one_connection_per_pairing_window,
@@ -70,6 +77,7 @@ from .setup_operation import OperationOutcome, OperationResult, SetupAction
 
 if TYPE_CHECKING:
     from bleak import BleakClient
+    from bleak.backends.device import BLEDevice
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -84,6 +92,8 @@ class RecoveryEligibility(str):
     AMBIGUOUS = "ambiguous"
     UNREADABLE = "unreadable"
     KEEPS_FIRST_LINK = "keeps_first_link"
+    NO_VERIFIER = "no_verifier"
+    UNKNOWN_SOURCE = "unknown_source"
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,12 +137,15 @@ async def async_recovery_offer(
         # power-cycled, so recovery cannot both remove and reconnect.
         return RecoveryOffer(eligibility=RecoveryEligibility.KEEPS_FIRST_LINK)
 
+    if not has_evidence_backed_verifier(bed_type, protocol_variant):
+        return RecoveryOffer(eligibility=RecoveryEligibility.NO_VERIFIER)
+
     if not evidence_is_local_auth_failure(issue_data):
         transport = issue_data.get("evidence_transport")
         return RecoveryOffer(
             eligibility=(
                 RecoveryEligibility.NOT_LOCAL
-                if transport
+                if transport and transport != TransportClass.LOCAL.value
                 else RecoveryEligibility.NO_EVIDENCE
             )
         )
@@ -142,6 +155,12 @@ async def async_recovery_offer(
         source=issue_data.get("evidence_source"),
         adapter=issue_data.get("evidence_adapter"),
     )
+    if owner.source is None:
+        return RecoveryOffer(
+            eligibility=RecoveryEligibility.UNKNOWN_SOURCE,
+            owner=owner,
+        )
+
     inventory = await async_read_local_bonds(address)
     selection = select_local_bond(
         inventory, owner_source=owner.source, owner_adapter=owner.adapter
@@ -157,6 +176,13 @@ async def async_recovery_offer(
     )
 
 
+@dataclass(slots=True)
+class _RecoveryState:
+    """Cancellation boundary for a destructive recovery transaction."""
+
+    removal_started: bool = False
+
+
 async def async_recover_local_bond(
     hass: HomeAssistant,
     *,
@@ -165,7 +191,8 @@ async def async_recover_local_bond(
     offer: RecoveryOffer,
     bed_type: str | None,
     protocol_variant: str | None,
-    preferred_adapter: str = ADAPTER_AUTO,
+    transport_operation: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
+    on_verified: Callable[[OperationResult], Awaitable[None]] | None = None,
     report_action: Callable[[SetupAction], None] | None = None,
     report_progress: Callable[[float], None] | None = None,
     report_path: Callable[[ConnectionPath | None], None] | None = None,
@@ -173,124 +200,294 @@ async def async_recover_local_bond(
 ) -> OperationResult:
     """Remove one exact host bond, pair again, and prove the new bond.
 
-    Everything happens in the calling task, because the per-address connect lock
-    is reentrant per ``asyncio.Task`` and the whole client lifetime has to sit
-    inside one owner.
+    Cancellation is honoured until removal begins. Once BlueZ may have removed
+    the old bond, the transaction is allowed to finish so closing the Repairs
+    dialog cannot strand the bed halfway through recovery.
     """
-    from bleak import BleakClient
-    from bleak_retry_connector import establish_connection
-
-    from .address_lock import async_get_connect_lock
-
-    def _report(action: SetupAction) -> None:
-        if report_action is not None:
-            report_action(action)
-
     if not offer.is_eligible:
         return OperationResult(
             outcome=OperationOutcome.UNPAIR_FAILED, detail=offer.eligibility
         )
 
-    # Reachability first. Removing a bond from a bed that cannot answer leaves
-    # the user worse off than the stale bond did.
-    _report(SetupAction.LOCATING)
-    evidence, device = await async_wait_for_advertisement(
-        hass,
-        address,
-        wait_timeout=ADVERTISEMENT_WAIT_SECONDS,
-        on_progress=report_progress,
+    state = _RecoveryState()
+    transaction = hass.async_create_task(
+        _async_recovery_transaction(
+            hass,
+            address=address,
+            name=name,
+            offer=offer,
+            bed_type=bed_type,
+            protocol_variant=protocol_variant,
+            transport_operation=transport_operation,
+            report_action=report_action,
+            report_progress=report_progress,
+            report_path=report_path,
+            track_client=track_client,
+            state=state,
+        ),
+        eager_start=False,
     )
-    if not evidence.is_fresh or device is None:
+    try:
+        result = await asyncio.shield(transaction)
+    except asyncio.CancelledError:
+        if not state.removal_started:
+            transaction.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await transaction
+            raise
         _LOGGER.info(
-            "Not recovering the bond for %s: the bed is not advertising (%s)",
+            "Finishing bond recovery for %s after the Repairs flow was cancelled",
             address,
-            evidence.status,
         )
-        return OperationResult(
-            outcome=OperationOutcome.NOT_ADVERTISING, detail=str(evidence.status)
+        result = await transaction
+    if result.succeeded and on_verified is not None:
+        async def _persist() -> None:
+            await on_verified(result)
+
+        persistence = hass.async_create_task(_persist(), eager_start=False)
+        try:
+            await asyncio.shield(persistence)
+        except asyncio.CancelledError:
+            await persistence
+    return result
+
+
+async def _async_recovery_transaction(
+    hass: HomeAssistant,
+    *,
+    address: str,
+    name: str,
+    offer: RecoveryOffer,
+    bed_type: str | None,
+    protocol_variant: str | None,
+    transport_operation: Callable[[str], AbstractAsyncContextManager[None]] | None,
+    report_action: Callable[[SetupAction], None] | None,
+    report_progress: Callable[[float], None] | None,
+    report_path: Callable[[ConnectionPath | None], None] | None,
+    track_client: Callable[[BleakClient | None], None] | None,
+    state: _RecoveryState,
+) -> OperationResult:
+    """Run one serialized, source-pinned recovery transaction."""
+    from .address_lock import async_get_connect_lock
+
+    @contextlib.asynccontextmanager
+    async def _transport_gate() -> AsyncIterator[None]:
+        if transport_operation is not None:
+            async with transport_operation("stale_bond_recovery"):
+                yield
+            return
+        async with async_get_connect_lock(hass, address):
+            yield
+
+    def _report(action: SetupAction) -> None:
+        if report_action is not None:
+            report_action(action)
+
+    assert offer.owner is not None
+    target_source = offer.owner.source
+    assert target_source is not None
+
+    async with _transport_gate():
+        _report(SetupAction.LOCATING)
+        evidence, device = await async_wait_for_advertisement(
+            hass,
+            address,
+            source=target_source,
+            wait_timeout=ADVERTISEMENT_WAIT_SECONDS,
+            on_progress=report_progress,
+        )
+        if not evidence.is_fresh or device is None:
+            _LOGGER.info(
+                "Not recovering the bond for %s: the bed is not advertising (%s)",
+                address,
+                evidence.status,
+            )
+            return OperationResult(
+                outcome=OperationOutcome.NOT_ADVERTISING, detail=str(evidence.status)
+            )
+
+        # Re-prove the stale-bond diagnosis immediately before the destructive
+        # action. If the existing bond works now, preserve it and close the
+        # obsolete issue without asking BlueZ to remove anything.
+        current_bond = await _async_connect_and_verify(
+            hass,
+            address=address,
+            name=name,
+            device=device,
+            target_source=target_source,
+            bed_type=bed_type,
+            protocol_variant=protocol_variant,
+            pair=False,
+            pair_after_discovery=False,
+            operation="stale_bond_recovery_preflight",
+            report_action=_report,
+            report_path=report_path,
+            track_client=track_client,
+        )
+        if isinstance(current_bond, OperationResult):
+            return current_bond
+        if current_bond.proves_bond:
+            result = OperationResult(
+                outcome=OperationOutcome.SUCCESS,
+                payload=current_bond,
+                path=bond_path(current_bond),
+            )
+            return result
+        if current_bond.status is not BondVerificationStatus.AUTH_FAILED:
+            return OperationResult(
+                outcome=OperationOutcome.BOND_VERIFICATION_FAILED,
+                detail="authentication_state_unconfirmed",
+                payload=current_bond,
+            )
+
+        _report(SetupAction.UNPAIRING)
+        state.removal_started = True
+        removal = await async_remove_local_bond(offer.record)
+        if not removal.succeeded:
+            _LOGGER.warning(
+                "Not recovering the bond for %s: removal failed (%s)",
+                address,
+                removal.error,
+            )
+            return OperationResult(
+                outcome=OperationOutcome.UNPAIR_FAILED,
+                detail=removal.error or str(removal.status),
+                payload=removal,
+            )
+        # RemoveDevice invalidates the BlueZ Device1 object used by the
+        # preflight connection. Require a later advertisement so the reconnect
+        # receives a newly resolved BLEDevice instead of the vanished object.
+        seen_after = advertisement_time_marker()
+        _report(SetupAction.LOCATING)
+        evidence, device = await async_wait_for_advertisement(
+            hass,
+            address,
+            source=target_source,
+            seen_after=seen_after,
+            wait_timeout=ADVERTISEMENT_WAIT_SECONDS,
+            on_progress=report_progress,
+        )
+        if not evidence.is_fresh or device is None:
+            return OperationResult(
+                outcome=OperationOutcome.BOND_VERIFICATION_FAILED,
+                detail=f"post_removal_advertisement_{evidence.status}",
+                payload=removal,
+            )
+
+        pair_after_discovery = bool(
+            bed_type
+            and requires_pairing_after_service_discovery(bed_type, protocol_variant)
+        )
+        bond = await _async_connect_and_verify(
+            hass,
+            address=address,
+            name=name,
+            device=device,
+            target_source=target_source,
+            bed_type=bed_type,
+            protocol_variant=protocol_variant,
+            pair=not pair_after_discovery,
+            pair_after_discovery=pair_after_discovery,
+            operation="stale_bond_recovery",
+            report_action=_report,
+            report_path=report_path,
+            track_client=track_client,
+        )
+        if isinstance(bond, OperationResult):
+            return OperationResult(
+                outcome=OperationOutcome.BOND_VERIFICATION_FAILED,
+                detail=bond.detail,
+                payload=bond.payload,
+            )
+        if not bond.proves_bond:
+            return OperationResult(
+                outcome=OperationOutcome.BOND_VERIFICATION_FAILED,
+                detail=str(bond.status),
+                payload=bond,
+            )
+        result = OperationResult(
+            outcome=OperationOutcome.SUCCESS, payload=bond, path=bond_path(bond)
         )
 
-    _report(SetupAction.UNPAIRING)
-    removal = await async_remove_local_bond(offer.record)
-    if not removal.succeeded:
-        _LOGGER.warning(
-            "Not recovering the bond for %s: removal failed (%s)", address, removal.error
-        )
-        return OperationResult(
-            outcome=OperationOutcome.UNPAIR_FAILED,
-            detail=removal.error or str(removal.status),
-            payload=removal,
-        )
+    return result
 
-    pair_after_discovery = bool(
-        bed_type and requires_pairing_after_service_discovery(bed_type, protocol_variant)
-    )
-    prediction = async_predict_path(hass, address, preferred_adapter)
+
+async def _async_connect_and_verify(
+    hass: HomeAssistant,
+    *,
+    address: str,
+    name: str,
+    device: BLEDevice,
+    target_source: str,
+    bed_type: str | None,
+    protocol_variant: str | None,
+    pair: bool,
+    pair_after_discovery: bool,
+    operation: str,
+    report_action: Callable[[SetupAction], None],
+    report_path: Callable[[ConnectionPath | None], None] | None,
+    track_client: Callable[[BleakClient | None], None] | None,
+) -> BondEvidence | OperationResult:
+    """Connect through the intended host scanner and verify authentication."""
+    from bleak import BleakClient
+    from bleak_retry_connector import establish_connection
 
     client: BleakClient | None = None
-    async with async_get_connect_lock(hass, address):
-        try:
-            _report(SetupAction.CONNECTING)
-            client = await establish_connection(
-                BleakClient,
-                device,
-                address,
-                max_attempts=1,
-                timeout=CONNECTION_PROFILES[DEFAULT_CONNECTION_PROFILE].connection_timeout,
-                pair=not pair_after_discovery,
-                use_services_cache=not pair_after_discovery,
-            )
-            if track_client is not None:
-                track_client(client)
+    try:
+        report_action(SetupAction.CONNECTING)
+        client = await establish_connection(
+            BleakClient,
+            device,
+            address,
+            max_attempts=1,
+            timeout=CONNECTION_PROFILES[DEFAULT_CONNECTION_PROFILE].connection_timeout,
+            pair=pair,
+            use_services_cache=False,
+        )
+        if track_client is not None:
+            track_client(client)
 
-            actual_source = client_source(client)
-            path = (
-                async_path_for_source(hass, actual_source)
-                if actual_source
-                else prediction.chosen
-            )
-            if report_path is not None:
-                report_path(path)
-
-            if pair_after_discovery:
-                _report(SetupAction.PAIRING)
-                await client.pair()
-
-            _report(SetupAction.VERIFYING_BOND)
-            bond = await async_verify_authenticated_access(
-                client,
-                bed_type=bed_type,
-                protocol_variant=protocol_variant,
-                path=path,
-                operation="stale_bond_recovery",
-            )
-        except Exception as err:  # noqa: BLE001 - a failure here is an outcome
-            _LOGGER.warning("Bond recovery for %s failed: %s", name, err)
+        actual_source = client_source(client)
+        path = async_path_for_source(hass, actual_source) if actual_source else None
+        if report_path is not None:
+            report_path(path)
+        if (
+            actual_source != target_source
+            or path is None
+            or path.transport is not TransportClass.LOCAL
+        ):
             return OperationResult(
                 outcome=OperationOutcome.CONNECTION_FAILED,
-                detail=str(err) or err.__class__.__name__,
+                detail="unexpected_connection_source",
             )
-        finally:
-            _report(SetupAction.DISCONNECTING)
-            if client is not None:
-                try:
-                    await client.disconnect()
-                except Exception:  # noqa: BLE001 - cleanup must not mask the result
-                    _LOGGER.debug("Disconnect after recovery failed", exc_info=True)
-                if track_client is not None:
-                    track_client(None)
 
-    if not bond.proves_bond:
-        # The old bond is gone and the new one is unproven. Say exactly that:
-        # claiming success here would resolve a repair the user still has.
-        return OperationResult(
-            outcome=OperationOutcome.BOND_VERIFICATION_FAILED,
-            detail=str(bond.status),
-            payload=bond,
+        if pair_after_discovery:
+            report_action(SetupAction.PAIRING)
+            await client.pair()
+
+        report_action(SetupAction.VERIFYING_BOND)
+        return await async_verify_authenticated_access(
+            client,
+            bed_type=bed_type,
+            protocol_variant=protocol_variant,
+            path=path,
+            operation=operation,
         )
-    return OperationResult(
-        outcome=OperationOutcome.SUCCESS, payload=bond, path=bond_path(bond)
-    )
+    except Exception as err:  # noqa: BLE001 - a failure here is an outcome
+        _LOGGER.warning("Bond recovery for %s failed: %s", name, err)
+        return OperationResult(
+            outcome=OperationOutcome.CONNECTION_FAILED,
+            detail=str(err) or err.__class__.__name__,
+        )
+    finally:
+        report_action(SetupAction.DISCONNECTING)
+        if client is not None:
+            try:
+                await asyncio.shield(client.disconnect())
+            except Exception:  # noqa: BLE001 - cleanup must not mask the result
+                _LOGGER.debug("Disconnect after recovery failed", exc_info=True)
+            if track_client is not None:
+                track_client(None)
 
 
 def bond_path(bond: Any) -> ConnectionPath | None:

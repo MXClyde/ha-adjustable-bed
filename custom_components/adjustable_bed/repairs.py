@@ -17,6 +17,8 @@ from homeassistant.components.repairs import RepairsFlow, repairs_flow_manager
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.issue_registry import async_get as async_get_issue_registry
+from homeassistant.helpers.translation import async_get_translations
 
 from .adapter import get_discovered_service_info
 from .address_lock import async_get_connect_lock
@@ -162,21 +164,53 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
 
     async def _async_recovery_worker(self) -> OperationResult:
         """Remove the stale host bond and make a verified new one."""
-        assert self._offer is not None
+        previous_offer = self._offer
+        assert previous_offer is not None
         bed_type, variant = self._bed_type()
         entry = self._entry()
+        issue_id = f"pairing_required_{self._address.replace(':', '_').lower()}"
+        issue = async_get_issue_registry(self.hass).async_get_issue(DOMAIN, issue_id)
+        if issue is None:
+            return OperationResult(
+                outcome=OperationOutcome.UNPAIR_FAILED,
+                detail="pairing_issue_no_longer_exists",
+            )
+        current_offer = await async_recovery_offer(
+            self.hass,
+            address=self._address,
+            issue_data=dict(issue.data or {}),
+            bed_type=bed_type,
+            protocol_variant=variant,
+        )
+        if (
+            not current_offer.is_eligible
+            or current_offer.record != previous_offer.record
+            or current_offer.owner != previous_offer.owner
+        ):
+            return OperationResult(
+                outcome=OperationOutcome.UNPAIR_FAILED,
+                detail="pairing_evidence_changed",
+            )
+        self._offer = current_offer
+
+        coordinator = (
+            self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
+            if entry is not None
+            else None
+        )
         return await async_recover_local_bond(
             self.hass,
             address=self._address,
             name=self._name,
-            offer=self._offer,
+            offer=current_offer,
             bed_type=bed_type,
             protocol_variant=variant,
-            preferred_adapter=(
-                entry.data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO)
-                if entry is not None
-                else ADAPTER_AUTO
+            transport_operation=(
+                coordinator.async_transport_operation
+                if coordinator is not None
+                else None
             ),
+            on_verified=self._async_persist_recovered_bond,
             report_action=self.async_report_action,
             report_progress=self.async_report_progress,
             report_path=self.async_report_path,
@@ -202,7 +236,6 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
 
         if user_input is not None and self._result_shown:
             if succeeded:
-                await self._async_persist_recovered_bond(result)
                 return self.async_create_entry(title="", data={})
             return self.async_abort(reason="stale_bond_recovery_failed")
 
@@ -212,39 +245,38 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
             data_schema=vol.Schema({}),
             description_placeholders={
                 "name": self._name,
-                "outcome": self._recovery_note(result, succeeded),
+                "outcome": await self._async_recovery_note(result, succeeded),
             },
         )
 
-    @staticmethod
-    def _recovery_note(result: OperationResult | None, succeeded: bool) -> str:
-        """Describe what the recovery achieved."""
+    async def _async_recovery_note(
+        self, result: OperationResult | None, succeeded: bool
+    ) -> str:
+        """Return the localized description of what recovery achieved."""
         if succeeded:
-            return (
-                "✅ The stale bond was removed and a new one was created and "
-                "confirmed. The bed should respond normally now."
-            )
-        if result is None:
-            return "❌ The recovery did not run."
-        notes = {
-            OperationOutcome.NOT_ADVERTISING: (
-                "❌ The bed is not advertising, so nothing was changed and the old "
-                "bond is still in place. Put the bed into pairing mode and run this "
-                "repair again."
-            ),
-            OperationOutcome.UNPAIR_FAILED: (
-                "❌ The old bond could not be removed, so nothing else was attempted."
-            ),
-            OperationOutcome.BOND_VERIFICATION_FAILED: (
-                "❌ The old bond was removed but the new one could not be confirmed, "
-                "so this repair stays open. Put the bed into pairing mode and run it "
-                "again."
-            ),
-        }
-        return notes.get(
-            result.outcome,
-            "❌ The recovery could not be completed. The bed may be out of range or "
-            "its connection may be in use.",
+            note_key = "recovery_success"
+        elif result is None or result.outcome is OperationOutcome.CANCELLED:
+            note_key = "recovery_not_run"
+        elif result.outcome is OperationOutcome.NOT_ADVERTISING:
+            note_key = "recovery_not_advertising"
+        elif result.outcome is OperationOutcome.BOND_VERIFICATION_FAILED and (
+            result.detail != "authentication_state_unconfirmed"
+        ):
+            note_key = "recovery_partial"
+        elif result.outcome is OperationOutcome.UNPAIR_FAILED:
+            note_key = "recovery_unpair_failed"
+        else:
+            note_key = "recovery_failed_unchanged"
+
+        translations = await async_get_translations(
+            self.hass,
+            self.hass.config.language,
+            "issues",
+            integrations={DOMAIN},
+        )
+        return translations.get(
+            f"component.{DOMAIN}.issues.pairing_required.fix_flow.abort.{note_key}",
+            note_key,
         )
 
     async def _async_persist_recovered_bond(self, result: OperationResult | None) -> None:
