@@ -152,6 +152,22 @@ If your Home Assistant host has a Bluetooth adapter (built-in or USB dongle).
    - **Protocol Variant** (if available): Usually leave as "auto"
    - **Command Protocol** (Richmat only): Try different protocols if bed doesn't respond
 
+   The setup form also shows which Bluetooth path Home Assistant is likely to
+   use — a direct adapter on the Home Assistant host, or a Bluetooth proxy —
+   along with the scanner name and signal strength. It is a prediction, not a
+   promise: Home Assistant re-ranks every adapter and proxy at the moment it
+   connects, so a stronger signal appearing elsewhere can change the outcome.
+   The result screen tells you which path was actually used.
+
+5. **Connection check**
+
+   Setup then checks the bed while showing what it is doing rather than
+   freezing the form. If the bed has not advertised recently it is reported as
+   **not advertising** and nothing is attempted, because connecting to a stale
+   record just burns the timeout and produces a failure that looks like a
+   pairing problem. Wake the bed and select **Check again**, or finish setup
+   anyway — a failed check never blocks setup.
+
 ---
 
 ## Advanced Options
@@ -162,6 +178,14 @@ After setup, you can adjust additional settings via **Settings → Integrations 
 - **Motor pulse settings** - Fine-tune movement behavior
 - **Bluetooth adapter** - Choose a specific adapter or proxy
 - **Angle sensing** - Disable to allow physical remote to work (recommended)
+
+The same menu has a **Remove the Bluetooth bond** action for beds that pair. It
+names the bed and the adapter the bond is stored on before asking you to
+confirm, disconnects the bed first, and only reports success once it has
+confirmed the bond is really gone. It does not delete the device or its
+settings. If the bed paired through a Bluetooth proxy, the bond lives on the
+proxy and Home Assistant cannot remove it — the action explains that instead of
+pretending to.
 
 See the [Configuration Guide](CONFIGURATION.md) for detailed explanations of all options.
 
