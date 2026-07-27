@@ -260,8 +260,17 @@ class PairingRequiredRepairFlow(RepairsFlow):
             return
         entry = self.hass.config_entries.async_get_entry(self._entry_id)
         data = self._paired_entry_data(verified_owner)
-        if entry is not None and data is not None and data != dict(entry.data):
-            self.hass.config_entries.async_update_entry(entry, data=data)
+        if entry is None or data is None or data == dict(entry.data):
+            return
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry_id)
+        claim = getattr(coordinator, "begin_internal_bond_update", None)
+        if callable(claim):
+            # Let a loaded coordinator claim this as one of its own bond writes,
+            # so the update listener does not reload. That reload would drop the
+            # link this repair just paired on, and a bed that grants one
+            # connection per pairing window never offers another.
+            claim(bool(data.get(CONF_BLE_BOND_ESTABLISHED, False)))
+        self.hass.config_entries.async_update_entry(entry, data=data)
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
