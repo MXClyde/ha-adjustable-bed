@@ -29,7 +29,3 @@ tests/test_apkpure_inventory.py
 
 # Claude Code instructions (symlink to AGENTS.md)
 CLAUDE.md
-
-# Local virtualenvs, including symlinks into a shared one from git worktrees.
-.venv
-venv/
