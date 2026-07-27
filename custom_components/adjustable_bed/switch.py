@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
 from homeassistant.config_entries import ConfigEntry
@@ -17,6 +17,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import BED_TYPE_SLEEP_NUMBER_MCR, DOMAIN
 from .coordinator import AdjustableBedCoordinator
 from .entity import AdjustableBedEntity
+from .paired_coordinator import PairedBedCoordinator, PairedSideProxy
 
 if TYPE_CHECKING:
     from .beds.base import BedController
@@ -67,8 +68,32 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Adjustable Bed switch entities."""
-    coordinator: AdjustableBedCoordinator = hass.data[DOMAIN][entry.entry_id]
-    controller = coordinator.controller
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    if isinstance(coordinator, PairedBedCoordinator):
+        entities: list[AdjustableBedSwitch] = []
+        for side, child in coordinator.children.items():
+            entities.extend(
+                _switch_entities_for(
+                    hass,
+                    cast(
+                        "AdjustableBedCoordinator",
+                        PairedSideProxy(coordinator, child, side),
+                    ),
+                )
+            )
+        async_add_entities(entities)
+        return
+    async_add_entities(_switch_entities_for(hass, coordinator))
+
+
+def _switch_entities_for(
+    hass: HomeAssistant, coordinator: AdjustableBedCoordinator
+) -> list[AdjustableBedSwitch]:
+    """Build switch entities for a single (child or standalone) coordinator."""
+    # capability_controller: an offline paired side (e.g. Linak under-bed lights)
+    # still gets its switches built from a client-free controller minted from
+    # config (see coordinator).
+    controller = coordinator.capability_controller
     registry = er.async_get(hass)
 
     entities = []
@@ -87,7 +112,7 @@ async def async_setup_entry(
             entity_id = registry.async_get_entity_id(
                 "switch",
                 DOMAIN,
-                f"{coordinator.address}_{description.key}",
+                coordinator.entity_unique_id(description.key),
             )
             if entity_id is not None:
                 registry.async_remove(entity_id)
@@ -109,14 +134,14 @@ async def async_setup_entry(
                 entity_id = registry.async_get_entity_id(
                     "switch",
                     DOMAIN,
-                    f"{coordinator.address}_{description.key}",
+                    coordinator.entity_unique_id(description.key),
                 )
                 if entity_id is not None:
                     registry.async_remove(entity_id)
                 continue
         entities.append(AdjustableBedSwitch(coordinator, description))
 
-    async_add_entities(entities)
+    return entities
 
 
 class AdjustableBedSwitch(AdjustableBedEntity, SwitchEntity):
@@ -132,11 +157,14 @@ class AdjustableBedSwitch(AdjustableBedEntity, SwitchEntity):
         """Initialize the switch."""
         super().__init__(coordinator)
         self.entity_description = description
-        self._attr_unique_id = f"{coordinator.address}_{description.key}"
+        self._set_sided_translation_key(description.translation_key, description.key)
+        self._attr_unique_id = coordinator.entity_unique_id(description.key)
         self._attr_is_on = False  # We don't have state feedback
-        # Cache discrete control capability at init (controller should exist at setup time)
-        # Default to False for toggle-only beds when controller disconnects
-        controller = coordinator.controller
+        # Cache discrete control capability at init. Use capability_controller so
+        # a switch created for an offline paired side still caches the correct
+        # capability (from the client-free controller) instead of defaulting to
+        # False; the live controller takes over for actual commands.
+        controller = coordinator.capability_controller
         self._supports_discrete_light_control = (
             controller is not None and controller.supports_discrete_light_control
         )

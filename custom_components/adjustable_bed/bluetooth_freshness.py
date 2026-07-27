@@ -215,6 +215,45 @@ def _coerce_rssi(value: Any) -> int | None:
         return None
 
 
+def _sighting_is_usable(sighting: _Sighting) -> bool:
+    """Return True when this sighting could prove the bed is reachable.
+
+    BlueZ publishes -127 to say "I no longer have a reading", which is the one
+    RSSI value that disproves rather than supports reachability.
+    """
+    return sighting.rssi is None or sighting.rssi > RSSI_INVALIDATED
+
+
+def _newest_sighting(*sightings: _Sighting | None) -> _Sighting | None:
+    """Return the freshest sighting, preferring ones that could prove anything.
+
+    Freshest-wins alone is wrong across scanners: one adapter publishing a
+    slightly newer -127 invalidation would discard another adapter's valid
+    reading a second earlier, and the bed would be reported as not advertising
+    while it is sitting there answering. Usable evidence is compared first, and
+    an invalidated reading is only returned when it is all there is - it is
+    still the honest answer when no scanner can hear the bed.
+    """
+    available = [sighting for sighting in sightings if sighting is not None]
+    if not available:
+        return None
+
+    def _freshest(candidates: list[_Sighting]) -> _Sighting | None:
+        aged = [
+            (age, sighting)
+            for sighting in candidates
+            if (age := _coerce_age(sighting.seen_at)) is not None
+        ]
+        if aged:
+            return min(aged, key=lambda item: item[0])[1]
+        return candidates[0] if candidates else None
+
+    usable = [sighting for sighting in available if _sighting_is_usable(sighting)]
+    # Preserve the existing invalid-timestamp result when neither view carries
+    # a timestamp that can prove freshness.
+    return _freshest(usable) or _freshest(available)
+
+
 @callback
 def async_check_advertisement(
     hass: HomeAssistant,
@@ -231,14 +270,15 @@ def async_check_advertisement(
     """
     normalized = address.upper()
     if source:
-        sighting = _async_sighting_from_scanner(hass, normalized, source)
-        if sighting is None:
-            # Same proxy quirk as below: a scanner can report a connectable bed
-            # as non-connectable, and a pinned adapter deserves that fallback
-            # just as much as the merged view does.
-            sighting = _async_sighting_from_scanner(
+        # A proxy can keep a stale connectable snapshot while publishing current
+        # advertisements only in its non-connectable view. Compare both so the
+        # stale record cannot hide the live one.
+        sighting = _newest_sighting(
+            _async_sighting_from_scanner(hass, normalized, source),
+            _async_sighting_from_scanner(
                 hass, normalized, source, connectable=False
-            )
+            ),
+        )
         if sighting is None:
             # The chosen transport cannot see the bed. Report that specifically
             # rather than falling back to a scanner the user did not select: a
@@ -249,14 +289,15 @@ def async_check_advertisement(
                 status=FreshnessStatus.SOURCE_UNAVAILABLE, source=source
             )
     else:
-        sighting = _async_sighting(hass, normalized)
-        if sighting is None:
-            # Some ESPHome proxies have been observed classifying a perfectly
-            # connectable bed as non-connectable. The integration has always
-            # allowed that fallback, so losing it here would stop setup working
-            # on exactly the hardware it was added for. The freshness rules
-            # still apply to whatever is found.
-            sighting = _async_sighting(hass, normalized, connectable=False)
+        # Some ESPHome proxies have been observed classifying a perfectly
+        # connectable bed as non-connectable. Compare both histories because an
+        # old connectable snapshot can coexist with a current non-connectable
+        # one; falling back only when the first view is empty would reject a bed
+        # that is actively advertising.
+        sighting = _newest_sighting(
+            _async_sighting(hass, normalized),
+            _async_sighting(hass, normalized, connectable=False),
+        )
         if sighting is None:
             _LOGGER.debug("No advertisement history for %s", address)
             return AdvertisementEvidence(status=FreshnessStatus.MISSING, source=source)
@@ -351,7 +392,7 @@ async def async_wait_for_advertisement(
     known in advance, unlike a BLE connect.
     """
     evidence, device = async_gate_connection(hass, address, source=source, max_age=max_age)
-    if evidence.is_fresh:
+    if evidence.is_fresh and device is not None:
         return evidence, device
 
     deadline = _monotonic() + wait_timeout
@@ -368,7 +409,7 @@ async def async_wait_for_advertisement(
                 on_progress(min(1.0, max(0.0, elapsed / wait_timeout)))
         await asyncio.sleep(min(poll_interval, remaining))
         evidence, device = async_gate_connection(hass, address, source=source, max_age=max_age)
-        if evidence.is_fresh:
+        if evidence.is_fresh and device is not None:
             if on_progress is not None:
                 with contextlib.suppress(Exception):
                     on_progress(1.0)

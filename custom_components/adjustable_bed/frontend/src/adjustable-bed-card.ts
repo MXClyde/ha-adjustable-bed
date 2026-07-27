@@ -11,15 +11,24 @@ import {
   nothing,
 } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { renderBedGraphic } from "./bed-graphic";
+import {
+  type BedGraphicTone,
+  type DualBedGraphicSide,
+  renderBedGraphic,
+  renderDualBedGraphic,
+} from "./bed-graphic";
 import {
   PLATFORM,
   SECTION_ORDER,
   bedEntitiesForDevice,
   bedIsEmpty,
+  isSingleAddressPairedDevice,
+  pairedChildDeviceIds,
+  resolvePairedParentId,
 } from "./discovery";
 import { MotorHold } from "./hold";
 import { localize } from "./localize";
+import { settleSequentially } from "./settle-sequentially";
 import {
   type AdjustableBedCardConfig,
   type BedEntities,
@@ -32,15 +41,46 @@ import {
 // Side-effect import: registers <adjustable-bed-card-editor> in the same bundle.
 import "./editor";
 
+interface PairedPane {
+  key: string;
+  label: string;
+  icon: string;
+  bed: BedEntities;
+  graphicTone?: BedGraphicTone;
+  synchronizationTarget?: {
+    deviceId: string;
+    side?: SynchronizeSide;
+  };
+}
+
+interface BedGraphicState extends DualBedGraphicSide {
+  upperMotor: MotorEntity;
+  lowerMotor: MotorEntity;
+}
+
+type ConnectionStatus = "connected" | "idle" | "disconnected";
+type SynchronizeSide = "left" | "right";
+
+const SYNCHRONIZABLE_MOTORS = new Set(["back", "legs", "head", "feet"]);
+
 @customElement("adjustable-bed-card")
 export class AdjustableBedCard extends LitElement {
   @property({ attribute: false }) public hass?: HomeAssistant;
   @state() private _config?: AdjustableBedCardConfig;
   // Transient UI state: when true, tapping a memory tile saves the current bed
   // position into that slot instead of recalling it.
-  @state() private _saveMode = false;
+  // Which memory section (by its stable per-section key) is currently in save
+  // mode. Scoped per section so pressing "Save…" on one paired side does NOT flip
+  // the other side's / both-sides' tiles into save actions (which risked saving
+  // over the wrong preset). undefined = no section in save mode.
+  @state() private _saveModeFor?: string;
+  // Paired beds expose one focused control surface at a time. This avoids the
+  // old three-bed vertical stack while keeping combined actions deliberately
+  // separate from commands for an individual side.
+  @state() private _activePairedPane = "both";
+  @state() private _synchronizingTo?: SynchronizeSide;
+  @state() private _synchronizationFailed = false;
 
-  private _bed?: BedEntities;
   private _watched: string[] = [];
   // Press-and-hold rules live in MotorHold; this class owns only the event
   // wiring and the service calls it drives.
@@ -61,8 +101,11 @@ export class AdjustableBedCard extends LitElement {
         : undefined;
     },
     stopCover: (cover) => this._cover(cover, "stop_cover"),
-    stopBed: () => {
-      if (this._bed?.stop) this._press(this._bed.stop);
+    // Which stop applies depends on the bed the held motor belongs to, so it is
+    // threaded in from the row that started the hold rather than read from a
+    // single bed-wide stop, which a paired render does not have.
+    stopBed: (stopEntityId) => {
+      if (stopEntityId) this._press(stopEntityId);
     },
   });
 
@@ -96,10 +139,24 @@ export class AdjustableBedCard extends LitElement {
   }
 
   protected override shouldUpdate(changed: PropertyValues): boolean {
-    if (changed.has("_config")) return true;
+    // Local UI changes can be coalesced with Home Assistant's frequent `hass`
+    // assignment. Never let the watched-entity optimization discard a tab or
+    // save-mode interaction just because `hass` changed in the same cycle.
+    if (
+      changed.has("_config") ||
+      changed.has("_saveModeFor") ||
+      changed.has("_activePairedPane") ||
+      changed.has("_synchronizingTo") ||
+      changed.has("_synchronizationFailed")
+    )
+      return true;
     if (!changed.has("hass") || !this.hass) return true;
     const old = changed.get("hass") as HomeAssistant | undefined;
     if (!old || old.entities !== this.hass.entities) return true;
+    // Paired detection (pairedChildDeviceIds) reads the device registry, so a
+    // registry change — sides linked/relinked or a device renamed — must
+    // re-render even when no entity or watched state changed.
+    if (old.devices !== this.hass.devices) return true;
     for (const id of this._watched) {
       if (old.states[id] !== this.hass.states[id]) return true;
     }
@@ -110,15 +167,43 @@ export class AdjustableBedCard extends LitElement {
     if (!this.hass || !this._config) return nothing;
     if (!this._config.device_id) return this._notice("card.no_device");
 
+    // A paired "Dual Bed": render the combined "both sides" controls (on the
+    // parent device) plus a per-side section for each child device. The config
+    // may point at the synthetic parent OR at one side's child device — resolve
+    // a side up to its parent so either renders the whole pair. Falls back to
+    // single-device rendering for a non-paired bed.
+    const parentId = resolvePairedParentId(this.hass, this._config.device_id);
+    const childIds = pairedChildDeviceIds(this.hass, parentId);
+    if (parentId && childIds.length) return this._renderPaired(parentId, childIds);
+    if (
+      this._config.device_id &&
+      isSingleAddressPairedDevice(this.hass, this._config.device_id)
+    )
+      return this._renderSingleAddressPaired(this._config.device_id);
+
     const bed = bedEntitiesForDevice(this.hass, this._config.device_id);
-    this._bed = bed;
     this._watched = this._collectWatched(bed);
 
     if (bedIsEmpty(bed)) return this._notice("card.no_entities");
-    const c = this._config;
 
+    return html`
+      <ha-card>
+        ${this._header(bed)}
+        ${this._renderSections(bed)}
+      </ha-card>
+    `;
+  }
+
+  // The ordered section templates for a single bed (shared by single-device and
+  // each per-side block of a paired bed).
+  private _renderSections(
+    bed: BedEntities,
+    graphicTone: BedGraphicTone = "theme",
+  ): (typeof nothing | TemplateResult)[] {
+    const c = this._config!;
     const render: Record<string, () => typeof nothing | TemplateResult> = {
-      graphic: () => (c.show_graphic !== false ? this._graphic(bed) : nothing),
+      graphic: () =>
+        c.show_graphic !== false ? this._graphic(bed, graphicTone) : nothing,
       motors: () => (c.show_motors !== false ? this._motors(bed) : nothing),
       firmness: () => (c.show_firmness !== false ? this._firmness(bed) : nothing),
       presets: () => (c.show_presets !== false ? this._presets(bed) : nothing),
@@ -130,13 +215,437 @@ export class AdjustableBedCard extends LitElement {
       connection: () =>
         c.show_connection !== false ? this._connection(bed) : nothing,
     };
+    return this._orderedSections().map((k) => render[k]?.() ?? nothing);
+  }
 
+  // Render a paired parent as a focused side switcher. The combined actions live
+  // on the synthetic parent; each physical side remains on its child device.
+  private _renderPaired(parentId: string, childIds: string[]): TemplateResult {
+    const hass = this.hass!;
+    const parentBed = bedEntitiesForDevice(hass, parentId);
+    const sides = childIds.map((id, index) => ({
+      key: id,
+      label: this._deviceLabel(id),
+      icon: "mdi:bed-single-outline",
+      bed: bedEntitiesForDevice(hass, id),
+      graphicTone: index === 0 ? ("left" as const) : ("right" as const),
+      // Target the selected child device instead of inferring its backend side
+      // from display order. A renamed child can appear in either visual pane.
+      synchronizationTarget: { deviceId: id },
+    }));
+    this._watched = [parentBed, ...sides.map((s) => s.bed)].flatMap((b) =>
+      this._collectWatched(b),
+    );
+
+    // Preserve the single-bed fallback: if neither the parent nor any side
+    // exposes renderable entities, show the notice instead of a header-only card.
+    if (bedIsEmpty(parentBed) && sides.every((s) => bedIsEmpty(s.bed)))
+      return this._notice("card.no_entities");
+
+    return this._renderPairedCard(parentId, [
+      {
+        key: "both",
+        label: localize(hass, "card.both_sides"),
+        icon: "mdi:link-variant",
+        bed: parentBed,
+      },
+      ...sides,
+    ]);
+  }
+
+  private _renderSingleAddressPaired(deviceId: string): TemplateResult {
+    const hass = this.hass!;
+    const beds = {
+      both: bedEntitiesForDevice(hass, deviceId, "both"),
+      left: bedEntitiesForDevice(hass, deviceId, "left"),
+      right: bedEntitiesForDevice(hass, deviceId, "right"),
+    };
+    this._watched = Object.values(beds).flatMap((bed) =>
+      this._collectWatched(bed),
+    );
+    if (Object.values(beds).every((bed) => bedIsEmpty(bed)))
+      return this._notice("card.no_entities");
+
+    return this._renderPairedCard(deviceId, [
+      {
+        key: "both",
+        label: localize(hass, "card.both_sides"),
+        icon: "mdi:link-variant",
+        bed: beds.both,
+      },
+      {
+        key: "left",
+        label: localize(hass, "card.left_side"),
+        icon: "mdi:bed-single-outline",
+        bed: beds.left,
+        graphicTone: "left",
+        synchronizationTarget: { deviceId, side: "left" },
+      },
+      {
+        key: "right",
+        label: localize(hass, "card.right_side"),
+        icon: "mdi:bed-single-outline",
+        bed: beds.right,
+        graphicTone: "right",
+        synchronizationTarget: { deviceId, side: "right" },
+      },
+    ]);
+  }
+
+  private _renderPairedCard(
+    titleDeviceId: string,
+    allPanes: PairedPane[],
+  ): TemplateResult {
+    const panes = allPanes.filter((pane) => !bedIsEmpty(pane.bed));
+    const active =
+      panes.find((pane) => pane.key === this._activePairedPane) ?? panes[0];
+    const sidePanes = panes.filter((pane) => pane.key !== "both");
+    const combined = active.key === "both";
     return html`
-      <ha-card>
-        ${this._header(bed)}
-        ${this._orderedSections().map((k) => render[k]?.() ?? nothing)}
+      <ha-card class="paired-card">
+        ${this._header(active.bed, titleDeviceId)}
+        <div
+          class="pane-tabs"
+          role="tablist"
+          style=${`--pane-count:${panes.length}`}
+        >
+          ${panes.map(
+            (pane) => html`
+              <button
+                class="pane-tab ${pane.key === active.key ? "active" : ""}"
+                role="tab"
+                aria-selected=${pane.key === active.key ? "true" : "false"}
+                @click=${() => this._selectPairedPane(pane.key)}
+              >
+                <ha-icon icon=${pane.icon}></ha-icon>
+                <span>${pane.label}</span>
+                ${this._connectionDot(pane.bed)}
+              </button>
+            `,
+          )}
+        </div>
+        <div class="pane" role="tabpanel" aria-label=${active.label}>
+          ${combined && this._config?.show_graphic !== false
+            ? this._pairedOverview(sidePanes)
+            : nothing}
+          ${this._renderSections(active.bed, active.graphicTone)}
+          ${combined && this._config?.show_lighting !== false
+            ? this._combinedLighting(active.bed, sidePanes)
+            : nothing}
+          ${combined && this._config?.show_connection !== false
+            ? this._combinedBluetooth(sidePanes)
+            : nothing}
+        </div>
       </ha-card>
     `;
+  }
+
+  private _selectPairedPane(key: string): void {
+    if (this._activePairedPane === key) return;
+    this._activePairedPane = key;
+    // Save mode is intentionally local to the visible side. Leaving a side
+    // cancels it so returning later can never expose a stale destructive mode.
+    this._saveModeFor = undefined;
+    this._synchronizationFailed = false;
+  }
+
+  private _connectionStatus(bed: BedEntities): ConnectionStatus | undefined {
+    if (!bed.connectivity) return undefined;
+    const state = this._state(bed.connectivity);
+    return state?.state === "on"
+      ? "connected"
+      : state?.attributes?.state_detail === "idle"
+        ? "idle"
+        : "disconnected";
+  }
+
+  private _connectionDot(bed: BedEntities): typeof nothing | TemplateResult {
+    const status = this._connectionStatus(bed);
+    if (!status) return nothing;
+    return html`<span
+      class="connection-dot ${status}"
+      title=${localize(this.hass, `status.${status}`)}
+    ></span>`;
+  }
+
+  private _pairedOverview(
+    sidePanes: PairedPane[],
+  ): typeof nothing | TemplateResult {
+    const sides = sidePanes
+      .map((pane) => ({ pane, graphic: this._graphicState(pane.bed) }))
+      .filter(
+        (item): item is { pane: PairedPane; graphic: BedGraphicState } =>
+          item.graphic !== undefined,
+      );
+    if (sides.length < 2) return nothing;
+    const [left, right] = sides;
+    return html`
+      <div class="graphic dual-graphic">
+        ${renderDualBedGraphic({
+          left: left.graphic,
+          right: right.graphic,
+        })}
+      </div>
+      <div class="dual-readouts">
+        ${[left, right].map(
+          ({ pane, graphic }, index) => html`
+            <div class="dual-readout side-${index === 0 ? "left" : "right"}">
+              <span class="dual-side-name">
+                <span class="dual-swatch"></span>${pane.label}
+              </span>
+              <span class="dual-position">
+                ${this._positionSummary(graphic)}
+              </span>
+            </div>
+          `,
+        )}
+      </div>
+      ${this._synchronizeSelector(left.pane, right.pane)}
+    `;
+  }
+
+  private _synchronizeSelector(
+    left: PairedPane,
+    right: PairedPane,
+  ): typeof nothing | TemplateResult {
+    if (!left.synchronizationTarget || !right.synchronizationTarget)
+      return nothing;
+    const leftPlan = this._synchronizationPlan(left.bed, right.bed);
+    const rightPlan = this._synchronizationPlan(right.bed, left.bed);
+    if (leftPlan.length === 0 && rightPlan.length === 0) return nothing;
+
+    const busy = this._synchronizingTo !== undefined;
+    return html`
+      <div class="dual-sync-row">
+        <ha-icon icon="mdi:sync"></ha-icon>
+        <span class="dual-sync-label">${localize(this.hass, "sync.label")}</span>
+        <div class="dual-sync-actions">
+          <button
+            class="dual-sync-btn side-left ${
+              this._synchronizingTo === "left" ? "is-active" : ""
+            }"
+            aria-label="${localize(this.hass, "sync.label")} ${left.label}"
+            aria-busy=${this._synchronizingTo === "left" ? "true" : "false"}
+            ?disabled=${busy || leftPlan.length === 0}
+            @click=${() =>
+              void this._synchronizePositions(left, right, "left")}
+          >
+            ${this._synchronizingTo === "left"
+              ? html`<ha-icon class="dual-sync-spinner" icon="mdi:loading"></ha-icon>`
+              : html`<span class="dual-swatch"></span>`}
+            <span>${left.label}</span>
+          </button>
+          <button
+            class="dual-sync-btn side-right ${
+              this._synchronizingTo === "right" ? "is-active" : ""
+            }"
+            aria-label="${localize(this.hass, "sync.label")} ${right.label}"
+            aria-busy=${this._synchronizingTo === "right" ? "true" : "false"}
+            ?disabled=${busy || rightPlan.length === 0}
+            @click=${() =>
+              void this._synchronizePositions(left, right, "right")}
+          >
+            ${this._synchronizingTo === "right"
+              ? html`<ha-icon class="dual-sync-spinner" icon="mdi:loading"></ha-icon>`
+              : html`<span class="dual-swatch"></span>`}
+            <span>${right.label}</span>
+          </button>
+        </div>
+      </div>
+      ${this._synchronizationFailed
+        ? html`<div class="dual-sync-error" role="status">
+            <ha-icon icon="mdi:alert-circle-outline"></ha-icon>
+            <span>${localize(this.hass, "sync.incomplete")}</span>
+          </div>`
+        : nothing}
+    `;
+  }
+
+  private _synchronizationPlan(
+    source: BedEntities,
+    target: BedEntities,
+  ): { motor: string; position: number }[] {
+    const targetMotors = new Map(
+      target.motors.map((motor) => [motor.key, motor] as const),
+    );
+    const shared = source.motors.filter(
+      (motor) =>
+        SYNCHRONIZABLE_MOTORS.has(motor.key) &&
+        targetMotors.has(motor.key) &&
+        this._hasPositionFeedback(motor) &&
+        this._hasPositionFeedback(targetMotors.get(motor.key)!),
+    );
+    if (shared.length === 0) return [];
+
+    const plan = shared.map((motor) => ({
+      motor: motor.key,
+      position: this._angle(motor),
+    }));
+    // Never perform a partial synchronization. Both sides need live feedback
+    // because the target-side seek also depends on its current position.
+    if (
+      plan.some((item) => item.position === undefined) ||
+      shared.some(
+        (motor) => this._angle(targetMotors.get(motor.key)!) === undefined,
+      )
+    )
+      return [];
+    return plan as { motor: string; position: number }[];
+  }
+
+  private _hasPositionFeedback(motor: MotorEntity): boolean {
+    return motor.angle !== undefined || motor.position !== undefined;
+  }
+
+  private async _synchronizePositions(
+    left: PairedPane,
+    right: PairedPane,
+    sourceSide: SynchronizeSide,
+  ): Promise<void> {
+    if (this._synchronizingTo || !this.hass) return;
+    const source = sourceSide === "left" ? left : right;
+    const target = sourceSide === "left" ? right : left;
+    const serviceTarget = target.synchronizationTarget;
+    if (!serviceTarget) return;
+    const plan = this._synchronizationPlan(source.bed, target.bed);
+    if (plan.length === 0) return;
+
+    this._synchronizingTo = sourceSide;
+    this._synchronizationFailed = false;
+    try {
+      this._synchronizationFailed = await settleSequentially(
+        plan.map(
+          (item) => () =>
+            this.hass!.callService(PLATFORM, "set_position", {
+              device_id: [serviceTarget.deviceId],
+              motor: item.motor,
+              position: item.position,
+              ...(serviceTarget.side ? { side: serviceTarget.side } : {}),
+            }),
+        ),
+      );
+    } finally {
+      this._synchronizingTo = undefined;
+    }
+  }
+
+  private _positionSummary(graphic: BedGraphicState): string {
+    const motors =
+      graphic.upperMotor === graphic.lowerMotor
+        ? [graphic.upperMotor]
+        : [graphic.upperMotor, graphic.lowerMotor];
+    return motors
+      .map((motor) => {
+        const value = this._readout(motor);
+        return value ? `${this._motorName(motor)} ${value}` : this._motorName(motor);
+      })
+      .join(" · ");
+  }
+
+  private _combinedLighting(
+    parentBed: BedEntities,
+    sidePanes: PairedPane[],
+  ): typeof nothing | TemplateResult {
+    // Prefer a native combined light when the protocol exposes one; it already
+    // renders in the parent's normal Lighting section.
+    if (this._hasLighting(parentBed)) return nothing;
+    const lights = sidePanes
+      .map((pane) => this._mainLight(pane.bed))
+      .filter((id): id is string => id !== undefined);
+    if (lights.length === 0) return nothing;
+    const onCount = lights.filter((id) => this._state(id)?.state === "on").length;
+    const allOn = onCount === lights.length;
+    const anyOn = onCount > 0;
+    const statusKey = allOn
+      ? "combined.on"
+      : anyOn
+        ? "combined.mixed"
+        : "combined.off";
+    const label = localize(this.hass, "combined.lights");
+    return html`
+      ${this._heading("section.lighting")}
+      <div class="entity-row combined-entity-row">
+        <ha-icon
+          class="icon ${anyOn ? "active" : ""}"
+          icon="mdi:lightbulb-group-outline"
+        ></ha-icon>
+        <div class="entity-row-text">
+          <span>${label}</span>
+          <span class="secondary">${localize(this.hass, statusKey)}</span>
+        </div>
+        <button
+          class="toggle ${anyOn ? "on" : ""} ${anyOn && !allOn ? "mixed" : ""}"
+          role="switch"
+          aria-label=${label}
+          aria-checked=${allOn ? "true" : "false"}
+          @click=${() => this._setEntities(lights, !allOn)}
+        >
+          <span class="knob"></span>
+        </button>
+      </div>
+    `;
+  }
+
+  private _combinedBluetooth(
+    sidePanes: PairedPane[],
+  ): typeof nothing | TemplateResult {
+    const connections = sidePanes
+      .filter((pane) => pane.bed.connectivity)
+      .map((pane) => ({ pane, entityId: pane.bed.connectivity! }));
+    if (connections.length === 0) return nothing;
+    return html`
+      ${this._heading("section.bluetooth")}
+      <div class="bluetooth-grid">
+        ${connections.map(({ pane, entityId }) => {
+          const status = this._connectionStatus(pane.bed)!;
+          const state = this._state(entityId);
+          const rssi = state?.attributes.rssi;
+          return html`
+            <button
+              class="bluetooth-status ${status}"
+              @click=${() => this._moreInfo(entityId)}
+            >
+              <ha-icon
+                icon=${status === "connected"
+                  ? "mdi:bluetooth-connect"
+                  : status === "idle"
+                    ? "mdi:bluetooth"
+                    : "mdi:bluetooth-off"}
+              ></ha-icon>
+              <span class="bluetooth-copy">
+                <span>${pane.label}</span>
+                <span class="bluetooth-detail">
+                  ${localize(this.hass, `status.${status}`)}${
+                    typeof rssi === "number" ? ` · ${rssi} dBm` : ""
+                  }
+                </span>
+              </span>
+            </button>
+          `;
+        })}
+      </div>
+    `;
+  }
+
+  private _mainLight(bed: BedEntities): string | undefined {
+    return bed.lights.light ?? bed.lights.switch;
+  }
+
+  private _hasLighting(bed: BedEntities): boolean {
+    const lights = bed.lights;
+    return !!(
+      lights.light ||
+      lights.switch ||
+      lights.level ||
+      lights.timer ||
+      lights.toggle ||
+      lights.cycle
+    );
+  }
+
+  private _deviceLabel(id: string): string {
+    const d = this.hass?.devices[id];
+    return d?.name_by_user ?? d?.name ?? id;
   }
 
   // Section keys in render order: the configured order first, then any default
@@ -152,19 +661,12 @@ export class AdjustableBedCard extends LitElement {
 
   // ---- sections -----------------------------------------------------------
 
-  private _header(bed: BedEntities): TemplateResult {
+  private _header(bed: BedEntities, titleDeviceId?: string): TemplateResult {
     // Three connectivity states. "idle" means the bed intentionally dropped the
     // BLE link (idle timeout / manual disconnect) and reconnects on demand on the
     // next command — surfaced via the sensor's `state_detail` attribute (issue
     // #385) so an expected disconnect doesn't read as a fault.
-    const connSt = bed.connectivity ? this._state(bed.connectivity) : undefined;
-    const conn: "connected" | "idle" | "disconnected" | undefined = !bed.connectivity
-      ? undefined
-      : connSt?.state === "on"
-        ? "connected"
-        : connSt?.attributes?.state_detail === "idle"
-          ? "idle"
-          : "disconnected";
+    const conn = this._connectionStatus(bed);
     const CONN_META = {
       connected: { cls: "ok", icon: "mdi:bluetooth-connect", key: "status.connected" },
       idle: { cls: "idle", icon: "mdi:bluetooth", key: "status.idle" },
@@ -173,7 +675,7 @@ export class AdjustableBedCard extends LitElement {
     return html`
       <div class="header">
         <ha-icon class="header-icon" icon="mdi:bed-king-outline"></ha-icon>
-        <span class="title">${this._title()}</span>
+        <span class="title">${this._title(titleDeviceId)}</span>
         ${
           conn === undefined
             ? nothing
@@ -191,30 +693,48 @@ export class AdjustableBedCard extends LitElement {
     `;
   }
 
-  private _graphic(bed: BedEntities): typeof nothing | TemplateResult {
-    const withAngle = bed.motors.filter((m) => m.angle);
-    if (withAngle.length === 0) return nothing;
+  private _graphic(
+    bed: BedEntities,
+    tone: BedGraphicTone = "theme",
+  ): typeof nothing | TemplateResult {
+    const graphic = this._graphicState(bed);
+    if (!graphic) return nothing;
+    return html`
+      <div class="graphic">
+        ${renderBedGraphic(graphic, tone)}
+      </div>
+    `;
+  }
+
+  private _graphicState(bed: BedEntities): BedGraphicState | undefined {
+    const withAngle = bed.motors.filter((motor) => motor.angle);
+    // Registry entries can outlive a configuration change. Do not draw a flat
+    // default graphic from unavailable/unknown sensors: every exposed angle
+    // must have a numeric value before the graphic and its readouts are shown.
+    if (
+      withAngle.length === 0 ||
+      withAngle.some((motor) => this._angle(motor) === undefined)
+    )
+      return undefined;
     const upper =
-      bed.motors.find((m) => m.key === "back") ??
-      bed.motors.find((m) => m.key === "head") ??
+      withAngle.find((m) => m.key === "back") ??
+      withAngle.find((m) => m.key === "head") ??
       withAngle[0];
     const lower =
-      bed.motors.find((m) => m.key === "legs") ??
-      bed.motors.find((m) => m.key === "feet") ??
+      withAngle.find((m) => m.key === "legs") ??
+      withAngle.find((m) => m.key === "feet") ??
       withAngle[withAngle.length - 1];
     const moving = bed.motors.some((m) => {
       const s = m.cover ? this._state(m.cover)?.state : undefined;
       return s === "opening" || s === "closing";
     });
-    return html`
-      <div class="graphic">
-        ${renderBedGraphic({
-          upper: { label: this._name(upper.cover ?? upper.angle!), angle: this._angle(upper) },
-          lower: { label: this._name(lower.cover ?? lower.angle!), angle: this._angle(lower) },
-          moving,
-        })}
-      </div>
-    `;
+    return {
+      upperMotor: upper,
+      lowerMotor: lower,
+      upper: { label: this._motorName(upper), angle: this._angle(upper) },
+      lower: { label: this._motorName(lower), angle: this._angle(lower) },
+      moving,
+    };
   }
 
   private _motors(bed: BedEntities): typeof nothing | TemplateResult {
@@ -236,7 +756,9 @@ export class AdjustableBedCard extends LitElement {
       ${bed.synchro ? this._toggleRow(bed.synchro) : nothing}
       ${
         motors.length
-          ? html`<div class="rows">${motors.map((m) => this._motorRow(m))}</div>`
+          ? html`<div class="rows">
+              ${motors.map((m) => this._motorRow(m, bed.stop))}
+            </div>`
           : nothing
       }
       ${
@@ -248,9 +770,9 @@ export class AdjustableBedCard extends LitElement {
       }
       ${
         bed.stop
-          ? html`<button class="stop-all" @click=${() => this._hold.stopAll()}>
+          ? html`<button class="stop-all" @click=${() => this._hold.stopAll(bed.stop)}>
               <ha-icon icon="mdi:stop"></ha-icon>
-              <span>${this._name(bed.stop)}</span>
+              <span>${localize(this.hass, "action.stop_all")}</span>
             </button>`
           : nothing
       }
@@ -265,25 +787,30 @@ export class AdjustableBedCard extends LitElement {
     `;
   }
 
-  private _motorRow(m: MotorEntity): TemplateResult {
+  // `stopId` is the STOP entity for the bed this row belongs to (a side's own
+  // stop for a paired side, the parent's stop_both for the combined block). It
+  // is passed in rather than read from card-wide state, which during a paired
+  // render would point at the parent for every side. It also backs the
+  // press-and-hold release, so a hold on one side stops that side.
+  private _motorRow(m: MotorEntity, stopId?: string): TemplateResult {
     const readout = this._readout(m);
     const upId = m.cover ?? m.up;
     const downId = m.cover ?? m.down;
-    const canStop = !!m.cover || !!this._bed?.stop;
+    const canStop = !!m.cover || !!stopId;
     return html`
       <div class="row">
         <div class="row-label">
-          <span>${this._name(m.cover ?? m.up ?? m.down ?? m.angle ?? m.key)}</span>
+          <span>${this._motorName(m)}</span>
           ${readout ? html`<span class="readout">${readout}</span>` : nothing}
         </div>
         <div class="control-group">
           <button
             class="cg-btn"
             aria-label=${localize(this.hass, "action.up")}
-            @pointerdown=${(e: PointerEvent) => this._startHold(e, m, "up")}
+            @pointerdown=${(e: PointerEvent) => this._startHold(e, m, "up", stopId)}
             @pointerup=${(e: PointerEvent) => this._endPointerHold(e, m)}
             @pointercancel=${(e: PointerEvent) => this._endPointerHold(e, m)}
-            @keydown=${(e: KeyboardEvent) => this._startHold(e, m, "up")}
+            @keydown=${(e: KeyboardEvent) => this._startHold(e, m, "up", stopId)}
             @keyup=${(e: KeyboardEvent) => this._endKeyHold(e, m)}
             @blur=${() => this._endHold(m)}
             @click=${(e: MouseEvent) => this._activateWithoutPointer(e, m, "up")}
@@ -294,7 +821,7 @@ export class AdjustableBedCard extends LitElement {
           <button
             class="cg-btn"
             aria-label=${localize(this.hass, "action.stop")}
-            @click=${() => this._motorStop(m)}
+            @click=${() => this._motorStop(m, stopId)}
             ?disabled=${!canStop}
           >
             <ha-icon icon="mdi:stop"></ha-icon>
@@ -302,10 +829,10 @@ export class AdjustableBedCard extends LitElement {
           <button
             class="cg-btn"
             aria-label=${localize(this.hass, "action.down")}
-            @pointerdown=${(e: PointerEvent) => this._startHold(e, m, "down")}
+            @pointerdown=${(e: PointerEvent) => this._startHold(e, m, "down", stopId)}
             @pointerup=${(e: PointerEvent) => this._endPointerHold(e, m)}
             @pointercancel=${(e: PointerEvent) => this._endPointerHold(e, m)}
-            @keydown=${(e: KeyboardEvent) => this._startHold(e, m, "down")}
+            @keydown=${(e: KeyboardEvent) => this._startHold(e, m, "down", stopId)}
             @keyup=${(e: KeyboardEvent) => this._endKeyHold(e, m)}
             @blur=${() => this._endHold(m)}
             @click=${(e: MouseEvent) => this._activateWithoutPointer(e, m, "down")}
@@ -348,35 +875,41 @@ export class AdjustableBedCard extends LitElement {
     if (slots.length === 0) return nothing;
     const canSave =
       this._config?.memory_save !== false && slots.some((s) => s.save);
+    // A stable key for THIS memory section (its slots' own entity ids), so save
+    // mode is scoped to the section the user tapped, not shared globally.
+    const sectionKey = slots
+      .map((s) => s.save ?? s.goto ?? String(s.slot))
+      .join("|");
+    const saveMode = this._saveModeFor === sectionKey;
     return html`
       <div class="section-heading heading-row">
         <span>${localize(this.hass, "section.memory")}</span>
         ${
           canSave
             ? html`<button
-                class="set-btn ${this._saveMode ? "active" : ""}"
-                @click=${() => this._toggleSaveMode()}
+                class="set-btn ${saveMode ? "active" : ""}"
+                @click=${() => this._toggleSaveMode(sectionKey)}
               >
                 <ha-icon
-                  icon=${this._saveMode ? "mdi:close" : "mdi:content-save-edit-outline"}
+                  icon=${saveMode ? "mdi:close" : "mdi:content-save-edit-outline"}
                 ></ha-icon>
-                <span>${localize(this.hass, this._saveMode ? "memory.cancel" : "memory.set")}</span>
+                <span>${localize(this.hass, saveMode ? "memory.cancel" : "memory.set")}</span>
               </button>`
             : nothing
         }
       </div>
       ${
-        this._saveMode
+        saveMode
           ? html`<div class="hint">${localize(this.hass, "memory.set_hint")}</div>`
           : nothing
       }
-      <div class="tiles">${slots.map((s) => this._memoryTile(s))}</div>
+      <div class="tiles">${slots.map((s) => this._memoryTile(s, saveMode))}</div>
     `;
   }
 
-  private _memoryTile(slot: MemorySlot): TemplateResult {
+  private _memoryTile(slot: MemorySlot, saveMode: boolean): TemplateResult {
     const labelId = slot.goto ?? slot.save!;
-    if (this._saveMode) {
+    if (saveMode) {
       const savable = !!slot.save;
       return html`
         <button
@@ -570,15 +1103,13 @@ export class AdjustableBedCard extends LitElement {
     return this.hass?.states[entityId];
   }
 
-  private _title(): string {
+  private _title(deviceId?: string): string {
     if (this._config?.name) return this._config.name;
-    return this._deviceName() ?? localize(this.hass, "card.default_name");
+    return this._deviceName(deviceId) ?? localize(this.hass, "card.default_name");
   }
 
-  private _deviceName(): string | undefined {
-    const dev = this._config?.device_id
-      ? this.hass?.devices[this._config.device_id]
-      : undefined;
+  private _deviceName(deviceId = this._config?.device_id): string | undefined {
+    const dev = deviceId ? this.hass?.devices[deviceId] : undefined;
     return dev?.name_by_user || dev?.name || undefined;
   }
 
@@ -589,11 +1120,25 @@ export class AdjustableBedCard extends LitElement {
       this._state(entityId)?.attributes.friendly_name ??
       this.hass?.entities[entityId]?.name ??
       entityId;
-    const device = this._deviceName();
+    // Use the entity's own device, not the card's configured device. This is
+    // essential for paired beds where the visible controls may belong to the
+    // parent, left child, or right child.
+    const entityDeviceId = this.hass?.entities[entityId]?.device_id;
+    const device = this._deviceName(entityDeviceId);
     if (device && friendly.startsWith(device + " ")) {
       return friendly.slice(device.length + 1);
     }
     return friendly;
+  }
+
+  private _motorName(m: MotorEntity): string {
+    const key = `motor.${m.key}`;
+    const translated = localize(this.hass, key);
+    if (translated !== key) return translated;
+    return m.key
+      .split("_")
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ");
   }
 
   private _angle(m: MotorEntity): number | undefined {
@@ -671,6 +1216,7 @@ export class AdjustableBedCard extends LitElement {
     e: PointerEvent | KeyboardEvent,
     m: MotorEntity,
     dir: "up" | "down",
+    stopId?: string,
   ): void {
     let ownerPointerId: number | null = null;
     if (e instanceof KeyboardEvent) {
@@ -689,7 +1235,7 @@ export class AdjustableBedCard extends LitElement {
       e.preventDefault();
       ownerPointerId = e.pointerId;
     }
-    this._hold.start(m, dir, ownerPointerId);
+    this._hold.start(m, dir, ownerPointerId, stopId);
   }
 
   // Screen readers, voice control and switch devices activate a native button
@@ -731,27 +1277,29 @@ export class AdjustableBedCard extends LitElement {
     this._hold.end(m);
   }
 
-  private _motorStop(m: MotorEntity): void {
+  private _motorStop(m: MotorEntity, stopId?: string): void {
     if (m.cover) {
       this._hold.cancel(m);
       this._cover(m.cover, "stop_cover");
       return;
     }
-    // A button-backed row has no stop of its own and falls through to the
-    // bed-wide stop, which halts whatever is moving. So it has to invalidate
-    // any active hold, not just this row's.
-    this._hold.stopAll();
+    // A button-backed row has no stop of its own and falls through to the stop
+    // of the bed it belongs to, which halts whatever is moving on that bed. So
+    // it has to invalidate any active hold, not just this row's.
+    this._hold.stopAll(stopId);
   }
 
-  private _toggleSaveMode(): void {
-    this._saveMode = !this._saveMode;
+  // Toggle save mode for ONE section: entering it on a section cancels any other
+  // section's save mode (only one section is ever savable at a time).
+  private _toggleSaveMode(sectionKey: string): void {
+    this._saveModeFor = this._saveModeFor === sectionKey ? undefined : sectionKey;
   }
 
   // Save the bed's current position into a slot, then leave save mode so a
   // stray second tap can't overwrite another position.
   private _saveMemory(slot: MemorySlot): void {
     if (slot.save) this._press(slot.save);
-    this._saveMode = false;
+    this._saveModeFor = undefined;
   }
 
   // Home Assistant already surfaces service failures to the user via its own
@@ -779,6 +1327,14 @@ export class AdjustableBedCard extends LitElement {
     this._call("homeassistant", "toggle", entityId);
   }
 
+  private _setEntities(entityIds: string[], on: boolean): void {
+    this.hass
+      ?.callService("homeassistant", on ? "turn_on" : "turn_off", {
+        entity_id: entityIds,
+      })
+      ?.catch(() => undefined);
+  }
+
   private _moreInfo(entityId: string): void {
     this.dispatchEvent(
       new CustomEvent("hass-more-info", {
@@ -792,6 +1348,8 @@ export class AdjustableBedCard extends LitElement {
   static override styles = css`
     :host {
       --ab-gap: 10px;
+      --ab-side-left-rgb: 75, 0, 255;
+      --ab-side-right-rgb: 234, 65, 65;
     }
     ha-card {
       padding: 12px 12px 16px;
@@ -841,6 +1399,82 @@ export class AdjustableBedCard extends LitElement {
       text-transform: uppercase;
       color: var(--secondary-text-color);
       padding: 14px 4px 8px;
+    }
+    .pane-tabs {
+      display: grid;
+      grid-template-columns: repeat(var(--pane-count, 3), minmax(0, 1fr));
+      gap: 4px;
+      padding: 4px;
+      margin: 0 0 6px;
+      border-radius: 14px;
+      background: var(--secondary-background-color);
+    }
+    .pane-tab {
+      min-width: 0;
+      height: 42px;
+      padding: 0 8px;
+      border: 0;
+      border-radius: 11px;
+      background: transparent;
+      color: var(--secondary-text-color);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      font: inherit;
+      font-size: 0.82rem;
+      font-weight: 500;
+      transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+      -webkit-user-select: none;
+      user-select: none;
+      touch-action: manipulation;
+    }
+    .pane-tab ha-icon {
+      --mdc-icon-size: 19px;
+      flex: none;
+    }
+    .pane-tab span:not(.connection-dot) {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .pane-tab:hover {
+      color: var(--primary-text-color);
+    }
+    .pane-tab.active {
+      color: var(--primary-text-color);
+      background: var(--card-background-color);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14);
+    }
+    .connection-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--disabled-text-color);
+      flex: none;
+    }
+    .connection-dot.connected {
+      background: var(--success-color, var(--state-active-color, #43a047));
+    }
+    .connection-dot.idle {
+      background: var(--info-color, var(--secondary-text-color));
+    }
+    .connection-dot.disconnected {
+      background: var(--error-color);
+    }
+    .pane {
+      animation: ab-pane-in 0.16s ease-out;
+    }
+    @keyframes ab-pane-in {
+      from {
+        opacity: 0;
+        transform: translateY(2px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
     }
     .heading-row {
       display: flex;
@@ -896,25 +1530,246 @@ export class AdjustableBedCard extends LitElement {
     }
     .bed-graphic {
       width: 100%;
-      max-width: 320px;
+      max-width: 350px;
       height: auto;
       overflow: visible;
     }
+    .bed-graphic-theme {
+      --ab-graphic-rgb: var(--rgb-primary-color, 33, 150, 243);
+    }
+    .bed-graphic-left {
+      --ab-graphic-rgb: var(--ab-side-left-rgb);
+    }
+    .bed-graphic-right {
+      --ab-graphic-rgb: var(--ab-side-right-rgb);
+    }
     .bed-graphic.is-moving {
       animation: ab-pulse 2s ease-in-out infinite;
+    }
+    .bed-frame-stop {
+      stop-color: var(--secondary-text-color);
+    }
+    .bed-graphic-theme .bed-mattress-stop {
+      stop-color: rgb(var(--rgb-primary-color, 33, 150, 243));
+    }
+    .bed-graphic-left .bed-mattress-stop,
+    .dual-bed-left-stop {
+      stop-color: rgb(var(--ab-side-left-rgb));
+    }
+    .bed-graphic-right .bed-mattress-stop,
+    .dual-bed-right-stop {
+      stop-color: rgb(var(--ab-side-right-rgb));
+    }
+    .bed-frame,
+    .dual-bed-frame {
+      opacity: 0.78;
+      stroke: var(--primary-text-color);
+      stroke-opacity: 0.14;
+      stroke-width: 1px;
+      vector-effect: non-scaling-stroke;
+    }
+    .bed-side-layer {
+      opacity: 0.86;
+    }
+    .bed-graphic-left .bed-side-layer,
+    .bed-graphic-right .bed-side-layer {
+      opacity: 0.66;
+    }
+    .bed-surface,
+    .dual-bed-surface {
+      stroke: var(--primary-text-color);
+      stroke-opacity: 0.1;
+      stroke-width: 1px;
+      vector-effect: non-scaling-stroke;
+    }
+    .bed-pillow,
+    .dual-bed-pillow {
+      opacity: 0.9;
+    }
+    .bed-panel {
+      transition: transform 0.55s cubic-bezier(0.2, 0.7, 0.2, 1);
     }
     .bed-graphic-label {
       fill: var(--secondary-text-color);
       font-size: 11px;
       font-family: var(--ha-font-family-body, var(--primary-font-family, sans-serif));
     }
+    .dual-graphic {
+      padding-top: 8px;
+    }
+    .dual-bed-graphic {
+      isolation: isolate;
+    }
+    .dual-bed-side {
+      opacity: 0.66;
+    }
+    .dual-bed-panel {
+      transition: transform 0.55s cubic-bezier(0.2, 0.7, 0.2, 1);
+    }
+    .dual-bed-side.is-moving {
+      animation: ab-side-pulse 1.4s ease-in-out infinite;
+    }
+    .dual-readouts {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      width: min(100%, 350px);
+      margin: -2px auto 2px;
+    }
+    .dual-readout {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      background: var(--secondary-background-color);
+      text-align: center;
+    }
+    .dual-side-name {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--primary-text-color);
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+    .dual-swatch {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex: none;
+    }
+    .side-left .dual-swatch {
+      background: rgb(var(--ab-side-left-rgb));
+    }
+    .side-right .dual-swatch {
+      background: rgb(var(--ab-side-right-rgb));
+    }
+    .dual-position {
+      overflow: hidden;
+      color: var(--secondary-text-color);
+      font-size: 0.72rem;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dual-sync-row {
+      box-sizing: border-box;
+      width: min(100%, 350px);
+      min-height: 52px;
+      margin: 4px auto 2px;
+      padding: 7px 9px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--divider-color);
+      border-radius: 11px;
+      background: var(--card-background-color);
+    }
+    .dual-sync-row > ha-icon {
+      flex: none;
+      color: var(--secondary-text-color);
+      --mdc-icon-size: 19px;
+    }
+    .dual-sync-label {
+      min-width: 0;
+      flex: 1;
+      color: var(--primary-text-color);
+      font-size: 0.78rem;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dual-sync-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 4px;
+      min-width: 148px;
+      max-width: 52%;
+      flex: none;
+    }
+    .dual-sync-btn {
+      min-width: 0;
+      height: 34px;
+      padding: 0 9px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      border: 1px solid var(--divider-color);
+      border-radius: 9px;
+      background: var(--secondary-background-color);
+      color: var(--primary-text-color);
+      font: inherit;
+      font-size: 0.74rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+    }
+    .dual-sync-btn:hover:not(:disabled),
+    .dual-sync-btn:focus-visible {
+      border-color: var(--primary-color);
+    }
+    .dual-sync-btn:disabled {
+      cursor: default;
+      opacity: 0.42;
+    }
+    .dual-sync-btn.is-active {
+      opacity: 1;
+      border-color: var(--primary-color);
+      background: var(--secondary-background-color);
+    }
+    .dual-sync-btn span:last-child {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .dual-sync-spinner {
+      flex: none;
+      animation: ab-spin 0.8s linear infinite;
+      --mdc-icon-size: 15px;
+    }
+    .dual-sync-error {
+      box-sizing: border-box;
+      width: min(100%, 350px);
+      margin: 5px auto 2px;
+      padding: 6px 9px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 9px;
+      background: color-mix(in srgb, var(--error-color) 12%, transparent);
+      color: var(--error-color);
+      font-size: 0.72rem;
+    }
+    .dual-sync-error ha-icon {
+      flex: none;
+      --mdc-icon-size: 16px;
+    }
+    @keyframes ab-spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
     @keyframes ab-pulse {
       0%,
       100% {
-        filter: drop-shadow(0 0 3px rgba(var(--rgb-primary-color, 33, 150, 243), 0.25));
+        filter: drop-shadow(0 0 3px rgba(var(--ab-graphic-rgb), 0.25));
       }
       50% {
-        filter: drop-shadow(0 0 10px rgba(var(--rgb-primary-color, 33, 150, 243), 0.55));
+        filter: drop-shadow(0 0 10px rgba(var(--ab-graphic-rgb), 0.55));
+      }
+    }
+    @keyframes ab-side-pulse {
+      0%,
+      100% {
+        opacity: 0.58;
+      }
+      50% {
+        opacity: 0.88;
       }
     }
     .rows {
@@ -1058,6 +1913,12 @@ export class AdjustableBedCard extends LitElement {
       color: var(--state-icon-color, var(--primary-color));
       --mdc-icon-size: 24px;
     }
+    .combined-entity-row {
+      cursor: default;
+    }
+    .combined-entity-row .icon.active {
+      color: var(--state-light-active-color, var(--state-active-color, #ffc107));
+    }
     .entity-row-text {
       display: flex;
       flex-direction: column;
@@ -1083,6 +1944,9 @@ export class AdjustableBedCard extends LitElement {
     .toggle.on {
       background: var(--primary-color);
     }
+    .toggle.mixed {
+      background: rgba(var(--rgb-primary-color, 33, 150, 243), 0.55);
+    }
     .toggle .knob {
       position: absolute;
       top: 2px;
@@ -1095,6 +1959,50 @@ export class AdjustableBedCard extends LitElement {
     }
     .toggle.on .knob {
       transform: translateX(18px);
+    }
+    .bluetooth-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--ab-gap);
+    }
+    .bluetooth-status {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--divider-color);
+      border-radius: 12px;
+      background: var(--card-background-color);
+      color: var(--primary-text-color);
+      cursor: pointer;
+      font: inherit;
+      text-align: left;
+    }
+    .bluetooth-status ha-icon {
+      --mdc-icon-size: 22px;
+      flex: none;
+    }
+    .bluetooth-status.connected ha-icon {
+      color: var(--success-color, var(--state-active-color, #43a047));
+    }
+    .bluetooth-status.idle ha-icon {
+      color: var(--info-color, var(--secondary-text-color));
+    }
+    .bluetooth-status.disconnected ha-icon {
+      color: var(--secondary-text-color);
+    }
+    .bluetooth-copy {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .bluetooth-detail {
+      overflow: hidden;
+      color: var(--secondary-text-color);
+      font-size: 0.72rem;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .notice {
       padding: 24px 16px;

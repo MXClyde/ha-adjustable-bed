@@ -24,7 +24,8 @@
         },
         "data_description": {
           "action": "«Sjekk på nytt» sjekker sengen en gang til uten at du mister innstillingene du nettopp fylte ut."
-        }
+        },
+        "description": "Sjekket tilkoblingen til **{name}** før oppsettet fullføres:\n\n{capabilities}\n\nÅ sende inn fullfører oppsettet. En mislykket sjekk blokkerer det aldri, og integrasjonen fortsetter å prøve å koble til etterpå."
       },
       "setup_progress": {
         "title": "Sjekker tilkoblingen",
@@ -83,11 +84,11 @@
         "title": "Justerbar seng",
         "description": "Hva vil du gjøre?",
         "menu_options": {
-          "configure": "Endre innstillinger",
-          "unpair": "Fjern Bluetooth-koblingen"
+          "settings": "Endre innstillinger",
+          "remove_bond": "Fjern Bluetooth-koblingen"
         }
       },
-      "unpair": {
+      "remove_bond": {
         "title": "Fjern Bluetooth-koblingen",
         "description": "Dette fjerner Bluetooth-koblingen som **{name}** ({address}) har med denne Home Assistant-verten.\n\n**Koblingen er lagret på:** {transport}{provenance}\n\nHome Assistant kobler fra sengen først. Etterpå må sengen pares på nytt før den kan styres, og du må kanskje sette den i paremodus igjen for å få til det.\n\nDette sletter **ikke** enheten Justerbar seng eller innstillingene dens. Velg **Send inn** for å fjerne koblingen, eller gå tilbake for å la den være.",
         "data_description": {
@@ -95,7 +96,7 @@
           "outcome_failed": "❌ Koblingen ble ikke fjernet ({reason})."
         }
       },
-      "unpair_result": {
+      "remove_bond_result": {
         "title": "Bluetooth-kobling",
         "description": "{outcome}"
       }
@@ -105,11 +106,11 @@
       "disconnecting": "Kobler fra…"
     },
     "abort": {
-      "unpair_proxy_owned": "**{name}** er paret via en Bluetooth-proxy ({transport}), ikke via denne Home Assistant-verten, så Home Assistant kan ikke fjerne den koblingen. Koblingen ligger på selve proxyen: fjern den der (en ESPHome-proxy glemmer koblingene sine når den flashes på nytt eller tilbakestilles), eller sett sengens foretrukne adapter til en Bluetooth-adapter på denne verten og par på nytt.",
-      "unpair_no_bond": "Denne Home Assistant-verten har ingen Bluetooth-kobling lagret for **{name}** ({address}), så det er ingenting å fjerne.",
-      "unpair_bluez_unavailable": "Home Assistant klarte ikke å lese Bluetooth-koblingene på denne verten, og prøver derfor ikke å fjerne noen. Det betyr som regel at verten mangler en lokal Bluetooth-adapter, eller ikke har tilgang til system-D-Bus.",
-      "unpair_ambiguous": "Home Assistant kan ikke vite hvilken Bluetooth-kobling du mener for **{name}** ({address}). Enten er mer enn én adapter på denne verten koblet til den, eller så har ikke adapteren den ble paret gjennom noen kobling lenger. Sett sengens foretrukne adapter til den du vil rydde, og prøv igjen.",
-      "unpair_changed": "Bluetooth-koblingene på denne verten endret seg mens bekreftelsen sto åpen, så ingenting ble fjernet. Åpne **Fjern Bluetooth-koblingen** på nytt for å se gjeldende tilstand og bekrefte derfra."
+      "remove_bond_proxy_owned": "**{name}** er paret via en Bluetooth-proxy ({transport}), ikke via denne Home Assistant-verten, så Home Assistant kan ikke fjerne den koblingen. Koblingen ligger på selve proxyen: fjern den der (en ESPHome-proxy glemmer koblingene sine når den flashes på nytt eller tilbakestilles), eller sett sengens foretrukne adapter til en Bluetooth-adapter på denne verten og par på nytt.",
+      "remove_bond_no_bond": "Denne Home Assistant-verten har ingen Bluetooth-kobling lagret for **{name}** ({address}), så det er ingenting å fjerne.",
+      "remove_bond_bluez_unavailable": "Home Assistant klarte ikke å lese Bluetooth-koblingene på denne verten, og prøver derfor ikke å fjerne noen. Det betyr som regel at verten mangler en lokal Bluetooth-adapter, eller ikke har tilgang til system-D-Bus.",
+      "remove_bond_ambiguous": "Home Assistant kan ikke vite hvilken Bluetooth-kobling du mener for **{name}** ({address}). Enten er mer enn én adapter på denne verten koblet til den, eller så har ikke adapteren den ble paret gjennom noen kobling lenger. Sett sengens foretrukne adapter til den du vil rydde, og prøv igjen.",
+      "remove_bond_changed": "Bluetooth-koblingene på denne verten endret seg mens bekreftelsen sto åpen, så ingenting ble fjernet. Åpne **Fjern Bluetooth-koblingen** på nytt for å se gjeldende tilstand og bekrefte derfra."
     }
   }
 }
