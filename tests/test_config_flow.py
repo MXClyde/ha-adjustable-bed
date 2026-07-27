@@ -444,6 +444,19 @@ class TestPairingPersistence:
         assert result["data"][CONF_BLE_BOND_CONTEXT]["adapter"] == "hci0"
 
     @pytest.mark.parametrize("step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"])
+    async def test_an_existing_host_bond_is_the_default_action(
+        self, hass: HomeAssistant, step: str
+    ) -> None:
+        """Submitting the unchanged form must not pair over a proven bond."""
+        flow = self._new_pairing_flow(hass)
+        inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+        with _patch_inventory(inventory), _patch_local_prediction():
+            result = await getattr(flow, step)(None)
+
+        action_field = next(iter(result["data_schema"].schema))
+        assert action_field.default() == "use_existing_bond"
+
+    @pytest.mark.parametrize("step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"])
     async def test_a_bond_on_another_local_adapter_is_not_offered(
         self, hass: HomeAssistant, step: str
     ) -> None:
@@ -4121,6 +4134,31 @@ async def test_unpair_refuses_two_bonds_with_no_provenance(
     removal.assert_not_called()
 
 
+async def test_a_legacy_entry_uses_its_predicted_local_adapter_to_unpair(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    """A selected local path disambiguates legacy entries with two host bonds."""
+    first = _record_on("/org/bluez/hci0", "11:22:33:44:55:66")
+    second = _record_on("/org/bluez/hci1", "AA:AA:AA:AA:AA:AA")
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        data={
+            **mock_config_entry.data,
+            CONF_PREFERRED_ADAPTER: "AA:AA:AA:AA:AA:AA",
+        },
+    )
+    mock_config_entry.add_to_hass(hass)
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(first, second))
+    with (
+        _patch_inventory(inventory),
+        _patch_local_prediction("AA:AA:AA:AA:AA:AA", "hci1"),
+    ):
+        result = await _open_unpair(hass, mock_config_entry.entry_id)
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["description_placeholders"]["transport"] == "AA:AA:AA:AA:AA:AA"
+
+
 async def test_a_legacy_entry_with_one_bond_can_still_unpair_but_says_so(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
 ) -> None:
@@ -4291,5 +4329,44 @@ async def test_a_confirmed_unpair_persists_without_the_result_screen(
         # result step that used to own this update.
         await hass.async_block_till_done()
         hass.config_entries.options.async_abort(progress["flow_id"])
+
+    assert CONF_BLE_BOND_ESTABLISHED not in mock_config_entry.data
+
+
+async def test_cancelling_after_removal_starts_still_applies_the_confirmed_result(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    """Closing progress cannot strand state after BlueZ may have removed the bond."""
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        data={**mock_config_entry.data, CONF_BLE_BOND_ESTABLISHED: True},
+    )
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+    removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=_bond_record())
+    removal_started = asyncio.Event()
+    finish_removal = asyncio.Event()
+
+    async def _slow_confirmed_removal(_record: LocalBondRecord) -> BondRemovalResult:
+        removal_started.set()
+        await finish_removal.wait()
+        return removed
+
+    with (
+        _patch_inventory(inventory),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
+            side_effect=_slow_confirmed_removal,
+        ),
+    ):
+        confirm = await _open_unpair(hass, mock_config_entry.entry_id)
+        progress = await hass.config_entries.options.async_configure(
+            confirm["flow_id"], user_input={}
+        )
+        async with asyncio.timeout(5):
+            await removal_started.wait()
+
+        hass.config_entries.options.async_abort(progress["flow_id"])
+        finish_removal.set()
+        await hass.async_block_till_done()
 
     assert CONF_BLE_BOND_ESTABLISHED not in mock_config_entry.data
