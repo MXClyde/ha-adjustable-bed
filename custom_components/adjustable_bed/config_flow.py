@@ -3888,6 +3888,10 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
         if not result.succeeded or self._unpair_state_applied:
             return
         self._unpair_state_applied = True
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+        if coordinator is not None:
+            coordinator.apply_confirmed_bond_removal()
+            return
         data = dict(self.config_entry.data)
         data.pop(CONF_BLE_BOND_ESTABLISHED, None)
         data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)

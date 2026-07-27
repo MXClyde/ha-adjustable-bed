@@ -931,6 +931,19 @@ class AdjustableBedCoordinator:
 
         self._persist_bond_flags(established=False)
 
+    def apply_confirmed_bond_removal(self) -> None:
+        """Clear all runtime and persisted state for a confirmed bond removal."""
+        self._ble_bond_established = False
+        self._ble_bond_marker_unreliable = False
+        data = dict(self.entry.data)
+        data.pop(CONF_BLE_BOND_ESTABLISHED, None)
+        data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
+        data.pop(CONF_BLE_BOND_CONTEXT, None)
+        if data == dict(self.entry.data):
+            return
+        self._begin_internal_entry_update(False)
+        self.hass.config_entries.async_update_entry(self.entry, data=data)
+
     def _log_bond_marker_unreliable(self) -> None:
         """Log the latch transition. The write itself is batched by the caller."""
         _LOGGER.info(
@@ -1845,6 +1858,11 @@ class AdjustableBedCoordinator:
                 await asyncio.sleep(pre_retry_delay)
 
             try:
+                # A connection path belongs only to the link that established
+                # it. If this attempt fails before establish_connection()
+                # returns, retaining the previous path would attribute the
+                # failure to an unrelated host adapter or proxy.
+                self._connection_path = None
                 _LOGGER.debug(
                     "Connection attempt %d/%d: Looking up device %s via HA Bluetooth (preferred adapter: %s)",
                     attempt_number,

@@ -13,6 +13,10 @@ from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.adjustable_bed.bluetooth_transport import (
+    ConnectionPath,
+    TransportClass,
+)
 from custom_components.adjustable_bed.const import (
     BED_MOTOR_PULSE_DEFAULTS,
     BED_TYPE_BEDTECH,
@@ -241,6 +245,56 @@ class TestCoordinatorConnection:
             result = await coordinator.async_connect()
 
         assert result is False
+
+    async def test_failed_attempt_does_not_reuse_previous_connection_path(
+        self,
+        hass: HomeAssistant,
+        mock_async_ble_device_from_address,
+        mock_bluetooth_adapters,
+    ) -> None:
+        """A pre-connect auth failure has no proven transport owner."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title=TEST_NAME,
+            data={
+                CONF_ADDRESS: TEST_ADDRESS,
+                CONF_NAME: TEST_NAME,
+                CONF_BED_TYPE: BED_TYPE_OKIMAT,
+                CONF_MOTOR_COUNT: 2,
+                CONF_HAS_MASSAGE: False,
+                CONF_DISABLE_ANGLE_SENSING: True,
+                CONF_PREFERRED_ADAPTER: "auto",
+            },
+            unique_id=TEST_ADDRESS,
+            entry_id="failed_attempt_connection_path_test",
+        )
+        entry.add_to_hass(hass)
+        auth_error = BleakError("Insufficient authentication")
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.coordinator.establish_connection",
+                new_callable=AsyncMock,
+                side_effect=auth_error,
+            ),
+            patch(
+                "custom_components.adjustable_bed.coordinator.create_pairing_required_issue",
+                new_callable=AsyncMock,
+            ) as create_issue,
+        ):
+            coordinator = AdjustableBedCoordinator(hass, entry)
+            coordinator._max_retries = 1
+            coordinator._connection_path = ConnectionPath(
+                source="old-host",
+                transport=TransportClass.LOCAL,
+                adapter="hci0",
+            )
+            result = await coordinator.async_connect()
+
+        assert result is False
+        evidence = create_issue.await_args.kwargs["evidence"]
+        assert evidence["owner"]["transport"] == "unknown"
+        assert evidence["owner"]["source"] is None
 
     async def test_connect_detects_existing_bond_and_skips_pairing(
         self,

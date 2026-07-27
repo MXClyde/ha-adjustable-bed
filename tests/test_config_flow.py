@@ -3705,6 +3705,52 @@ async def test_a_confirmed_unpair_clears_the_bond_marker(
     assert CONF_BLE_BOND_ESTABLISHED not in mock_config_entry.data
 
 
+async def test_a_confirmed_unpair_does_not_reload_and_recreate_the_bond(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    """Persisting an explicit unpair must not reconnect with pairing enabled."""
+    from custom_components.adjustable_bed.__init__ import _async_update_listener
+    from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        data={**mock_config_entry.data, CONF_BLE_BOND_ESTABLISHED: True},
+    )
+    coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+    remove_listener = mock_config_entry.add_update_listener(_async_update_listener)
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+    removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=_bond_record())
+
+    try:
+        with (
+            _stubbed_coordinator(hass, mock_config_entry.entry_id, coordinator),
+            _patch_inventory(inventory),
+            patch(
+                "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
+                AsyncMock(return_value=removed),
+            ),
+            patch.object(
+                hass.config_entries, "async_reload", new_callable=AsyncMock
+            ) as reload_entry,
+        ):
+            confirm = await _open_unpair(hass, mock_config_entry.entry_id)
+            progress = await hass.config_entries.options.async_configure(
+                confirm["flow_id"], user_input={}
+            )
+            while progress["type"] == FlowResultType.SHOW_PROGRESS:
+                await hass.async_block_till_done()
+                progress = await hass.config_entries.options.async_configure(
+                    progress["flow_id"]
+                )
+
+            reload_entry.assert_not_awaited()
+    finally:
+        remove_listener()
+
+    assert CONF_BLE_BOND_ESTABLISHED not in mock_config_entry.data
+    assert coordinator._ble_bond_established is False
+
+
 async def test_an_unconfirmed_removal_keeps_the_bond_marker(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
 ) -> None:
