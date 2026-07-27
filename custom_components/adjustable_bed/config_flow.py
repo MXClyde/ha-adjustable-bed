@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import voluptuous as vol
 from homeassistant.components.bluetooth import (
@@ -22,6 +23,7 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.const import __version__ as HA_VERSION
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.selector import (
     SelectOptionDict,
     SelectSelector,
@@ -72,6 +74,7 @@ from .const import (
     BED_TYPE_MALOUF_NEW_OKIN,
     BED_TYPE_OCTO,
     BED_TYPE_OKIMAT,
+    BED_TYPE_OKIN_CB24,
     BED_TYPE_OKIN_CST,
     BED_TYPE_OKIN_RF_ECO_BT,
     BED_TYPE_OKIN_UUID,
@@ -79,10 +82,14 @@ from .const import (
     BED_TYPE_SLEEP_NUMBER,
     BEDS_WITH_PERCENTAGE_POSITIONS,
     BEDS_WITH_POSITION_FEEDBACK,
+    CB24_BED_SELECTION_A,
+    CB24_BED_SELECTION_B,
+    CB24_BED_SELECTION_DEFAULT,
     CONF_BACK_MAX_ANGLE,
     CONF_BED_TYPE,
     CONF_BLE_BOND_ESTABLISHED,
     CONF_BLE_BOND_MARKER_UNRELIABLE,
+    CONF_CB24_BED_SELECTION,
     CONF_CONNECTION_PROFILE,
     CONF_DISABLE_ANGLE_SENSING,
     CONF_DISABLE_DISCOVERY,
@@ -90,6 +97,7 @@ from .const import (
     CONF_HAS_MASSAGE,
     CONF_IDLE_DISCONNECT_SECONDS,
     CONF_JENSEN_PIN,
+    CONF_KAIDI_RESOLVED_VARIANT,
     CONF_LEGS_MAX_ANGLE,
     CONF_MALOUF_LAYOUT,
     CONF_MALOUF_MEMORY_SLOTS,
@@ -98,6 +106,9 @@ from .const import (
     CONF_MOTOR_PULSE_DELAY_MS,
     CONF_MOTOR_PULSE_USER_SET,
     CONF_OCTO_PIN,
+    CONF_PAIR_CHILDREN,
+    CONF_PAIR_ID,
+    CONF_PAIR_MODE,
     CONF_PASSIVE_POSITION_RECONCILIATION,
     CONF_POSITION_MODE,
     CONF_PREFERRED_ADAPTER,
@@ -126,6 +137,9 @@ from .const import (
     MALOUF_MEMORY_SLOT_OPTIONS,
     MALOUF_MEMORY_SLOTS_AUTO,
     OCTO_VARIANT_STAR2,
+    OFFLINE_CAPABILITY_SAFE_BED_TYPES,
+    PAIR_MODE_SINGLE_ADDRESS,
+    PAIR_SIDES,
     POSITION_MODE_ACCURACY,
     POSITION_MODE_SPEED,
     RICHMAT_REMOTE_AUTO,
@@ -139,6 +153,7 @@ from .const import (
     passive_position_reconciliation_default_enabled,
     requires_pairing,
     requires_pairing_after_service_discovery,
+    resolve_explicit_bed_type,
     supports_passive_position_reconciliation,
 )
 from .detection import (
@@ -155,6 +170,23 @@ from .discovery_settings import (
     async_set_discovery_disabled,
 )
 from .kaidi_metadata import add_kaidi_entry_metadata, resolve_kaidi_advertisement
+from .pairing import (
+    KEY_SINGLE_ADDRESS_ORIGIN_ENTITY_UNIQUE_IDS,
+    build_pair_entry_data,
+    build_single_address_pair_entry_data,
+    get_child,
+    is_paired,
+    iter_children,
+    pair_member_addresses,
+    supports_single_address_pairing,
+    with_updated_child,
+)
+from .pairing_candidates import (
+    CONF_PAIR_SELECTION,
+    active_pairing_candidates,
+    build_pair_selection_schema,
+    selected_pair_ids,
+)
 from .setup_operation import (
     BluetoothOperationMixin,
     ConnectionLifetimePolicy,
@@ -270,6 +302,19 @@ def _add_malouf_schema_fields(schema: dict[vol.Marker, Any]) -> None:
     )
 
 
+def _add_cb24_side_schema_field(schema: dict[vol.Marker, Any]) -> None:
+    """Expose the legacy CB24 native A/B selector when the type is known."""
+    schema[
+        vol.Optional(CONF_CB24_BED_SELECTION, default=CB24_BED_SELECTION_DEFAULT)
+    ] = vol.In(
+        {
+            CB24_BED_SELECTION_DEFAULT: "Both sides",
+            CB24_BED_SELECTION_A: "Side A / Left",
+            CB24_BED_SELECTION_B: "Side B / Right",
+        }
+    )
+
+
 def _add_malouf_entry_data(
     entry_data: dict[str, Any], user_input: dict[str, Any], bed_type: str | None
 ) -> None:
@@ -280,6 +325,16 @@ def _add_malouf_entry_data(
     entry_data[CONF_MALOUF_MEMORY_SLOTS] = int(
         user_input.get(CONF_MALOUF_MEMORY_SLOTS, MALOUF_MEMORY_SLOTS_AUTO)
     )
+
+
+def _add_cb24_entry_data(
+    entry_data: dict[str, Any], user_input: dict[str, Any], bed_type: str | None
+) -> None:
+    """Persist the native CB24 A/B selector when it was collected."""
+    if bed_type == BED_TYPE_OKIN_CB24:
+        entry_data[CONF_CB24_BED_SELECTION] = int(
+            user_input.get(CONF_CB24_BED_SELECTION, CB24_BED_SELECTION_DEFAULT)
+        )
 
 
 # Short, single-attempt timeout for the optional setup-time connection probe.
@@ -337,7 +392,9 @@ class CapabilityReport:
 class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Adjustable Bed."""
 
-    VERSION = 3
+    # v4 introduces the paired-bed schema (Dual Bed 4.0). The v3->v4 migration is
+    # a strict no-op for non-paired entries; see async_migrate_entry.
+    VERSION = 4
 
     @staticmethod
     def _mark_ble_bond_established(entry_data: dict[str, Any]) -> dict[str, Any]:
@@ -423,6 +480,12 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         # replayed submission from the previous form cannot be read as a
         # confirmation of a result the user never saw.
         self._verify_form_shown: bool = False
+        # Octo capability snapshots captured per single-entry as the user connects
+        # each side, so a one-link Octo pair can be captured SEQUENTIALLY across
+        # resubmissions of the pair step (connect left, disconnect, connect right)
+        # — the flow instance persists, so a side captured while live stays
+        # available after it disconnects.
+        self._captured_octo_snapshots: dict[str, dict[str, Any]] = {}
         _LOGGER.debug("AdjustableBedConfigFlow initialized")
 
     def _set_device_title_placeholders(self, name: str | None, address: str) -> None:
@@ -635,6 +698,12 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
     def _configured_entries_by_address(self) -> dict[str, ConfigEntry]:
         """Return active entries keyed by normalized Bluetooth address.
 
+        Paired entries (Dual Bed 4.0) have a synthetic ``pair_<id>`` unique_id, so
+        they are additionally indexed by each member MAC. Otherwise re-discovery
+        of an absorbed side would slip past the dedup and create a duplicate
+        standalone entry. Single-bed entries have no members, so they are
+        unaffected.
+
         Ignored discovery placeholders must remain selectable in a user-started
         flow. Home Assistant replaces the ignored entry when that flow creates
         the real entry; treating it as configured here made the bed disappear
@@ -647,7 +716,156 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             candidate = entry.unique_id or entry.data.get(CONF_ADDRESS)
             if isinstance(candidate, str):
                 configured[candidate.upper()] = entry
+            for member in pair_member_addresses(entry.data):
+                configured[member] = entry
         return configured
+
+    def _octo_capability_snapshot(self, entry: ConfigEntry) -> dict | None:
+        """Capability snapshot for a single Octo entry — its LIVE controller's, or
+        the one cached earlier this flow, or None (not Octo / never connected).
+
+        Octo discovers its capabilities post-connect, and a one-link Octo only ever
+        has ONE side connected at a time, so we cache each side's snapshot the
+        moment it is live and fall back to that cache when it later disconnects.
+        That lets the user capture both sides SEQUENTIALLY (connect left, disconnect,
+        connect right) across resubmissions of the pair step instead of needing both
+        connected at once — which the single-connection profile is designed to avoid.
+        """
+        if entry.data.get(CONF_BED_TYPE) != BED_TYPE_OCTO:
+            return None
+        coordinator = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        snapshot_fn = getattr(getattr(coordinator, "controller", None), "capability_snapshot", None)
+        live = snapshot_fn() if callable(snapshot_fn) else None
+        if isinstance(live, dict):
+            # Copy before caching/returning so later controller or builder mutation
+            # can't change the cached sequential snapshot.
+            snapshot = dict(live)
+            self._captured_octo_snapshots[entry.entry_id] = snapshot
+            return dict(snapshot)
+        cached = self._captured_octo_snapshots.get(entry.entry_id)
+        return dict(cached) if isinstance(cached, dict) else None
+
+    def _offline_safe_bed_type(self, entry: ConfigEntry) -> str | None:
+        """Resolve ``entry``'s bed type for the offline-capability-safe check.
+
+        A legacy ``leggett_platt`` entry stores its real protocol under
+        ``protocol_variant``; an EXPLICIT variant resolves to a concrete type
+        that the offline-safe set already lists (``leggett_gen2`` /
+        ``leggett_wilinke``), even though the umbrella ``leggett_platt`` is not.
+        Funnel through the shared ``resolve_explicit_bed_type`` so the gate,
+        offline minting, and the pair descriptors all agree (``okin`` ->
+        leggett_okin, still unsafe; ``auto``/unset stays the umbrella type).
+        """
+        return resolve_explicit_bed_type(
+            entry.data.get(CONF_BED_TYPE), entry.data.get(CONF_PROTOCOL_VARIANT)
+        )
+
+    def _resolved_pair_side_data(self, entry: ConfigEntry) -> dict[str, Any]:
+        """Merged ``data`` + ``options`` for a pair child, with an explicit legacy
+        variant resolved to its concrete bed type.
+
+        Options (e.g. customized angle limits, which the coordinator reads before
+        data) are merged in so they survive the original being absorbed. The
+        bed_type is normalised through the SAME resolver the offline-safe gate
+        used, so the descriptor that gets stored is the one the gate approved —
+        otherwise the pair would carry the umbrella ``leggett_platt`` and
+        ``async_prime_offline_controller`` would refuse to mint the side the gate
+        just promised was offline-safe.
+        """
+        data = {**entry.data, **dict(entry.options)}
+        data[CONF_BED_TYPE] = resolve_explicit_bed_type(
+            data.get(CONF_BED_TYPE), data.get(CONF_PROTOCOL_VARIANT)
+        )
+        return data
+
+    def _is_octo_star2(self, entry: ConfigEntry) -> bool:
+        """Whether ``entry`` is an Octo Remote Star2 bed — a different protocol with
+        FIXED capabilities and no PIN/snapshot, so it is statically offline-safe
+        (unlike standard Octo, which needs a live capability snapshot)."""
+        return (
+            entry.data.get(CONF_BED_TYPE) == BED_TYPE_OCTO
+            and entry.data.get(CONF_PROTOCOL_VARIANT) == OCTO_VARIANT_STAR2
+        )
+
+    def _is_octo_one_motor_lift(self, entry: ConfigEntry) -> bool:
+        """Return whether an OCTO entry uses the standalone one-motor lift layout."""
+        if entry.data.get(CONF_BED_TYPE) != BED_TYPE_OCTO:
+            return False
+        motor_count = entry.options.get(
+            CONF_MOTOR_COUNT,
+            entry.data.get(CONF_MOTOR_COUNT, DEFAULT_MOTOR_COUNT),
+        )
+        return motor_count == 1
+
+    async def _pair_layout_snapshot(self, entry: ConfigEntry) -> dict[str, Any] | None:
+        """Capture the side's generic motor layout from its capability controller.
+
+        Prefer the loaded controller, otherwise mint the protocol's supported
+        client-free capability controller. If neither is available, the layout is
+        unknown and pairing is blocked rather than inferred from another protocol.
+        The persisted snapshot keeps the decision auditable after absorption.
+        """
+        from .coordinator import AdjustableBedCoordinator
+
+        coordinator = self.hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        controller = getattr(coordinator, "capability_controller", None)
+        if controller is None and not isinstance(coordinator, AdjustableBedCoordinator):
+            coordinator = AdjustableBedCoordinator(self.hass, entry)
+        if coordinator.capability_controller is None:
+            await coordinator.async_prime_offline_controller()
+        controller = coordinator.capability_controller
+        if controller is None:
+            return None
+        specs = list(getattr(controller, "motor_control_specs", ()))
+        configured_motor_count = entry.options.get(
+            CONF_MOTOR_COUNT,
+            entry.data.get(CONF_MOTOR_COUNT, DEFAULT_MOTOR_COUNT),
+        )
+        return {
+            "motor_count": int(configured_motor_count),
+            "motor_keys": sorted(spec.key for spec in specs),
+            "discrete_motor_control": bool(
+                getattr(controller, "has_discrete_motor_control", False)
+            ),
+            "supports_motor_control": bool(getattr(controller, "supports_motor_control", False)),
+        }
+
+    def _has_unsafe_offline_platforms(self, entry: ConfigEntry) -> bool:
+        """Whether ``entry`` exposes climate/light/select a half-available pair
+        couldn't recreate.
+
+        These platforms are now forwarded per-side, but their per-side entities
+        are built from a side's ``capability_controller`` — which only an
+        offline-capability-safe bed type has when a side is offline at setup. For
+        any other type, a half-available pair (or a conversion where a side drops
+        before connecting) would lose those entities, so keep blocking those.
+
+        Octo is offline-capable ONLY via a captured snapshot, so it is unsafe iff
+        it has no snapshot (i.e. wasn't connected at pairing).
+        """
+        bed_type = self._offline_safe_bed_type(entry)
+        if bed_type in OFFLINE_CAPABILITY_SAFE_BED_TYPES:
+            return False
+        if bed_type == BED_TYPE_OCTO:
+            # Star2 has fixed caps -> statically offline-safe; standard Octo needs a
+            # live capability snapshot.
+            if self._is_octo_star2(entry):
+                return False
+            return self._octo_capability_snapshot(entry) is None
+        registry = er.async_get(self.hass)
+        platforms = {"climate", "light", "select"}
+        return any(
+            entity.domain in platforms
+            for entity in er.async_entries_for_config_entry(registry, entry.entry_id)
+        )
+
+    def _is_absorbed_pair_member(self, address: str) -> bool:
+        """Whether ``address`` is already a side of an existing paired bed."""
+        member = address.upper()
+        return any(
+            member in pair_member_addresses(entry.data)
+            for entry in self.hass.config_entries.async_entries(DOMAIN)
+        )
 
     def _async_abort_retrying_entry(self, address: str) -> ConfigFlowResult:
         """Explain how to recover when the bed is already stuck retrying setup."""
@@ -718,6 +936,12 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         # between Bluetooth discovery (may be lowercase) and manual entry (normalized)
         await self.async_set_unique_id(discovery_info.address.upper())
         self._abort_if_unique_id_configured()
+
+        # Don't re-offer a side already absorbed into a paired bed: its MAC is a
+        # pair member, not the paired entry's (synthetic) unique_id, so the abort
+        # above won't catch it.
+        if self._is_absorbed_pair_member(discovery_info.address):
+            return self.async_abort(reason="already_configured")
 
         # Use detailed detection to get confidence and ambiguity info
         detection_result = detect_bed_type_detailed(discovery_info)
@@ -971,6 +1195,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     ),
                 }
                 _add_malouf_entry_data(entry_data, user_input, selected_bed_type)
+                _add_cb24_entry_data(entry_data, user_input, selected_bed_type)
                 # Malouf layout/memory fields weren't shown inline (user overrode the
                 # detected type to Malouf), so collect them in a follow-up step.
                 if self._needs_malouf_step(selected_bed_type, user_input):
@@ -1138,6 +1363,8 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
 
         if bed_type in MALOUF_BED_TYPES:
             _add_malouf_schema_fields(schema_dict)
+        if bed_type == BED_TYPE_OKIN_CB24:
+            _add_cb24_side_schema_field(schema_dict)
 
         # Add PIN field for Octo beds
         if bed_type == BED_TYPE_OCTO:
@@ -1279,11 +1506,16 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             if address == "diagnostic":
                 _LOGGER.debug("User selected diagnostic mode")
                 return await self.async_step_diagnostic()
+            if address == "pair_beds":
+                _LOGGER.debug("User selected combine two beds")
+                return await self.async_step_pair_beds()
 
             _LOGGER.info("User selected device: %s", address)
             # Normalize address to uppercase to match Bluetooth discovery
             await self.async_set_unique_id(address.upper())
             self._abort_if_unique_id_configured()
+            if self._is_absorbed_pair_member(address):
+                return self.async_abort(reason="already_configured")
 
             self._discovery_info = self._discovered_devices[address]
             self._set_device_title_placeholders(
@@ -1403,10 +1635,148 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             devices["select_by_brand"] = "Select by actuator brand (recommended)"
         devices["manual"] = "Show all BLE devices"
         devices["diagnostic"] = "Browse unsupported BLE devices"
+        if len(self._pairable_single_entries()) >= 2:
+            devices["pair_beds"] = "Combine two beds into one (Dual Bed)"
 
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema({vol.Required(CONF_ADDRESS): vol.In(devices)}),
+        )
+
+    def _pairable_single_entries(self) -> list[ConfigEntry]:
+        """Configured single-bed entries that could be combined into a pair.
+
+        Excludes any standalone entry whose MAC is already a member of an
+        existing pair (a stale/imported duplicate) — combining it again would
+        create a second pair sharing the same child {address}_{key} unique IDs.
+        """
+        # Only fully-loaded beds are returned: a bed still in SETUP_RETRY or
+        # failed initial setup has not registered its entities yet, so later
+        # compatibility checks cannot safely inspect its capabilities.
+        return active_pairing_candidates(self.hass)
+
+    async def async_step_pair_beds(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Combine two existing single-bed entries into one paired (Dual Bed) device.
+
+        Conversion is ADDITIVE: one paired entry is created and the two originals
+        are absorbed. Per-side entities keep their {address}_{key} unique_ids and
+        their device keeps its (DOMAIN, MAC) identifier, so the pair's setup
+        re-homes each original's registry rows in place (history/customizations
+        preserved) and only then removes the original entry. The originals stay
+        loaded and controllable until that handoff, so a failed pair setup never
+        leaves the user without a bed.
+        """
+        entries = self._pairable_single_entries()
+        if len(entries) < 2:
+            return self.async_abort(reason="not_enough_beds")
+
+        by_id = {entry.entry_id: entry for entry in entries}
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            selected_ids = selected_pair_ids(user_input)
+            left = by_id.get(selected_ids[0]) if selected_ids is not None else None
+            right = by_id.get(selected_ids[1]) if selected_ids is not None else None
+            left_layout = await self._pair_layout_snapshot(left) if left is not None else None
+            right_layout = await self._pair_layout_snapshot(right) if right is not None else None
+            if left is None or right is None:
+                errors["base"] = "unknown"
+            elif left.entry_id == right.entry_id:
+                errors[CONF_PAIR_SELECTION] = "same_device"
+            elif (left.data.get(CONF_ADDRESS) or "").upper() == (
+                right.data.get(CONF_ADDRESS) or ""
+            ).upper():
+                # Two distinct entries for the same MAC would build children with
+                # identical addresses and so collide on {address}_{key} unique IDs.
+                errors[CONF_PAIR_SELECTION] = "same_address"
+            elif self._offline_safe_bed_type(left) != self._offline_safe_bed_type(right):
+                # Compare RESOLVED bed types: two legacy leggett_platt entries with
+                # DIFFERENT explicit variants (gen2 vs mlrm) are different concrete
+                # protocols, so they're an incompatible pair even though their raw
+                # umbrella type matches — and would otherwise be stored as mismatched
+                # concrete child types by _resolved_pair_side_data below.
+                errors["base"] = "mismatched_bed_types"
+            elif self._offline_safe_bed_type(left) == BED_TYPE_OCTO and (
+                self._is_octo_one_motor_lift(left) or self._is_octo_one_motor_lift(right)
+            ):
+                # One-motor Standard OCTO entries are standalone TV/bed lifts,
+                # not bed sides. Reject even two matching lifts so the generic
+                # layout-equality gate cannot turn them into a paired bed.
+                errors["base"] = "octo_tv_lift_pairing_unsupported"
+            elif self._offline_safe_bed_type(left) == BED_TYPE_OCTO and (
+                (not self._is_octo_star2(left) and self._octo_capability_snapshot(left) is None)
+                or (
+                    not self._is_octo_star2(right) and self._octo_capability_snapshot(right) is None
+                )
+            ):
+                # Standard Octo is paired via the sequential active-connection
+                # profile, and its OFFLINE side mints its light/RGBW/memory/synchro
+                # entities from a capability snapshot captured here from the live bed
+                # — so each STANDARD Octo bed must be connected at pairing for its
+                # snapshot to exist. Star2 has fixed caps and needs no snapshot.
+                errors["base"] = "octo_pairing_needs_connection"
+            elif self._has_unsafe_offline_platforms(left) or self._has_unsafe_offline_platforms(
+                right
+            ):
+                # climate/light/select are forwarded per-side now, but a
+                # non-offline-capability-safe bed can't rebuild them when a side
+                # is offline, so a half-available pair would lose them.
+                errors["base"] = "pairing_unsupported_entities"
+            elif left_layout is None or right_layout is None:
+                errors["base"] = "pairing_needs_capabilities"
+            elif left_layout != right_layout:
+                errors["base"] = "mismatched_motor_layouts"
+            else:
+                name = user_input.get(CONF_NAME) or f"{left.title} + {right.title}"
+                # Merge each side's options (e.g. customized angle limits, which the
+                # coordinator reads before data) into its descriptor so they aren't
+                # lost when the original is absorbed. Each side's (entry_id,
+                # unique_id) is recorded as provenance so the pair's setup can find
+                # and re-home the original entry's registry rows in place.
+                pair_data = build_pair_entry_data(
+                    self._resolved_pair_side_data(left),
+                    self._resolved_pair_side_data(right),
+                    name=name,
+                    left_octo_snapshot=self._octo_capability_snapshot(left),
+                    right_octo_snapshot=self._octo_capability_snapshot(right),
+                    left_layout_snapshot=left_layout,
+                    right_layout_snapshot=right_layout,
+                    left_origin=(left.entry_id, left.unique_id),
+                    right_origin=(right.entry_id, right.unique_id),
+                    left_origin_title=left.title,
+                    right_origin_title=right.title,
+                    left_origin_source=left.source,
+                    right_origin_source=right.source,
+                    left_origin_data=left.data,
+                    right_origin_data=right.data,
+                    left_origin_options=left.options,
+                    right_origin_options=right.options,
+                )
+                await self.async_set_unique_id(pair_data[CONF_PAIR_ID])
+                self._abort_if_unique_id_configured()
+                # Do NOT remove the originals here. They stay loaded (so the user
+                # keeps two working beds) until the pair entry's setup re-homes
+                # their entity/device registry rows onto the pair and removes them
+                # — a history-preserving handoff. Removing them now (the old path)
+                # tore down their registry rows and let the paired platforms
+                # recreate fresh ones, resetting per-side history/customizations.
+                # The pair's unique_id (pair_<hash>) never collides with the
+                # originals' MAC unique_ids, so create can proceed while they live.
+                # See _async_rehome_absorbed_singles in __init__.py.
+                _LOGGER.info(
+                    "Combining %s + %s into paired bed %s (originals re-homed at setup)",
+                    left.title,
+                    right.title,
+                    name,
+                )
+                return self.async_create_entry(title=name, data=pair_data)
+
+        return self.async_show_form(
+            step_id="pair_beds",
+            data_schema=build_pair_selection_schema(entries),
+            errors=errors,
         )
 
     async def async_step_select_actuator(
@@ -1512,6 +1882,8 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             # Normalize address to uppercase to match Bluetooth discovery
             await self.async_set_unique_id(address.upper())
             self._abort_if_unique_id_configured()
+            if self._is_absorbed_pair_member(address):
+                return self.async_abort(reason="already_configured")
 
             self._discovery_info = self._all_ble_devices[address]
             self._set_device_title_placeholders(
@@ -1683,6 +2055,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     ),
                 }
                 _add_malouf_entry_data(entry_data, user_input, bed_type)
+                _add_cb24_entry_data(entry_data, user_input, bed_type)
                 # Malouf layout/memory fields weren't shown inline (bed type was
                 # chosen from the dropdown), so collect them in a follow-up step.
                 if self._needs_malouf_step(bed_type, user_input):
@@ -1823,6 +2196,8 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         )
         if defaults_bed_type in MALOUF_BED_TYPES:
             _add_malouf_schema_fields(schema_dict)
+        if defaults_bed_type == BED_TYPE_OKIN_CB24:
+            _add_cb24_side_schema_field(schema_dict)
 
         return self.async_show_form(
             step_id="manual_config",
@@ -1895,6 +2270,8 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
 
                     await self.async_set_unique_id(address)
                     self._abort_if_unique_id_configured()
+                    if self._is_absorbed_pair_member(address):
+                        return self.async_abort(reason="already_configured")
                     self._set_device_title_placeholders(user_input.get(CONF_NAME), address)
 
                     _LOGGER.info(
@@ -1935,6 +2312,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                         ),
                     }
                     _add_malouf_entry_data(entry_data, user_input, bed_type)
+                    _add_cb24_entry_data(entry_data, user_input, bed_type)
                     # Malouf layout/memory fields weren't shown inline (bed type was
                     # chosen from the dropdown), so collect them in a follow-up step.
                     if self._needs_malouf_step(bed_type, user_input):
@@ -2038,6 +2416,8 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         )
         if preselected_bed_type in MALOUF_BED_TYPES:
             _add_malouf_schema_fields(schema_dict)
+        if preselected_bed_type == BED_TYPE_OKIN_CB24:
+            _add_cb24_side_schema_field(schema_dict)
 
         return self.async_show_form(
             step_id="manual_entry",
@@ -2934,6 +3314,22 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         )
 
 
+def _shown_option_values(schema_dict: dict[Any, Any]) -> dict[str, Any]:
+    """Return the default value each field in the options form showed, validated
+    the SAME way ``user_input`` was.
+
+    HA validates submitted input against this schema before handing it back, so
+    a raw default of ``"10"`` would mis-compare against the coerced ``10``.
+    Validating an empty input through the same schema coerces the defaults
+    identically, so the paired-options save can tell which fields the user really
+    changed (and not clobber per-side values with mistyped "changes").
+    """
+    try:
+        return cast("dict[str, Any]", vol.Schema(schema_dict)({}))
+    except vol.Invalid:
+        return {}
+
+
 class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
     """Handle Adjustable Bed options."""
 
@@ -2995,11 +3391,224 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
             data.pop(CONF_BACK_MAX_ANGLE, None)
             data.pop(CONF_LEGS_MAX_ANGLE, None)
 
+    def _apply_bed_type_change_cleanup(
+        self,
+        new_data: dict[str, Any],
+        bed_type: str,
+        requested_variant: str,
+    ) -> None:
+        """Drop settings the newly saved protocol must not inherit (in place).
+
+        A paired bed keeps its own copy of these settings per side, so the child
+        descriptors are cleaned against their own bed type too - otherwise a
+        protocol-specific leftover would survive on a side and win over the
+        parent value.
+        """
+        # This preference is integration-wide. Remove any legacy per-entry
+        # copy while saving unrelated options so it cannot become a second
+        # source of truth.
+        new_data.pop(CONF_DISABLE_DISCOVERY, None)
+        previous_bed_type = self.config_entry.data.get(CONF_BED_TYPE)
+        if not isinstance(previous_bed_type, str):
+            previous_bed_type = BED_TYPE_DIAGNOSTIC
+        previous_variant = self.config_entry.data.get(
+            CONF_PROTOCOL_VARIANT,
+            DEFAULT_PROTOCOL_VARIANT,
+        )
+        # These markers describe the old protocol's authentication requirements
+        # and must not steer pairing for the new one.
+        drop_bond_marker = requires_pairing(previous_bed_type, previous_variant) != requires_pairing(
+            bed_type,
+            requested_variant,
+        )
+        if drop_bond_marker:
+            new_data.pop(CONF_BLE_BOND_ESTABLISHED, None)
+            new_data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
+        self._remove_irrelevant_bed_settings(new_data, bed_type)
+
+        children = iter_children(new_data)
+        if not children:
+            return
+        cleaned: list[dict[str, Any]] = []
+        for child in children:
+            child_data = dict(child)
+            if drop_bond_marker:
+                child_data.pop(CONF_BLE_BOND_ESTABLISHED, None)
+                child_data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
+            child_bed_type = child_data.get(CONF_BED_TYPE)
+            self._remove_irrelevant_bed_settings(
+                child_data,
+                child_bed_type if isinstance(child_bed_type, str) else bed_type,
+            )
+            cleaned.append(child_data)
+        new_data[CONF_PAIR_CHILDREN] = cleaned
+
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Manage the options."""
+        if is_paired(self.config_entry.data) and user_input is None:
+            action = (
+                "revert_sides"
+                if self.config_entry.data.get(CONF_PAIR_MODE)
+                == PAIR_MODE_SINGLE_ADDRESS
+                else "unpair"
+            )
+            return self.async_show_menu(
+                step_id="init", menu_options=["settings", action]
+            )
+        if user_input is None and supports_single_address_pairing(
+            self.config_entry.data.get(CONF_BED_TYPE),
+            self.config_entry.data.get(CONF_PROTOCOL_VARIANT),
+            resolved_variant=self.config_entry.data.get(
+                CONF_KAIDI_RESOLVED_VARIANT
+            ),
+        ):
+            return self.async_show_menu(
+                step_id="init", menu_options=["settings", "pair_sides"]
+            )
+        return await self._async_options_form(user_input, step_id="init")
+
+    async def async_step_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Manage settings for a paired bed."""
+        return await self._async_options_form(user_input, step_id="init")
+
+    async def async_step_unpair(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Confirm splitting a paired bed back into two entries."""
+        return await self._async_unpair_form(user_input, step_id="unpair")
+
+    async def async_step_revert_sides(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Confirm reverting a single-address paired surface."""
+        return await self._async_unpair_form(user_input, step_id="revert_sides")
+
+    async def _async_unpair_form(
+        self, user_input: dict[str, Any] | None, *, step_id: str
+    ) -> ConfigFlowResult:
+        """Run the deferred reversible unpair transaction."""
+        if user_input is not None and user_input.get("confirm"):
+            entry_id = self.config_entry.entry_id
+
+            async def finish_unpair() -> None:
+                from . import async_unpair_entry
+
+                entry = self.hass.config_entries.async_get_entry(entry_id)
+                if entry is None:
+                    return
+                try:
+                    await async_unpair_entry(self.hass, entry)
+                except Exception:  # noqa: BLE001 - task must report transaction failure
+                    _LOGGER.exception("Could not unpair config entry %s", entry_id)
+
+            # The options flow belongs to the entry being removed. Schedule the
+            # transaction after returning the flow result so HA never tears down
+            # an entry while its own options flow is still executing.
+            self.hass.async_create_task(finish_unpair(), f"adjustable_bed_unpair_{entry_id}")
+            return self.async_create_entry(title="", data={})
+
+        return self.async_show_form(
+            step_id=step_id,
+            data_schema=vol.Schema({vol.Required("confirm", default=False): bool}),
+        )
+
+    async def async_step_pair_sides(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Enable the reversible left/right/both surface on one BLE address."""
+        runtime = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+        controller = getattr(runtime, "capability_controller", None)
+        if controller is not None and not getattr(
+            controller, "supports_single_address_pairing", True
+        ):
+            return self.async_show_form(
+                step_id="pair_sides",
+                data_schema=vol.Schema({vol.Required("confirm", default=False): bool}),
+                errors={"base": "single_address_pairing_unsupported"},
+            )
+
+        if user_input is not None and user_input.get("confirm"):
+            entry_id = self.config_entry.entry_id
+
+            async def finish_pair_sides() -> None:
+                entry = self.hass.config_entries.async_get_entry(entry_id)
+                if entry is None or is_paired(entry.data):
+                    return
+                original_data = dict(entry.data)
+                original_options = dict(entry.options)
+                registry = er.async_get(self.hass)
+                origin_unique_ids = [
+                    row.unique_id
+                    for row in er.async_entries_for_config_entry(
+                        registry, entry.entry_id
+                    )
+                ]
+                paired_data = build_single_address_pair_entry_data(
+                    original_data,
+                    name=entry.title,
+                    origin_entry_id=entry.entry_id,
+                    origin_unique_id=entry.unique_id,
+                    origin_title=entry.title,
+                    origin_source=entry.source,
+                    origin_options=original_options,
+                )
+                paired_data[KEY_SINGLE_ADDRESS_ORIGIN_ENTITY_UNIQUE_IDS] = (
+                    origin_unique_ids
+                )
+                try:
+                    if not await self.hass.config_entries.async_unload(entry.entry_id):
+                        raise RuntimeError("could not unload entry")
+                    self.hass.config_entries.async_update_entry(
+                        entry, data=paired_data
+                    )
+                    if not await self.hass.config_entries.async_setup(entry.entry_id):
+                        raise RuntimeError("paired entry setup failed")
+                except Exception:  # noqa: BLE001 - restore the working standalone entry
+                    self.hass.config_entries.async_update_entry(
+                        entry,
+                        data=original_data,
+                        options=original_options,
+                    )
+                    with contextlib.suppress(Exception):
+                        await self.hass.config_entries.async_setup(entry.entry_id)
+                    _LOGGER.exception(
+                        "Could not enable paired sides for config entry %s", entry_id
+                    )
+
+            self.hass.async_create_task(
+                finish_pair_sides(), f"adjustable_bed_pair_sides_{entry_id}"
+            )
+            return self.async_create_entry(title="", data={})
+
+        return self.async_show_form(
+            step_id="pair_sides",
+            data_schema=vol.Schema({vol.Required("confirm", default=False): bool}),
+        )
+
+    async def _async_options_form(
+        self,
+        user_input: dict[str, Any] | None,
+        *,
+        step_id: str,
+    ) -> ConfigFlowResult:
+        """Show and save the normal options form."""
+        # Get current values from config entry
+        current_data: dict[str, Any] = dict(self.config_entry.data)
+        if is_paired(current_data) and current_data.get(CONF_PAIR_MODE) != (
+            PAIR_MODE_SINGLE_ADDRESS
+        ):
+            # Per-side settings (motor count, massage, adapter, angle limits)
+            # live in the child descriptors, not parent data. Show the first
+            # side's real values so the form isn't generic defaults; on save,
+            # only the keys the user actually changed propagate (see below), so
+            # untouched values can't clobber the other side's per-side settings.
+            first_child = next(iter(iter_children(current_data)), None)
+            if first_child is not None:
+                current_data = {**current_data, **first_child}
         # Pending values preserve edits while the form is rebuilt to show the
-        # fields that belong to a newly selected bed type.
-        current_data = {**self.config_entry.data, **self._pending_data}
+        # fields that belong to a newly selected bed type. They are applied last
+        # so a pending edit wins over the stored (or per-side) value it replaces.
+        current_data = {**current_data, **self._pending_data}
         bed_type = current_data.get(CONF_BED_TYPE)
         if bed_type is None:
             bed_type = BED_TYPE_DIAGNOSTIC
@@ -3168,6 +3777,22 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                 )
             ] = vol.All(vol.Coerce(int), vol.In(MALOUF_MEMORY_SLOT_OPTIONS))
 
+        if bed_type == BED_TYPE_OKIN_CB24:
+            schema_dict[
+                vol.Optional(
+                    CONF_CB24_BED_SELECTION,
+                    default=current_data.get(
+                        CONF_CB24_BED_SELECTION, CB24_BED_SELECTION_DEFAULT
+                    ),
+                )
+            ] = vol.In(
+                {
+                    CB24_BED_SELECTION_DEFAULT: "Both sides",
+                    CB24_BED_SELECTION_A: "Side A / Left",
+                    CB24_BED_SELECTION_B: "Side B / Right",
+                }
+            )
+
         # Add angle limit fields for beds that use angle-based positions
         # (not percentage-based beds like Keeson/Ergomotion/Serta/Jensen)
         # Only show for beds that actually support position feedback
@@ -3285,11 +3910,32 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                 octo_pin = normalize_octo_pin(user_input.get(CONF_OCTO_PIN, DEFAULT_OCTO_PIN))
                 if not is_valid_octo_pin(octo_pin):
                     return self.async_show_form(
-                        step_id="init",
+                        step_id=step_id,
                         data_schema=vol.Schema(schema_dict),
                         errors={CONF_OCTO_PIN: "invalid_pin"},
                     )
                 user_input[CONF_OCTO_PIN] = octo_pin
+            if (
+                self.config_entry.data.get(CONF_PAIR_MODE)
+                == PAIR_MODE_SINGLE_ADDRESS
+                and not supports_single_address_pairing(
+                    bed_type,
+                    user_input.get(
+                        CONF_PROTOCOL_VARIANT,
+                        current_data.get(
+                            CONF_PROTOCOL_VARIANT, DEFAULT_PROTOCOL_VARIANT
+                        ),
+                    ),
+                    resolved_variant=current_data.get(
+                        CONF_KAIDI_RESOLVED_VARIANT
+                    ),
+                )
+            ):
+                return self.async_show_form(
+                    step_id=step_id,
+                    data_schema=vol.Schema(schema_dict),
+                    errors={"base": "single_address_pairing_unsupported"},
+                )
             # Get bed-specific defaults for motor pulse settings
             pulse_defaults = (
                 BED_MOTOR_PULSE_DEFAULTS.get(
@@ -3310,7 +3956,7 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                     )
             except ValueError, TypeError:
                 return self.async_show_form(
-                    step_id="init",
+                    step_id=step_id,
                     data_schema=vol.Schema(schema_dict),
                     errors={"base": "invalid_number"},
                 )
@@ -3320,14 +3966,14 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                     value = float(user_input[CONF_BACK_MAX_ANGLE] or DEFAULT_BACK_MAX_ANGLE)
                     if value <= 0 or value > 180:
                         return self.async_show_form(
-                            step_id="init",
+                            step_id=step_id,
                             data_schema=vol.Schema(schema_dict),
                             errors={CONF_BACK_MAX_ANGLE: "invalid_angle"},
                         )
                     user_input[CONF_BACK_MAX_ANGLE] = value
                 except ValueError, TypeError:
                     return self.async_show_form(
-                        step_id="init",
+                        step_id=step_id,
                         data_schema=vol.Schema(schema_dict),
                         errors={CONF_BACK_MAX_ANGLE: "invalid_angle"},
                     )
@@ -3336,14 +3982,14 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                     value = float(user_input[CONF_LEGS_MAX_ANGLE] or DEFAULT_LEGS_MAX_ANGLE)
                     if value <= 0 or value > 180:
                         return self.async_show_form(
-                            step_id="init",
+                            step_id=step_id,
                             data_schema=vol.Schema(schema_dict),
                             errors={CONF_LEGS_MAX_ANGLE: "invalid_angle"},
                         )
                     user_input[CONF_LEGS_MAX_ANGLE] = value
                 except ValueError, TypeError:
                     return self.async_show_form(
-                        step_id="init",
+                        step_id=step_id,
                         data_schema=vol.Schema(schema_dict),
                         errors={CONF_LEGS_MAX_ANGLE: "invalid_angle"},
                     )
@@ -3351,33 +3997,64 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
             if discovery_disabled_input is not None:
                 await async_set_discovery_disabled(self.hass, discovery_disabled_input)
             # Update the config entry with new options
-            new_data = {**self.config_entry.data, **self._pending_data, **user_input}
-            # This preference is integration-wide. Remove any legacy per-entry
-            # copy while saving unrelated options so it cannot become a second
-            # source of truth.
-            new_data.pop(CONF_DISABLE_DISCOVERY, None)
-            previous_bed_type = self.config_entry.data.get(CONF_BED_TYPE)
-            if not isinstance(previous_bed_type, str):
-                previous_bed_type = BED_TYPE_DIAGNOSTIC
-            previous_variant = self.config_entry.data.get(
-                CONF_PROTOCOL_VARIANT,
-                DEFAULT_PROTOCOL_VARIANT,
-            )
-            if requires_pairing(previous_bed_type, previous_variant) != requires_pairing(
-                bed_type,
-                requested_variant,
-            ):
-                # These markers describe the old protocol's authentication
-                # requirements and must not steer pairing for the new one.
-                new_data.pop(CONF_BLE_BOND_ESTABLISHED, None)
-                new_data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
             # Record that the stored cadence is the user's choice rather than a
             # value the flow generated, so protocol migrations leave it alone.
             # The pulse fields are always present in this form, so saving it at
             # all means the user saw and accepted the values.
-            if CONF_MOTOR_PULSE_COUNT in user_input or CONF_MOTOR_PULSE_DELAY_MS in user_input:
-                new_data[CONF_MOTOR_PULSE_USER_SET] = True
-            self._remove_irrelevant_bed_settings(new_data, bed_type)
+            pulse_user_set = (
+                CONF_MOTOR_PULSE_COUNT in user_input or CONF_MOTOR_PULSE_DELAY_MS in user_input
+            )
+            if is_paired(self.config_entry.data):
+                # For a paired bed, ONLY the keys the user actually changed go
+                # anywhere. "Changed" is measured against the value the form
+                # ACTUALLY SHOWED (the schema default, seeded from the
+                # representative child / parent data, and validated/coerced the
+                # same way user_input was). Writing the whole form (incl.
+                # unchanged defaults) to parent data would also leak into the
+                # children, since _build_paired_children treats parent data as
+                # shared fields for any key a child descriptor doesn't store.
+                shown = _shown_option_values(schema_dict)
+                changed = {
+                    key: value
+                    for key, value in user_input.items()
+                    if key in shown and shown[key] != value
+                }
+                new_data = {**self.config_entry.data, **changed}
+                if pulse_user_set:
+                    new_data[CONF_MOTOR_PULSE_USER_SET] = True
+                if (
+                    self.config_entry.data.get(CONF_PAIR_MODE)
+                    == PAIR_MODE_SINGLE_ADDRESS
+                ):
+                    self._apply_bed_type_change_cleanup(new_data, bed_type, requested_variant)
+                    self.hass.config_entries.async_update_entry(
+                        self.config_entry, data=new_data
+                    )
+                    return self.async_create_entry(title="", data={})
+                submitted_adapter = user_input.get(CONF_PREFERRED_ADAPTER)
+                for side in PAIR_SIDES:
+                    child = get_child(new_data, side)
+                    if child is None:
+                        continue
+                    child_changed = dict(changed)
+                    # A child whose stored adapter has disappeared shows the
+                    # 'auto' fallback; normalize it even though the submitted
+                    # value looks unchanged vs that fallback, so a stale adapter
+                    # doesn't linger.
+                    stored_adapter = child.get(CONF_PREFERRED_ADAPTER)
+                    if (
+                        submitted_adapter is not None
+                        and stored_adapter is not None
+                        and stored_adapter not in adapters
+                    ):
+                        child_changed[CONF_PREFERRED_ADAPTER] = submitted_adapter
+                    if child_changed:
+                        new_data = with_updated_child(new_data, side, child_changed)
+            else:
+                new_data = {**self.config_entry.data, **self._pending_data, **user_input}
+                if pulse_user_set:
+                    new_data[CONF_MOTOR_PULSE_USER_SET] = True
+            self._apply_bed_type_change_cleanup(new_data, bed_type, requested_variant)
             self.hass.config_entries.async_update_entry(
                 self.config_entry,
                 data=new_data,
@@ -3385,6 +4062,6 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
             return self.async_create_entry(title="", data={})
 
         return self.async_show_form(
-            step_id="init",
+            step_id=step_id,
             data_schema=vol.Schema(schema_dict),
         )

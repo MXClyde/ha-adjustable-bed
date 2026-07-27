@@ -2679,7 +2679,13 @@ class TestOptionsFlow:
         await async_setup_component(hass, DOMAIN, {})
         await hass.async_block_till_done()
 
-        initial = await hass.config_entries.options.async_init(entry.entry_id)
+        # These split beds can expose the single-address side surface, so the
+        # options flow opens on the pairing menu; the settings step is the form.
+        menu = await hass.config_entries.options.async_init(entry.entry_id)
+        assert menu["type"] == FlowResultType.MENU
+        initial = await hass.config_entries.options.async_configure(
+            menu["flow_id"], {"next_step_id": "settings"}
+        )
         markers = {marker.schema: marker for marker in initial["data_schema"].schema}
         assert markers[CONF_PROTOCOL_VARIANT].default() == variant
 
@@ -3308,3 +3314,15 @@ async def test_abandoning_the_flow_mid_probe_leaves_no_connected_client(
         await hass.async_block_till_done()
 
     client.disconnect.assert_awaited()
+def test_shown_option_values_coerces_defaults():
+    """String schema defaults are coerced like user_input, so an unchanged
+    numeric field is not mistaken for a change in the paired-options save."""
+    import voluptuous as vol
+
+    from custom_components.adjustable_bed.config_flow import _shown_option_values
+
+    schema = {
+        vol.Optional("pulse", default="10"): vol.Coerce(int),
+        vol.Optional("angle", default="68.0"): vol.Coerce(float),
+    }
+    assert _shown_option_values(schema) == {"pulse": 10, "angle": 68.0}

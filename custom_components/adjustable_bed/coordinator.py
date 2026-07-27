@@ -10,7 +10,7 @@ import random
 import time
 import traceback
 from collections import deque
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -127,6 +127,8 @@ from .const import (
     LEGGETT_VARIANT_OKIN,
     MALOUF_LAYOUT_AUTO,
     MALOUF_MEMORY_SLOTS_AUTO,
+    OCTO_VARIANT_STAR2,
+    OFFLINE_CAPABILITY_SAFE_BED_TYPES,
     OKIMAT_SERVICE_UUID,
     OKIN_CST_POSITION_AXES,
     OKIN_FOOT_MAX_ANGLE,
@@ -144,6 +146,7 @@ from .const import (
     passive_position_reconciliation_default_enabled,
     requires_pairing,
     requires_pairing_after_service_discovery,
+    resolve_explicit_bed_type,
     resolve_richmat_remote_code,
 )
 from .controller_factory import create_controller
@@ -158,6 +161,7 @@ from .detection import (
     refine_qrrm_protocol_from_device_info,
 )
 from .diagnostic_payloads import new_connection_attempt_details
+from .pairing import octo_snapshot_from_descriptor
 from .unsupported import (
     create_pairing_required_issue,
     delete_pairing_required_issue,
@@ -198,6 +202,52 @@ class NotConnectedError(Exception):
 
 class NoControllerError(Exception):
     """Raised when no controller is available."""
+
+
+class ChildEntryView:
+    """A per-side config view of a parent ConfigEntry (Dual Bed 4.0).
+
+    A paired bed is one config entry but two child coordinators. Each child reads
+    its per-side config from ``.data`` (this view) and persists runtime changes
+    through ``persist_data`` — which updates this view in place and routes to the
+    parent's child descriptor. Everything else proxies to the real parent entry,
+    so background tasks, ``entry_id`` and the entry lifecycle stay attached to the
+    single real entry. Single beds never use this — they get the real entry.
+    """
+
+    def __init__(
+        self,
+        parent: ConfigEntry,
+        child_data: Mapping[str, Any],
+        persist_cb: Callable[[dict[str, Any]], None],
+    ) -> None:
+        self._parent = parent
+        self._child_data: dict[str, Any] = dict(child_data)
+        self._persist_cb = persist_cb
+
+    @property
+    def data(self) -> dict[str, Any]:
+        # Parent-level option edits (made on the paired bed after pairing) win
+        # over the frozen per-side descriptor for any shared key, so they aren't
+        # silently shadowed for settings the coordinator reads from `.data`.
+        # Per-side identity (address/side/bond) isn't in options, so it's kept.
+        if self._parent.options:
+            return {**self._child_data, **self._parent.options}
+        return self._child_data
+
+    @property
+    def options(self) -> Mapping[str, Any]:
+        return self._parent.options
+
+    def persist_data(self, new_data: Mapping[str, Any]) -> None:
+        """Update this side's config in place and route it to the parent."""
+        self._child_data = dict(new_data)
+        self._persist_cb(self._child_data)
+
+    def __getattr__(self, name: str) -> Any:
+        # Anything not overridden above (entry_id, title, unique_id, version,
+        # async_create_background_task, async_on_unload, ...) comes from the parent.
+        return getattr(self._parent, name)
 
 
 class AdjustableBedCoordinator:
@@ -292,6 +342,12 @@ class AdjustableBedCoordinator:
 
         self._client: BleakClient | None = None
         self._controller: BedController | None = None
+        # A client-free controller minted from config purely to read this bed's
+        # CAPABILITIES (which entities to expose) when no live controller exists.
+        # Paired children prime this before platform setup so an offline side
+        # still gets its per-side entities up-front. None until primed / for bed
+        # types whose controller needs a live connection (auto-detected variants).
+        self._offline_controller: BedController | None = None
         # Persistence is a property of the resolved controller, but _on_disconnect
         # clears the controller before the reconnect decision runs. Cache the last
         # resolved value so connection-lifecycle checks stay correct across the
@@ -408,6 +464,19 @@ class AdjustableBedCoordinator:
             self._connection_profile,
         )
 
+    def _async_persist_config(self, new_data: dict[str, Any]) -> None:
+        """Persist a runtime config change to the correct backing store.
+
+        For a paired child the entry is a ChildEntryView, which routes the update
+        to the parent's per-side descriptor. For a single bed it is the real
+        entry, so this is exactly the previous async_update_entry call.
+        """
+        entry = self.entry
+        if isinstance(entry, ChildEntryView):
+            entry.persist_data(new_data)
+        else:
+            self.hass.config_entries.async_update_entry(entry, data=new_data)
+
     def _apply_runtime_bed_type_correction(self, corrected_bed_type: str) -> bool:
         """Apply a protocol correction discovered after BLE service discovery."""
         previous_bed_type = self._bed_type
@@ -481,6 +550,12 @@ class AdjustableBedCoordinator:
             )
 
         self._bed_type = corrected_bed_type
+        # The cached offline capability-controller was minted for the OLD type;
+        # drop it ONLY on an actual change, so a no-op correction doesn't discard
+        # the already-primed offline fallback (which capability_controller would
+        # then miss after a later disconnect).
+        if bed_type_changed:
+            self._offline_controller = None
 
         entry_data = dict(self.entry.data)
         entry_data[CONF_BED_TYPE] = corrected_bed_type
@@ -529,10 +604,7 @@ class AdjustableBedCoordinator:
 
         entry_data_changed = entry_data != self.entry.data
         if entry_data_changed:
-            self.hass.config_entries.async_update_entry(
-                self.entry,
-                data=entry_data,
-            )
+            self._async_persist_config(entry_data)
 
         return bed_type_changed or entry_data_changed
 
@@ -540,6 +612,14 @@ class AdjustableBedCoordinator:
     def address(self) -> str:
         """Return the Bluetooth address."""
         return self._address
+
+    def entity_unique_id(self, key: str) -> str:
+        """Return the stable unique id for one standalone entity key."""
+        return f"{self._address}_{key}"
+
+    def entity_translation_key(self, key: str) -> str:
+        """Return the translation key for one standalone entity."""
+        return key
 
     @property
     def name(self) -> str:
@@ -656,6 +736,105 @@ class AdjustableBedCoordinator:
     def controller(self) -> BedController | None:
         """Return the bed controller."""
         return self._controller
+
+    @property
+    def capability_controller(self) -> BedController | None:
+        """Return the controller to read CAPABILITIES from (which entities to expose).
+
+        The live controller when connected, else a client-free 'offline'
+        controller minted from config. Paired children prime the offline
+        controller before platform setup so an offline side still gets its
+        per-side entities (with byte-identical unique_ids), and the live
+        controller silently takes over on connect with no reload. None when
+        neither exists (e.g. an auto-detected-variant bed that has never
+        connected) — in which case behaviour is exactly as before.
+        """
+        if self._controller is not None:
+            return self._controller
+        return self._offline_controller
+
+    async def async_prime_offline_controller(self) -> None:
+        """Best-effort mint of a client-free controller for capability reads.
+
+        Construction only — never connects or starts notifications. Failures are
+        non-fatal (a bad mint just leaves this side as before). Bed types whose
+        controller needs a live client (auto-detected Richmat/L&P/Keeson
+        variants) raise ConnectionError and are left without an offline
+        controller until they connect.
+        """
+        if self._offline_controller is not None or self._controller is not None:
+            return
+        # Resolve a legacy umbrella bed type (leggett_platt) with an explicit
+        # variant to its concrete type, so a Gen2/WiLinke side that the pairing
+        # gate accepted as offline-safe is actually minted here (the raw umbrella
+        # type is not in OFFLINE_CAPABILITY_SAFE_BED_TYPES). Idempotent for a
+        # descriptor already normalised at pairing, and for every other bed type.
+        bed_type = resolve_explicit_bed_type(self._bed_type, self._protocol_variant)
+        # Octo is not statically offline-safe (it discovers capabilities post
+        # connect), but a paired side that captured a capability snapshot AT
+        # PAIRING can be minted offline from that snapshot.
+        octo_snapshot = (
+            octo_snapshot_from_descriptor(self.entry.data)
+            if bed_type == BED_TYPE_OCTO
+            else None
+        )
+        # Octo Remote Star2 is a different protocol with FIXED capabilities and no
+        # PIN/snapshot, so it IS statically offline-mintable (like Linak) — its
+        # controller builds without a client.
+        is_octo_star2 = (
+            bed_type == BED_TYPE_OCTO
+            and self._protocol_variant == OCTO_VARIANT_STAR2
+        )
+        mintable = bed_type in OFFLINE_CAPABILITY_SAFE_BED_TYPES or (
+            bed_type == BED_TYPE_OCTO and (octo_snapshot is not None or is_octo_star2)
+        )
+        if not mintable:
+            # Only beds whose entity-gating capabilities are fully determined by
+            # stored config offline are safe to mint without a live connection.
+            # Others auto-detect their variant from live GATT/advertisement, can
+            # be connect-time corrected to a different bed_type, or mutate
+            # capabilities from a post-connect query — minting offline would
+            # register entities from a WRONG profile. They keep today's behaviour
+            # (no offline entities until the side connects).
+            return
+        try:
+            self._offline_controller = await create_controller(
+                coordinator=self,
+                bed_type=bed_type,
+                protocol_variant=self._protocol_variant,
+                client=None,
+                device_name=self._name,
+                octo_pin=self._octo_pin,
+                richmat_remote=self._richmat_remote,
+                jensen_pin=self._jensen_pin,
+                cb24_bed_selection=self._cb24_bed_selection,
+                capability_snapshot=octo_snapshot,
+            )
+        except ConnectionError:
+            # Auto-detected variant: needs a live client to resolve. Leave the
+            # offline controller unset (this side behaves as today until connect).
+            self._offline_controller = None
+        except Exception:  # noqa: BLE001 - capability priming must never block setup
+            _LOGGER.debug(
+                "Offline capability-controller mint failed for %s",
+                self._name,
+                exc_info=True,
+            )
+            self._offline_controller = None
+
+    def cache_capability_controller(self) -> None:
+        """Retain the current live controller as the client-free offline
+        capability controller, so its discovered capabilities survive a
+        disconnect.
+
+        A sequential pair connects each side at setup then releases it; that
+        disconnect drops the live controller, and a bed that can't be minted
+        offline from config/snapshot would otherwise build no per-side entities.
+        Caching the just-discovered live controller keeps them. No-op if an
+        offline controller is already set or there is no live controller.
+        """
+        if self._offline_controller is None and self._controller is not None:
+            self._offline_controller = self._controller
 
     @property
     def position_data(self) -> dict[str, float]:
@@ -790,6 +969,33 @@ class AdjustableBedCoordinator:
             if isinstance(pairing, dict):
                 pairing["bond_verification"] = dict(result)
 
+    def _backfill_octo_snapshot(self) -> None:
+        """Persist this paired Octo side's freshly-discovered capabilities into its
+        child descriptor, so the OFFLINE side and reloads mint correct entities and
+        a firmware capability change is reflected. No-op for a single bed (not a
+        ``ChildEntryView``) or when nothing was discovered / it is unchanged.
+        """
+        if not isinstance(self.entry, ChildEntryView):
+            return
+        snapshot_fn = getattr(self._controller, "capability_snapshot", None)
+        snapshot = snapshot_fn() if callable(snapshot_fn) else None
+        if not snapshot:
+            return
+        capabilities = dict(self.entry.data.get("capabilities") or {})
+        if capabilities.get("octo") == snapshot:
+            return  # unchanged — avoid a redundant persist
+        capabilities["octo"] = snapshot
+        self._async_persist_config(
+            {**self.entry.data, "capabilities": capabilities}
+        )
+        # The offline controller minted from the pairing-time snapshot is now stale
+        # (cache_capability_controller only fills an EMPTY slot, so it never refreshes
+        # it). Point it at the live controller — the same client-free capability
+        # source — so a later sequential release gates per-side entities off the
+        # freshly discovered capabilities, not the old snapshot, before the next
+        # reload.
+        self._offline_controller = self._controller
+
     def _persist_bond_flags(
         self,
         *,
@@ -824,7 +1030,9 @@ class AdjustableBedCoordinator:
             self._begin_internal_entry_update(
                 bool(data.get(CONF_BLE_BOND_ESTABLISHED, False))
             )
-            self.hass.config_entries.async_update_entry(self.entry, data=data)
+            # Routes a paired child's write to the parent's per-side descriptor
+            # rather than the shared entry (issue #329).
+            self._async_persist_config(data)
 
     def _begin_internal_entry_update(self, bond_established: bool) -> None:
         """Mark the next entry update as an internal bond-marker write.
@@ -2489,6 +2697,10 @@ class AdjustableBedCoordinator:
                     # Discover features to detect PIN requirement
                     if hasattr(self._controller, "discover_features"):
                         await cast(Any, self._controller).discover_features()
+                    # Persist this paired side's freshly-discovered capabilities so
+                    # the OFFLINE side / a reload mints correct entities (no-op for
+                    # a single bed or if nothing was discovered).
+                    self._backfill_octo_snapshot()
                     # Send initial PIN and start keep-alive if bed requires it
                     if hasattr(self._controller, "send_pin"):
                         await cast(Any, self._controller).send_pin()
@@ -3048,7 +3260,7 @@ class AdjustableBedCoordinator:
         reason: str = "intentional",
         *,
         serialize_with_commands: bool = False,
-    ) -> None:
+    ) -> bool:
         """Disconnect from the bed.
 
         Args:
@@ -3067,13 +3279,12 @@ class AdjustableBedCoordinator:
             # that the command which triggered the reconnect issues its first
             # GATT write, so the command fails (issue #368).
             async with self._command_lock, self._lock:
-                await self._async_disconnect_locked(reason)
-            return
+                return await self._async_disconnect_locked(reason)
 
         async with self._lock:
-            await self._async_disconnect_locked(reason)
+            return await self._async_disconnect_locked(reason)
 
-    async def _async_disconnect_locked(self, reason: str = "intentional") -> None:
+    async def _async_disconnect_locked(self, reason: str = "intentional") -> bool:
         """Disconnect from the bed. The caller MUST already hold ``self._lock``.
 
         Used by the bond-verification path, which runs inside
@@ -3100,6 +3311,8 @@ class AdjustableBedCoordinator:
             self._intentional_disconnect = True
             # Track disconnect reason for diagnostics (issue #168)
             self._last_disconnect_reason = reason
+            client = self._client
+            disconnect_failed = False
             try:
                 # Stop keep-alive and notifications before disconnecting
                 if self._controller is not None:
@@ -3114,18 +3327,30 @@ class AdjustableBedCoordinator:
                         await self._controller.stop_notify()
                     except Exception as err:
                         _LOGGER.debug("Error stopping notifications: %s", err)
-                await self._client.disconnect()
+                await client.disconnect()
                 _LOGGER.debug("Successfully disconnected from %s", self._address)
             except BleakError as err:
+                disconnect_failed = True
                 _LOGGER.debug("Error during disconnect from %s: %s", self._address, err)
             finally:
-                self._client = None
-                self._controller = None
-                # Update disconnect timestamp and notify state change
-                # (don't rely on _on_disconnect callback which may not fire on clean disconnect)
-                self._last_disconnected = datetime.now(UTC)
-                self._notify_connection_state_change(False)
                 self._intentional_disconnect = False
+            # Bleak can raise while the OS link remains active. Keep the live
+            # client/controller instead of reporting a logical disconnect: the
+            # paired sequential guard must know that opening the other side
+            # could create two physical links.
+            if disconnect_failed and client.is_connected:
+                self._client = client
+                _LOGGER.warning(
+                    "Disconnect from %s did not release the BLE link", self._address
+                )
+                return False
+            self._client = None
+            self._controller = None
+            # Update disconnect timestamp and notify state change (don't rely on
+            # _on_disconnect, which may not fire after a clean disconnect).
+            self._last_disconnected = datetime.now(UTC)
+            self._notify_connection_state_change(False)
+        return True
 
     def _reset_disconnect_timer(self) -> None:
         """Reset the disconnect timer."""
@@ -3244,8 +3469,7 @@ class AdjustableBedCoordinator:
         """
         if cancel_running:
             # Cancel any running command immediately
-            self._cancel_counter += 1
-            self._cancel_command.set()
+            self.request_command_cancel()
 
         # Capture cancel count at entry to detect if we get cancelled while waiting
         entry_cancel_count = self._cancel_counter
@@ -3319,13 +3543,22 @@ class AdjustableBedCoordinator:
                 if self._client is not None and self._client.is_connected:
                     self._reset_disconnect_timer()
 
+    def request_command_cancel(self) -> None:
+        """Signal the running command to stop ASAP, without sending a STOP write.
+
+        Lets the paired parent preempt an in-flight child command before taking
+        the pair lock, so a cancel_running movement (or STOP) isn't queued behind
+        the BLE pulse window.
+        """
+        self._cancel_counter += 1
+        self._cancel_command.set()
+
     async def async_stop_command(self) -> None:
         """Immediately stop any running command and send stop to bed."""
         _LOGGER.info("Stop requested - cancelling current command")
 
         # Signal cancellation to any running command
-        self._cancel_counter += 1
-        self._cancel_command.set()
+        self.request_command_cancel()
 
         # Acquire the command lock to wait for any in-flight GATT write to complete
         # This prevents concurrent BLE writes which cause "operation in progress" errors
@@ -3547,7 +3780,10 @@ class AdjustableBedCoordinator:
                     if self._position_mode == POSITION_MODE_ACCURACY:
                         await self._async_read_positions()
                     else:
-                        self.hass.async_create_task(self._async_read_positions_background())
+                        # Tracked + deduplicated: tie the read to the entry
+                        # lifecycle. A raw async_create_task here would leak a
+                        # task on every command and across reloads.
+                        self._start_background_position_read()
 
                 return result
             except BleakError as err:
