@@ -39,6 +39,7 @@ from .bond_verification import (
     BondEvidence,
     BondOwner,
     BondVerificationStatus,
+    bond_context_matches,
     build_bond_context,
 )
 from .const import (
@@ -229,13 +230,22 @@ class PairingRequiredRepairFlow(RepairsFlow):
                 if self._evidence is not None
                 else "unknown"
             )
-            data[CONF_BLE_BOND_CONTEXT] = build_bond_context(
+            context = build_bond_context(
                 BondEvidence(
                     status=BondVerificationStatus.VERIFIED,
                     owner=verified_owner,
                     operation=f"repair_authenticated_read_after_{prior_status}",
                     observed_at=datetime.now(UTC).isoformat(),
                 )
+            )
+            stored = entry.data.get(CONF_BLE_BOND_CONTEXT)
+            # A coordinator that proved the bond has already recorded the same
+            # owner. Restating it with a fresh timestamp is still a real change
+            # to the entry, and this write is not tagged as an internal
+            # bond-marker update, so the reload it triggers would drop the link
+            # a one-connection-per-pairing-window bed will not grant again.
+            data[CONF_BLE_BOND_CONTEXT] = (
+                stored if bond_context_matches(stored, context) else context
             )
         else:
             # Pairing may have succeeded while the auth probe was inconclusive.

@@ -1087,6 +1087,12 @@ class AdjustableBedCoordinator:
             operation="runtime_authenticated_read",
             observed_at=datetime.now(UTC).isoformat(),
         )
+        # A repair asks for this afterwards to tell "the bond was proven and its
+        # owner is recorded" from "nothing established an owner this time", and
+        # answers the second by dropping the stored provenance. So the positive
+        # evidence has to outlive the read that produced it - including on the
+        # unchanged-owner path below, which deliberately writes nothing.
+        self._last_bond_evidence = evidence
         context = build_bond_context(evidence)
         if bond_context_matches(self.entry.data.get(CONF_BLE_BOND_CONTEXT), context):
             # Same owner as last time. The observation timestamp always differs,
@@ -1154,6 +1160,13 @@ class AdjustableBedCoordinator:
         """Clear all runtime and persisted state for a confirmed bond removal."""
         self._ble_bond_established = False
         self._ble_bond_marker_unreliable = False
+        self._latched_pairing_successes = 0
+        # Every transient reason to not ask for pairing was a judgement about
+        # the bond that has just been removed. Leaving the one-shot skip set
+        # would spend the first connection after the removal on a deliberately
+        # unauthenticated attempt, which on a bed that grants one connection per
+        # pairing window is the whole window.
+        self._skip_pair_next_attempt = False
         data = dict(self.entry.data)
         data.pop(CONF_BLE_BOND_ESTABLISHED, None)
         data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
@@ -1477,6 +1490,8 @@ class AdjustableBedCoordinator:
         # The link is authenticated now, so any earlier authentication failure
         # is history. Leaving it in place would let a later repair believe it
         # still had grounds to remove a bond that is demonstrably working.
+        # _record_bond_provenance() then replaces it with this read's own
+        # positive evidence whenever the route is known.
         self._last_bond_evidence = None
         self._record_bond_provenance()
         release_latch = False
@@ -1589,7 +1604,10 @@ class AdjustableBedCoordinator:
                 and self._last_bond_evidence.proves_stale_host_bond
             ),
             "recovery_action": (
-                "repair_issue_raised" if self._last_bond_evidence is not None else None
+                "repair_issue_raised"
+                if self._last_bond_evidence is not None
+                and self._last_bond_evidence.status is BondVerificationStatus.AUTH_FAILED
+                else None
             ),
             "backend_reports": self._device_pairing_states(),
             "connection_attempts": pairing_attempts,

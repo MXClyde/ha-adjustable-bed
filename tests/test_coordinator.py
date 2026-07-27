@@ -4956,6 +4956,78 @@ class TestBondProvenanceAndTransportGate:
 
         await coordinator.async_shutdown()
 
+    async def test_a_proven_bond_stays_available_as_evidence(
+        self, hass: HomeAssistant, mock_config_entry
+    ) -> None:
+        """A repair asks what the last read proved before keeping provenance.
+
+        Provenance is skipped when the owner has not changed, so the evidence
+        has to survive that too - otherwise a correctly re-verified bond reads
+        as "nothing was established" and its owner is deleted.
+        """
+        from custom_components.adjustable_bed.bluetooth_transport import (
+            ConnectionPath,
+            TransportClass,
+        )
+        from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+
+        mock_config_entry.add_to_hass(hass)
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._connection_path = ConnectionPath(
+            source="AA:BB:CC:11:22:33",
+            transport=TransportClass.LOCAL,
+            adapter="hci0",
+        )
+        coordinator._record_bond_provenance()
+        await hass.async_block_till_done()
+
+        # Again, with the owner already stored: this writes nothing.
+        coordinator._last_bond_evidence = None
+        coordinator._record_bond_provenance()
+        await hass.async_block_till_done()
+
+        evidence = coordinator.last_bond_evidence
+        assert evidence is not None
+        assert evidence.proves_bond
+        assert evidence.owner.source == "AA:BB:CC:11:22:33"
+        assert coordinator.pairing_diagnostics["recovery_action"] is None
+
+        await coordinator.async_shutdown()
+
+    async def test_a_confirmed_removal_stops_suppressing_the_next_pairing(
+        self, hass: HomeAssistant, mock_config_entry
+    ) -> None:
+        """A skip decided against the old bond must not outlive it.
+
+        The first connection after a removal is the one that has to pair, and on
+        a bed that grants one connection per pairing window it is the only one.
+        """
+        from custom_components.adjustable_bed.bond_verification import (
+            CONF_BLE_BOND_CONTEXT,
+        )
+        from custom_components.adjustable_bed.const import CONF_BLE_BOND_ESTABLISHED
+        from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+
+        mock_config_entry.add_to_hass(hass)
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={
+                **mock_config_entry.data,
+                CONF_BLE_BOND_ESTABLISHED: True,
+                CONF_BLE_BOND_CONTEXT: {"version": 1, "transport": "local"},
+            },
+        )
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._skip_pair_next_attempt = True
+
+        coordinator.apply_confirmed_bond_removal()
+        await hass.async_block_till_done()
+
+        assert coordinator._skip_pair_next_attempt is False
+        assert CONF_BLE_BOND_CONTEXT not in mock_config_entry.data
+
+        await coordinator.async_shutdown()
+
     async def test_an_unknown_transport_records_no_provenance(
         self, hass: HomeAssistant, mock_config_entry
     ) -> None:

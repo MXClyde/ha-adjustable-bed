@@ -795,6 +795,64 @@ async def test_a_reverified_same_adapter_bond_keeps_its_provenance(
     assert stored["adapter"] == "hci0"
 
 
+async def test_a_reverified_same_adapter_bond_is_not_rewritten(
+    hass: HomeAssistant,
+) -> None:
+    """Restating a bond's owner is still a change to the entry.
+
+    This path only runs for beds that grant one connection per pairing window,
+    and the coordinator has already recorded the same owner through an internal
+    write. An untagged rewrite here reads as an options change, and the reload
+    it triggers takes away the link the bed will not grant again.
+    """
+    context = {
+        "version": 1,
+        "transport": "local",
+        "source": "11:22:33:44:55:66",
+        "adapter": "hci0",
+        "operation": "runtime_authenticated_read",
+        "verified_at": "2026-07-27T00:00:00+00:00",
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_LEGGETT_GEN2,
+            CONF_BLE_BOND_ESTABLISHED: True,
+            CONF_BLE_BOND_CONTEXT: context,
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_no_rewrite_entry",
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = MagicMock()
+    coordinator.async_pair_now = AsyncMock(return_value=True)
+    coordinator.last_bond_evidence = BondEvidence(
+        status=BondVerificationStatus.VERIFIED,
+        owner=BondOwner(
+            transport=TransportClass.LOCAL, source="11:22:33:44:55:66", adapter="hci0"
+        ),
+        operation="runtime_authenticated_read",
+        observed_at="2026-07-27T12:00:00+00:00",
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, entry.entry_id)
+    flow.hass = hass
+    with patch.object(
+        hass.config_entries, "async_update_entry", wraps=hass.config_entries.async_update_entry
+    ) as update:
+        try:
+            assert await flow._async_pair_via_coordinator() is True
+        finally:
+            hass.data[DOMAIN].pop(entry.entry_id, None)
+
+    update.assert_not_called()
+    assert entry.data[CONF_BLE_BOND_CONTEXT] == context
+
+
 async def test_an_unproven_coordinator_repair_drops_the_old_provenance(
     hass: HomeAssistant,
 ) -> None:
