@@ -6,7 +6,7 @@ import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import voluptuous as vol
 from homeassistant.components.bluetooth import (
@@ -206,6 +206,9 @@ from .validators import (
     is_valid_variant_for_bed_type,
     normalize_octo_pin,
 )
+
+if TYPE_CHECKING:
+    from bleak import BleakClient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -2865,6 +2868,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             reporter=self.async_report_action,
             wait_progress=self.async_report_progress,
             path_reporter=self.async_report_path,
+            client_tracker=self.async_track_client,
         )
         if report.freshness is not None and report.freshness is not FreshnessStatus.FRESH:
             outcome = OperationOutcome.NOT_ADVERTISING
@@ -2907,6 +2911,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         reporter: Callable[[SetupAction], None] | None = None,
         wait_progress: Callable[[float], None] | None = None,
         path_reporter: Callable[[ConnectionPath | None], None] | None = None,
+        client_tracker: Callable[[BleakClient | None], None] | None = None,
     ) -> CapabilityReport:
         """Connect once (read-only) and report what was detected.
 
@@ -2928,6 +2933,9 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         known in advance, so it is the only one where a percentage is honest.
         ``path_reporter`` is called the moment the routed transport is known, so
         the progress view can name it while the probe is still running.
+        ``client_tracker`` is handed the live client so a cancelled flow can
+        still close it: the disconnect below is an ordinary await and can be
+        interrupted, and a link left open holds the bed's only connection.
         """
         from bleak import BleakClient
         from bleak_retry_connector import establish_connection
@@ -2996,6 +3004,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                         max_attempts=1,
                         timeout=_PROBE_TIMEOUT_SECONDS,
                     )
+                    if client_tracker is not None:
+                        # Registered before anything else can fail or be
+                        # cancelled, so the operation's cleanup owns this link
+                        # from the moment it exists.
+                        client_tracker(client)
                     report.connected = bool(client.is_connected)
                     # Record the real path straight after the connect, before
                     # anything else can fail: it is the only moment the routed
@@ -3042,6 +3055,12 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                             await client.disconnect()
                         except Exception:  # noqa: BLE001 - cleanup must not raise
                             pass
+                        else:
+                            # Only cleared once the link is really closed, so a
+                            # cancellation during the disconnect still leaves
+                            # the cleanup something to retry.
+                            if client_tracker is not None:
+                                client_tracker(None)
         except Exception as err:  # noqa: BLE001 - probe is best-effort
             report.error = str(err) or err.__class__.__name__
             _LOGGER.debug("Capability probe for %s failed: %s", address, err)

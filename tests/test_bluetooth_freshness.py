@@ -228,6 +228,68 @@ class TestPerScannerFreshness:
         assert evidence.status is FreshnessStatus.SOURCE_UNAVAILABLE
 
 
+class TestConflictingScannerViews:
+    """One scanner saying "no signal" must not discard another's real reading."""
+
+    def _scanner_device(self, source: str, *, seen_at: float, rssi: int) -> Any:
+        return SimpleNamespace(
+            scanner=SimpleNamespace(
+                source=source,
+                discovered_device_timestamps={TEST_ADDRESS: seen_at},
+            ),
+            advertisement=SimpleNamespace(rssi=rssi),
+        )
+
+    async def test_a_newer_invalidated_rssi_does_not_hide_a_valid_reading(
+        self, hass: HomeAssistant
+    ) -> None:
+        """A -127 published a second later would otherwise block a reachable bed."""
+        with patch(
+            f"{_FRESHNESS}.bluetooth.async_last_service_info",
+            side_effect=lambda _hass, _address, connectable=True: (
+                _service_info(age=5.0, rssi=-60, source="hci0")
+                if connectable
+                else _service_info(age=1.0, rssi=RSSI_INVALIDATED, source="proxy")
+            ),
+        ):
+            evidence = async_check_advertisement(hass, TEST_ADDRESS)
+
+        assert evidence.status is FreshnessStatus.FRESH
+        assert evidence.rssi == -60
+        assert evidence.source == "hci0"
+
+    async def test_an_invalidated_rssi_still_wins_when_it_is_all_there_is(
+        self, hass: HomeAssistant
+    ) -> None:
+        """Nothing can hear the bed, and that is the honest answer."""
+        with patch(
+            f"{_FRESHNESS}.bluetooth.async_last_service_info",
+            side_effect=lambda _hass, _address, connectable=True: _service_info(
+                age=1.0, rssi=RSSI_INVALIDATED
+            ),
+        ):
+            evidence = async_check_advertisement(hass, TEST_ADDRESS)
+
+        assert evidence.status is FreshnessStatus.RSSI_INVALID
+
+    async def test_the_selected_adapter_also_prefers_its_usable_view(
+        self, hass: HomeAssistant
+    ) -> None:
+        """The per-scanner path compares two views of one adapter the same way."""
+        devices = [self._scanner_device("hci0", seen_at=NOW - 5.0, rssi=-70)]
+        invalid = [self._scanner_device("hci0", seen_at=NOW - 1.0, rssi=RSSI_INVALIDATED)]
+        with patch(
+            f"{_FRESHNESS}.bluetooth.async_scanner_devices_by_address",
+            side_effect=lambda _hass, _address, connectable=True: (
+                invalid if connectable else devices
+            ),
+        ):
+            evidence = async_check_advertisement(hass, TEST_ADDRESS, source="hci0")
+
+        assert evidence.status is FreshnessStatus.FRESH
+        assert evidence.rssi == -70
+
+
 class TestGateConnection:
     """The BLEDevice must be resolved after the gate, never before it."""
 

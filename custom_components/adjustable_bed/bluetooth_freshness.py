@@ -215,22 +215,43 @@ def _coerce_rssi(value: Any) -> int | None:
         return None
 
 
+def _sighting_is_usable(sighting: _Sighting) -> bool:
+    """Return True when this sighting could prove the bed is reachable.
+
+    BlueZ publishes -127 to say "I no longer have a reading", which is the one
+    RSSI value that disproves rather than supports reachability.
+    """
+    return sighting.rssi is None or sighting.rssi > RSSI_INVALIDATED
+
+
 def _newest_sighting(*sightings: _Sighting | None) -> _Sighting | None:
-    """Return the freshest sighting whose timestamp can be compared."""
+    """Return the freshest sighting, preferring ones that could prove anything.
+
+    Freshest-wins alone is wrong across scanners: one adapter publishing a
+    slightly newer -127 invalidation would discard another adapter's valid
+    reading a second earlier, and the bed would be reported as not advertising
+    while it is sitting there answering. Usable evidence is compared first, and
+    an invalidated reading is only returned when it is all there is - it is
+    still the honest answer when no scanner can hear the bed.
+    """
     available = [sighting for sighting in sightings if sighting is not None]
     if not available:
         return None
 
-    aged = [
-        (age, sighting)
-        for sighting in available
-        if (age := _coerce_age(sighting.seen_at)) is not None
-    ]
-    if aged:
-        return min(aged, key=lambda item: item[0])[1]
+    def _freshest(candidates: list[_Sighting]) -> _Sighting | None:
+        aged = [
+            (age, sighting)
+            for sighting in candidates
+            if (age := _coerce_age(sighting.seen_at)) is not None
+        ]
+        if aged:
+            return min(aged, key=lambda item: item[0])[1]
+        return candidates[0] if candidates else None
+
+    usable = [sighting for sighting in available if _sighting_is_usable(sighting)]
     # Preserve the existing invalid-timestamp result when neither view carries
     # a timestamp that can prove freshness.
-    return available[0]
+    return _freshest(usable) or _freshest(available)
 
 
 @callback

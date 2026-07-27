@@ -3326,3 +3326,73 @@ def test_shown_option_values_coerces_defaults():
         vol.Optional("angle", default="68.0"): vol.Coerce(float),
     }
     assert _shown_option_values(schema) == {"pulse": 10, "angle": 68.0}
+
+
+async def test_the_probe_hands_its_client_to_the_operation_cleanup(
+    hass: HomeAssistant,
+) -> None:
+    """A cancelled flow must still have something to close.
+
+    The probe's own disconnect is an ordinary await and can be interrupted, so
+    the operation has to own the client from the moment it exists or the bed's
+    single connection stays open until the transport gives up on it.
+    """
+    flow = AdjustableBedConfigFlow()
+    flow.hass = hass
+    client = _fake_connected_client()
+    tracked: list[Any] = []
+
+    with (
+        _patch_gate("hci0", -55),
+        patch("bleak_retry_connector.establish_connection", AsyncMock(return_value=client)),
+        patch(
+            "custom_components.adjustable_bed.config_flow.discover_services",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.read_ble_device_info",
+            AsyncMock(return_value=(None, None)),
+        ),
+    ):
+        await flow._probe_capabilities(
+            "AA:BB:CC:DD:EE:01",
+            "auto",
+            BED_TYPE_OKIMAT,
+            client_tracker=tracked.append,
+        )
+
+    # Registered while live, cleared only after the disconnect completed.
+    assert tracked == [client, None]
+
+
+async def test_an_interrupted_disconnect_leaves_the_probe_client_tracked(
+    hass: HomeAssistant,
+) -> None:
+    """Clearing the tracker before the link is really closed would orphan it."""
+    flow = AdjustableBedConfigFlow()
+    flow.hass = hass
+    client = _fake_connected_client()
+    client.disconnect = AsyncMock(side_effect=asyncio.CancelledError)
+    tracked: list[Any] = []
+
+    with (
+        _patch_gate("hci0", -55),
+        patch("bleak_retry_connector.establish_connection", AsyncMock(return_value=client)),
+        patch(
+            "custom_components.adjustable_bed.config_flow.discover_services",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.read_ble_device_info",
+            AsyncMock(return_value=(None, None)),
+        ),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await flow._probe_capabilities(
+            "AA:BB:CC:DD:EE:01",
+            "auto",
+            BED_TYPE_OKIMAT,
+            client_tracker=tracked.append,
+        )
+
+    assert tracked == [client]
