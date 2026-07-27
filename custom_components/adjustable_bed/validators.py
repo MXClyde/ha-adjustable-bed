@@ -112,6 +112,8 @@ def get_available_adapters(hass: HomeAssistant) -> dict[str, str]:
     try:
         from homeassistant.components.bluetooth import async_current_scanners
 
+        from .bluetooth_transport import TransportClass, classify_scanner
+
         for scanner in async_current_scanners(hass):
             source = getattr(scanner, "source", None)
             name = getattr(scanner, "name", None)
@@ -124,10 +126,17 @@ def get_available_adapters(hass: HomeAssistant) -> dict[str, str]:
                         adapters[source] = name
                     else:
                         adapters[source] = f"{name} ({source})"
-                elif ":" in source:
-                    adapters[source] = f"Bluetooth Proxy ({source})"
                 else:
-                    adapters[source] = f"Local Adapter ({source})"
+                    # Classify from the scanner object. The old test here was
+                    # `":" in source`, which reads a local adapter's own MAC
+                    # address as evidence of a remote proxy.
+                    transport = classify_scanner(scanner)
+                    if transport is TransportClass.PROXY:
+                        adapters[source] = f"Bluetooth Proxy ({source})"
+                    elif transport is TransportClass.LOCAL:
+                        adapters[source] = f"Local Adapter ({source})"
+                    else:
+                        adapters[source] = f"Bluetooth Adapter ({source})"
     except ImportError:
         _LOGGER.debug("async_current_scanners not available")
     except Exception as err:
