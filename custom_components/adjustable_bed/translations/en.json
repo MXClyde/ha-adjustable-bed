@@ -42,7 +42,7 @@
       },
       "bluetooth_confirm": {
         "title": "Confirm Adjustable Bed",
-        "description": "Do you want to set up {name} ({address})?\n{detection_note}\n\n{report_note}",
+        "description": "Do you want to set up {name} ({address})?\n{detection_note}\n\n{transport}\n\n{report_note}",
         "data": {
           "bed_type": "Bed type",
           "name": "Name",
@@ -60,7 +60,20 @@
           "idle_disconnect_seconds": "Idle disconnect timeout (seconds)",
           "octo_pin": "Octo PIN",
           "jensen_pin": "Jensen PIN",
-          "auto_detect_option": "Auto-detect (recommended)"
+          "auto_detect_option": "Auto-detect (recommended)",
+          "transport_direct": "Transport: direct Bluetooth",
+          "transport_proxy": "Transport: Bluetooth proxy",
+          "transport_unknown": "Transport: Bluetooth",
+          "transport_likely": "Likely connection",
+          "transport_signal": "Signal strength",
+          "transport_none": "No adapter can see this device",
+          "transport_local_alternative": "Local adapter also in range",
+          "transport_preferred_unavailable": "Selected adapter unavailable",
+          "transport_not_guaranteed": "Path is a prediction",
+          "transport_proxy_pairing_warning": "Pairing over a proxy",
+          "transport_all_busy": "No free Bluetooth connections",
+          "transport_actual": "Connected over",
+          "transport_actual_differs": "Path differed from the prediction"
         },
         "data_description": {
           "bed_type": "Auto-detected bed type. Change if detection was incorrect. Options are controller protocols, not mattress brands; example beds are shown in parentheses. See the Supported Actuators guide if unsure.",
@@ -76,7 +89,20 @@
           "disconnect_after_command": "Disconnect from the bed immediately after each command to free up the BLE connection for the physical remote. Recommended for beds that only allow one connection at a time.",
           "idle_disconnect_seconds": "How many seconds to wait before automatically disconnecting when idle (10-300). Lower values free up the connection faster for the physical remote, higher values reduce reconnection overhead.",
           "octo_pin": "PIN code for Octo bed authentication. Required to maintain connection. Leave empty if your bed doesn't require a PIN.",
-          "jensen_pin": "PIN code for Jensen bed authentication. Default PIN is 3060."
+          "jensen_pin": "PIN code for Jensen bed authentication. Default PIN is 3060.",
+          "transport_direct": "Direct Bluetooth",
+          "transport_proxy": "Bluetooth proxy",
+          "transport_unknown": "Bluetooth",
+          "transport_likely": "Likely connection: {kind} · {scanner}{signal}",
+          "transport_signal": "· {rssi} dBm",
+          "transport_none": "⚠️ No Bluetooth adapter or proxy can currently see this device. You can still finish setup; Home Assistant will connect when it appears.",
+          "transport_local_alternative": "A Bluetooth adapter on this Home Assistant host ({scanner}) can also see it.",
+          "transport_preferred_unavailable": "⚠️ The selected adapter ({adapter}) is not currently available for this connection. Select Automatic to let Home Assistant choose another path, or restore the selected adapter before continuing.",
+          "transport_not_guaranteed": "Home Assistant picks the path when it connects, so this is a prediction rather than a guarantee.",
+          "transport_proxy_pairing_warning": "⚠️ This bed needs Bluetooth pairing, and pairing over a proxy stores the bond on the proxy rather than on Home Assistant. If you later move the bed to a different proxy or to a Home Assistant adapter, you will have to pair again. Home Assistant also cannot remove a bond that lives on a proxy.",
+          "transport_all_busy": "⚠️ Every adapter that can see this device is currently out of free Bluetooth connections.",
+          "transport_actual": "Connected over: {kind} · {scanner}{signal}",
+          "transport_actual_differs": "Home Assistant used a different path than predicted ({predicted})."
         }
       },
       "manual": {
@@ -88,7 +114,7 @@
       },
       "manual_config": {
         "title": "Configure Bed - {name}",
-        "description": "Configure the bed at {address}.{setup_note}",
+        "description": "Configure the bed at {address}.{setup_note}\n\n{transport}",
         "data": {
           "bed_type": "Bed type",
           "protocol_variant": "Protocol variant",
@@ -218,7 +244,7 @@
       },
       "bluetooth_pairing": {
         "title": "Bluetooth Pairing Required",
-        "description": "**{name}** requires Bluetooth pairing.\n\n**To pair:**\n{pairing_instructions}\n\nIf you've already paired manually via system Bluetooth settings, click 'Skip'.",
+        "description": "**{name}** requires Bluetooth pairing.\n\n{transport}\n\n**To pair:**\n{pairing_instructions}\n\nIf you've already paired manually via system Bluetooth settings, click 'Skip'.",
         "data": {
           "action": "Action",
           "pairing_instructions_generic": "Pairing instructions (generic)",
@@ -235,15 +261,21 @@
       },
       "manual_pairing": {
         "title": "Bluetooth Pairing Required",
-        "description": "**{name}** requires Bluetooth pairing.\n\n**To pair:**\n{pairing_instructions}\n\nIf you've already paired manually via system Bluetooth settings, click 'Skip'.",
+        "description": "**{name}** requires Bluetooth pairing.\n\n{transport}\n\n**To pair:**\n{pairing_instructions}\n\nIf you've already paired manually via system Bluetooth settings, click 'Skip'.",
         "data": {
           "action": "Action"
         }
       },
       "verify_connection": {
         "title": "Verify Connection",
-        "description": "Checked the connection to **{name}** before finishing setup:\n\n{capabilities}\n\nSelect **Submit** to finish. You can finish even if something failed - the integration will keep trying to connect afterwards.",
-        "submit": "Finish setup"
+        "description": "Checked the connection to **{name}** before finishing setup:\n\n{capabilities}\n\nSubmitting finishes setup. A failed check never blocks it, and the integration keeps trying to connect afterwards.",
+        "submit": "Finish setup",
+        "data": {
+          "action": "What next"
+        },
+        "data_description": {
+          "action": "Retry checks the bed again without losing the settings you just entered."
+        }
       },
       "diagnostic": {
         "title": "Browse Unsupported BLE Devices",
@@ -270,6 +302,10 @@
           "address": "MAC address in format XX:XX:XX:XX:XX:XX"
         }
       },
+      "setup_progress": {
+        "title": "Checking the connection",
+        "description": "Checking **{name}** ({address})…"
+      },
       "pair_beds": {
         "title": "Combine two beds",
         "description": "Combine two existing beds into one paired device with Left, Right and combined controls. The two original beds are removed; their entity history follows. Pairing is for sides that move independently — if a sync cable already keeps both sides together, keep a single bed instead.",
@@ -278,6 +314,16 @@
           "name": "Name for the combined bed"
         }
       }
+    },
+    "progress": {
+      "locating": "Looking for the bed…",
+      "connecting": "Connecting over Bluetooth…",
+      "discovering_services": "Discovering Bluetooth services…",
+      "reading_capabilities": "Reading device information…",
+      "pairing": "Pairing with the bed…",
+      "verifying_bond": "Verifying the Bluetooth bond…",
+      "disconnecting": "Disconnecting…",
+      "unpairing": "Removing the Bluetooth bond…"
     },
     "abort": {
       "already_configured": "This Bluetooth address already belongs to an Adjustable Bed entry. Check both active and ignored Adjustable Bed entries under Settings > Devices & services, then reload or reconfigure that entry instead of adding it again.",
@@ -1857,6 +1903,14 @@
     "octo_pin_required": {
       "title": "PIN required for {name}",
       "description": "**{name}** ({address}) is an Octo receiver whose PIN lock is engaged, and no PIN is configured in Home Assistant.\n\nA locked receiver still connects and still reports its capabilities, but it will not act on commands until it is authenticated, so the controls appear to work while the bed does nothing.\n\n**If you know the PIN:** open the OCTO Smart Control app (or your bed brand's version of it) to look it up, then enter it under **Settings → Devices & services → Adjustable Bed → Configure → Octo PIN**.\n\n**If the PIN is lost:** there is no factory-default PIN. OCTO publishes a reset procedure per receiver at {recovery_url} — select yours by its photo. The two common ones are pressing the button on the controller *10 times in quick succession* (Receiver II / RC2, BrickMini Basic), or *once briefly then once long for about 10 seconds* (Brick 2 and others). Micro Lift receivers are reset from the remote instead.\n\n⚠️ Every one of those is a full factory reset: all settings are irrevocably deleted and the remotes must be re-taught. A reset receiver has no PIN and is no longer locked."
+    }
+  },
+  "selector": {
+    "verify_action": {
+      "options": {
+        "finish": "Finish setup anyway",
+        "retry": "Check again"
+      }
     }
   }
 }

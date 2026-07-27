@@ -1,0 +1,54 @@
+{
+  "config": {
+    "step": {
+      "bluetooth_confirm": {
+        "data_description": {
+          "transport_direct": "Direkte Bluetooth",
+          "transport_proxy": "Bluetooth-proxy",
+          "transport_unknown": "Bluetooth",
+          "transport_likely": "Sannsynlig tilkobling: {kind} · {scanner}{signal}",
+          "transport_signal": "· {rssi} dBm",
+          "transport_none": "⚠️ Ingen Bluetooth-adapter eller proxy ser denne enheten akkurat nå. Du kan likevel fullføre oppsettet; Home Assistant kobler til når sengen dukker opp.",
+          "transport_local_alternative": "En Bluetooth-adapter på denne Home Assistant-verten ({scanner}) ser den også.",
+          "transport_preferred_unavailable": "⚠️ Den valgte adapteren ({adapter}) er ikke tilgjengelig for denne tilkoblingen akkurat nå. Velg Automatisk for å la Home Assistant velge en annen vei, eller gjør den valgte adapteren tilgjengelig før du fortsetter.",
+          "transport_not_guaranteed": "Home Assistant velger vei når den kobler til, så dette er en antakelse og ingen garanti.",
+          "transport_proxy_pairing_warning": "⚠️ Denne sengen krever Bluetooth-paring, og paring via en proxy lagrer koblingen på proxyen i stedet for på Home Assistant. Flytter du senere sengen til en annen proxy eller til en adapter på Home Assistant, må du pare på nytt. Home Assistant kan heller ikke fjerne en kobling som ligger på en proxy.",
+          "transport_all_busy": "⚠️ Ingen av adapterne som ser denne enheten har ledige Bluetooth-tilkoblinger.",
+          "transport_actual": "Koblet til via: {kind} · {scanner}{signal}",
+          "transport_actual_differs": "Home Assistant brukte en annen vei enn antatt ({predicted})."
+        }
+      },
+      "verify_connection": {
+        "data": {
+          "action": "Hva nå"
+        },
+        "data_description": {
+          "action": "«Sjekk på nytt» sjekker sengen en gang til uten at du mister innstillingene du nettopp fylte ut."
+        },
+        "description": "Sjekket tilkoblingen til **{name}** før oppsettet fullføres:\n\n{capabilities}\n\nÅ sende inn fullfører oppsettet. En mislykket sjekk blokkerer det aldri, og integrasjonen fortsetter å prøve å koble til etterpå."
+      },
+      "setup_progress": {
+        "title": "Sjekker tilkoblingen",
+        "description": "Sjekker **{name}** ({address})…"
+      }
+    },
+    "progress": {
+      "locating": "Leter etter sengen…",
+      "connecting": "Kobler til over Bluetooth…",
+      "discovering_services": "Finner Bluetooth-tjenester…",
+      "reading_capabilities": "Leser enhetsinformasjon…",
+      "pairing": "Parer med sengen…",
+      "verifying_bond": "Bekrefter Bluetooth-koblingen…",
+      "disconnecting": "Kobler fra…",
+      "unpairing": "Fjerner Bluetooth-koblingen…"
+    }
+  },
+  "selector": {
+    "verify_action": {
+      "options": {
+        "finish": "Fullfør oppsettet likevel",
+        "retry": "Sjekk på nytt"
+      }
+    }
+  }
+}
