@@ -96,8 +96,10 @@ class OperationOutcome(StrEnum):
     PAIRING_NOT_SUPPORTED = "pairing_not_supported"
     AUTHENTICATION_FAILED = "authentication_failed"
     BOND_VERIFICATION_FAILED = "bond_verification_failed"
+    BOND_VERIFICATION_INCONCLUSIVE = "bond_verification_inconclusive"
     PROXY_OWNED_BOND = "proxy_owned_bond"
     UNPAIR_FAILED = "unpair_failed"
+    UNPAIR_UNCONFIRMED = "unpair_unconfirmed"
     CANCELLED = "cancelled"
 
 

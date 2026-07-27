@@ -62,7 +62,26 @@
     "error": {
       "not_advertising": "Denne sengen sender ikke ut Bluetooth-signal akkurat nå, så ingen tilkobling ble forsøkt. Vekk den, sett den i paremodus, eller flytt den nærmere en Bluetooth-adapter eller proxy, og prøv igjen.",
       "bond_verification_failed": "Sengen koblet til, men forbindelsen er fortsatt uautentisert, så koblingen ble ikke opprettet. Sett sengen i paremodus igjen og prøv på nytt.",
-      "bond_removal_failed": "Den eksisterende Bluetooth-koblingen kunne ikke fjernes, så paring ble ikke forsøkt."
+      "bond_removal_failed": "Den eksisterende Bluetooth-koblingen kunne ikke fjernes, så paring ble ikke forsøkt.",
+      "pairing_outcome_not_run": "❌ Paring ble ikke kjørt. Velg **Prøv igjen**.",
+      "pairing_outcome_paired_proxy": "✅ Sengen er paret, og koblingen ble bekreftet. Den er lagret på Bluetooth-proxyen **{where}**, ikke i Home Assistant, så sengen må pares på nytt hvis den flyttes til en annen proxy.",
+      "pairing_outcome_paired_local": "✅ Sengen er paret, og koblingen ble bekreftet. Den er lagret på denne Home Assistant-verten (**{where}**).",
+      "pairing_outcome_paired_unknown": "✅ Sengen er paret, og koblingen ble bekreftet, men Home Assistant kunne ikke fastslå hvor den er lagret.",
+      "pairing_outcome_existing_bond_proxy": "✅ Den eksisterende koblingen ble bekreftet. Den er lagret på Bluetooth-proxyen **{where}**, ikke i Home Assistant, så sengen må pares på nytt hvis den flyttes til en annen proxy.",
+      "pairing_outcome_existing_bond_local": "✅ Den eksisterende koblingen ble bekreftet. Den er lagret på denne Home Assistant-verten (**{where}**).",
+      "pairing_outcome_existing_bond_unknown": "✅ Den eksisterende koblingen ble bekreftet, men Home Assistant kunne ikke fastslå hvor den er lagret.",
+      "pairing_outcome_unconfirmed": "⚠️ Paringen ble fullført, men denne sengen gir ikke Home Assistant noen måte å bekrefte koblingen på. Oppsettet fullføres, og integrasjonen ber om paring igjen ved første tilkobling i stedet for å anta at det virket.",
+      "pairing_outcome_not_advertising": "❌ Sengen sender ikke ut Bluetooth-signal, så ingen tilkobling ble forsøkt. Sett den i paremodus eller flytt den nærmere en adapter eller proxy, og velg **Prøv igjen**.",
+      "pairing_outcome_verification_failed": "❌ Sengen koblet til, men forbindelsen er fortsatt uautentisert, så koblingen ble ikke opprettet. Sett sengen i paremodus igjen og velg **Prøv igjen**.",
+      "pairing_outcome_verification_inconclusive": "⚠️ Home Assistant kunne ikke bekrefte om den eksisterende koblingen virker. Koblingen kan fortsatt være gyldig. Velg **Prøv igjen**, eller fullfør oppsettet uten å erstatte den.",
+      "pairing_outcome_not_supported": "❌ Denne Bluetooth-adapteren eller proxyen kan ikke pare. ESPHome-proxyer krever ESPHome 2024.3.0 eller nyere. Ellers må du pare via en Bluetooth-adapter på Home Assistant-verten.",
+      "pairing_outcome_unpair_failed": "❌ Den eksisterende koblingen kunne ikke fjernes, så paring ble ikke forsøkt, og den gamle koblingen er fortsatt på plass.",
+      "pairing_outcome_unpair_unconfirmed": "⚠️ Home Assistant ba BlueZ om å fjerne den eksisterende koblingen, men kunne ikke bekrefte om den fortsatt finnes. Paring ble ikke forsøkt. Sjekk Bluetooth-innstillingene på verten før du fortsetter.",
+      "pairing_outcome_connection_in_use": "❌ Bluetooth-tilkoblingen til sengen er allerede i bruk. Senger tillater bare én tilkobling om gangen. Lukk produsentens app og legg ned den fysiske fjernkontrollen, og velg **Prøv igjen**.",
+      "pairing_outcome_no_connection_slots": "❌ Alle Bluetooth-adaptere og proxyer som kan nå sengen, er tomme for ledige tilkoblinger. Frigjør en tilkobling eller legg til en ny proxy, og velg **Prøv igjen**.",
+      "pairing_outcome_timeout": "❌ Sengen sluttet å svare underveis. Sett den i paremodus igjen og velg **Prøv igjen**.",
+      "pairing_outcome_cancelled": "❌ Paringen ble avbrutt.",
+      "pairing_outcome_failed": "❌ Kunne ikke pare. En annen app eller sengens egen fjernkontroll kan holde tilkoblingen, eller sengen kan være utenfor rekkevidde. Velg **Prøv igjen**."
     }
   },
   "selector": {

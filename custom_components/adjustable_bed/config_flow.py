@@ -46,6 +46,7 @@ from .adapter import (
 from .address_lock import async_get_connect_lock
 from .bluetooth_bond import (
     BondRemovalResult,
+    BondRemovalStatus,
     BondSelectionStatus,
     LocalBondInventory,
     LocalBondRecord,
@@ -2282,6 +2283,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
 
         if user_input is not None:
             action = user_input.get("action")
+            self._pairing_origin_step = step_id
             if action == "use_existing_bond" and can_use_existing:
                 # BlueZ saying "paired" is not the same as the bed accepting an
                 # authenticated write, and a stale record looks identical to a
@@ -2299,7 +2301,6 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             if action in ("pair_now", "retry"):
                 self._pairing_mode = "new"
                 self._pairing_remove_record = None
-                self._pairing_origin_step = step_id
                 return await self._async_start_pairing_operation(address, prediction)
 
         options = ["pair_now"]
@@ -2489,14 +2490,19 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 wait_timeout=ADVERTISEMENT_WAIT_SECONDS,
                 on_progress=self.async_report_progress,
             )
-            if not evidence.is_fresh:
+            if not evidence.is_fresh or _device is None:
                 _LOGGER.info(
-                    "Not replacing the bond for %s: the bed is not advertising (%s)",
+                    "Not replacing the bond for %s: no usable device was resolved (%s)",
                     address,
                     evidence.status,
                 )
                 return OperationResult(
-                    outcome=OperationOutcome.NOT_ADVERTISING, detail=str(evidence.status)
+                    outcome=OperationOutcome.NOT_ADVERTISING,
+                    detail=(
+                        str(evidence.status)
+                        if not evidence.is_fresh
+                        else "device_not_resolved"
+                    ),
                 )
 
             self.async_report_action(SetupAction.UNPAIRING)
@@ -2509,7 +2515,12 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     removal.error,
                 )
                 return OperationResult(
-                    outcome=OperationOutcome.UNPAIR_FAILED,
+                    outcome=(
+                        OperationOutcome.UNPAIR_UNCONFIRMED
+                        if removal.status is BondRemovalStatus.VERIFICATION_FAILED
+                        and removal.error != "bond_still_present"
+                        else OperationOutcome.UNPAIR_FAILED
+                    ),
                     detail=removal.error or str(removal.status),
                 )
 
@@ -2549,7 +2560,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             # The whole point of this mode is proof. Without it, fall back to
             # pairing rather than recording a bond nothing demonstrated.
             return OperationResult(
-                outcome=OperationOutcome.BOND_VERIFICATION_FAILED,
+                outcome=OperationOutcome.BOND_VERIFICATION_INCONCLUSIVE,
                 detail=str(evidence.status),
                 payload=evidence,
             )
@@ -2629,71 +2640,135 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         self, result: OperationResult | None, evidence: Any
     ) -> str:
         """Describe what pairing achieved, and over which transport."""
+        async def note(key: str, default: str, **placeholders: str) -> str:
+            translated = await self._get_config_translation(
+                f"error.pairing_outcome_{key}", default
+            )
+            return translated.format(**placeholders)
+
         if result is None:
-            return "❌ Pairing did not run. Select **Try again**."
+            return await note(
+                "not_run", "❌ Pairing did not run. Select **Try again**."
+            )
 
         if result.succeeded and isinstance(evidence, BondEvidence):
             if evidence.proves_bond:
                 owner = evidence.owner
                 where = owner.source or str(owner.transport)
+                operation = (
+                    "existing_bond" if self._pairing_mode == "verify_existing" else "paired"
+                )
                 if owner.transport is TransportClass.PROXY:
-                    return (
-                        f"✅ Paired, and the bond was confirmed. It is stored on the "
-                        f"Bluetooth proxy **{where}**, not on Home Assistant, so "
-                        "moving this bed to a different proxy will mean pairing again."
+                    return await note(
+                        f"{operation}_proxy",
+                        (
+                            "✅ The existing bond was confirmed. It is stored on the "
+                            "Bluetooth proxy **{where}**, not on Home Assistant, so "
+                            "moving this bed to a different proxy will mean pairing again."
+                            if operation == "existing_bond"
+                            else "✅ Paired, and the bond was confirmed. It is stored on "
+                            "the Bluetooth proxy **{where}**, not on Home Assistant, so "
+                            "moving this bed to a different proxy will mean pairing again."
+                        ),
+                        where=where,
                     )
-                return (
-                    f"✅ Paired, and the bond was confirmed. It is stored on this "
-                    f"Home Assistant host (**{where}**)."
+                if owner.transport is TransportClass.LOCAL:
+                    return await note(
+                        f"{operation}_local",
+                        (
+                            "✅ The existing bond was confirmed. It is stored on this "
+                            "Home Assistant host (**{where}**)."
+                            if operation == "existing_bond"
+                            else "✅ Paired, and the bond was confirmed. It is stored on "
+                            "this Home Assistant host (**{where}**)."
+                        ),
+                        where=where,
+                    )
+                return await note(
+                    f"{operation}_unknown",
+                    (
+                        "✅ The existing bond was confirmed, but Home Assistant could not "
+                        "determine where it is stored."
+                        if operation == "existing_bond"
+                        else "✅ Paired, and the bond was confirmed, but Home Assistant "
+                        "could not determine where it is stored."
+                    ),
                 )
             # Nothing contradicted the pairing, but nothing proved it either.
-            return (
+            return await note(
+                "unconfirmed",
                 "⚠️ Pairing completed, but this bed gives Home Assistant no way to "
                 "confirm the bond. Setup will finish; the integration will ask to "
-                "pair again on its first connection rather than assume it worked."
+                "pair again on its first connection rather than assume it worked.",
             )
 
         notes = {
             OperationOutcome.NOT_ADVERTISING: (
+                "not_advertising",
                 "❌ The bed is not advertising, so no connection was attempted. Put it "
                 "into pairing mode or move it closer to an adapter or proxy, then "
-                "select **Try again**."
+                "select **Try again**.",
             ),
             OperationOutcome.BOND_VERIFICATION_FAILED: (
+                "verification_failed",
                 "❌ The bed connected, but the link is still unauthenticated, so the "
                 "bond did not form. Put the bed back into pairing mode and select "
-                "**Try again**."
+                "**Try again**.",
+            ),
+            OperationOutcome.BOND_VERIFICATION_INCONCLUSIVE: (
+                "verification_inconclusive",
+                "⚠️ Home Assistant could not confirm whether the existing bond works. "
+                "The bond may still be valid. Select **Try again**, or finish setup "
+                "without replacing it.",
             ),
             OperationOutcome.PAIRING_NOT_SUPPORTED: (
+                "not_supported",
                 "❌ This Bluetooth adapter or proxy cannot pair. ESPHome proxies need "
                 "ESPHome 2024.3.0 or newer; otherwise pair through a Bluetooth adapter "
-                "on the Home Assistant host."
+                "on the Home Assistant host.",
             ),
             OperationOutcome.UNPAIR_FAILED: (
+                "unpair_failed",
                 "❌ The existing bond could not be removed, so pairing was not "
-                "attempted and the old bond is still in place."
+                "attempted and the old bond is still in place.",
+            ),
+            OperationOutcome.UNPAIR_UNCONFIRMED: (
+                "unpair_unconfirmed",
+                "⚠️ Home Assistant asked BlueZ to remove the existing bond, but could "
+                "not confirm whether it is still present. Pairing was not attempted. "
+                "Check the host's Bluetooth settings before continuing.",
             ),
             OperationOutcome.CONNECTION_IN_USE: (
+                "connection_in_use",
                 "❌ The bed's Bluetooth connection is already in use. Beds allow only "
                 "one connection at a time, so close the manufacturer's app and put "
-                "the physical remote down, then select **Try again**."
+                "the physical remote down, then select **Try again**.",
             ),
             OperationOutcome.NO_CONNECTION_SLOTS: (
+                "no_connection_slots",
                 "❌ Every Bluetooth adapter and proxy that can reach this bed is out of "
                 "free connections. Free one up, or add another proxy, then select "
-                "**Try again**."
+                "**Try again**.",
             ),
             OperationOutcome.TIMEOUT: (
+                "timeout",
                 "❌ The bed stopped responding partway through. Put it back into "
-                "pairing mode and select **Try again**."
+                "pairing mode and select **Try again**.",
             ),
-            OperationOutcome.CANCELLED: "❌ Pairing was cancelled.",
+            OperationOutcome.CANCELLED: (
+                "cancelled",
+                "❌ Pairing was cancelled.",
+            ),
         }
-        return notes.get(
+        key, default = notes.get(
             result.outcome,
-            "❌ Could not pair. Another app or the bed's own remote may be holding the "
-            "bed's connection, or it may be out of range. Select **Try again**.",
+            (
+                "failed",
+                "❌ Could not pair. Another app or the bed's own remote may be holding "
+                "the bed's connection, or it may be out of range. Select **Try again**.",
+            ),
         )
+        return await note(key, default)
 
     async def _attempt_pairing(
         self, address: str | None, *, request_bond: bool = True

@@ -366,7 +366,26 @@
       "auto_detect_failed": "Couldn't identify this bed automatically. Pick a protocol from the list, or choose \"Diagnostic (unknown bed)\" to capture data for support.",
       "not_advertising": "This bed is not currently advertising, so no connection was attempted. Wake it, put it into pairing mode, or move it closer to a Bluetooth adapter or proxy, then try again.",
       "bond_verification_failed": "The bed connected but the link is still unauthenticated, so the bond did not form. Put the bed back into pairing mode and try again.",
-      "bond_removal_failed": "The existing Bluetooth bond could not be removed, so pairing was not attempted."
+      "bond_removal_failed": "The existing Bluetooth bond could not be removed, so pairing was not attempted.",
+      "pairing_outcome_not_run": "❌ Pairing did not run. Select **Try again**.",
+      "pairing_outcome_paired_proxy": "✅ Paired, and the bond was confirmed. It is stored on the Bluetooth proxy **{where}**, not on Home Assistant, so moving this bed to a different proxy will mean pairing again.",
+      "pairing_outcome_paired_local": "✅ Paired, and the bond was confirmed. It is stored on this Home Assistant host (**{where}**).",
+      "pairing_outcome_paired_unknown": "✅ Paired, and the bond was confirmed, but Home Assistant could not determine where it is stored.",
+      "pairing_outcome_existing_bond_proxy": "✅ The existing bond was confirmed. It is stored on the Bluetooth proxy **{where}**, not on Home Assistant, so moving this bed to a different proxy will mean pairing again.",
+      "pairing_outcome_existing_bond_local": "✅ The existing bond was confirmed. It is stored on this Home Assistant host (**{where}**).",
+      "pairing_outcome_existing_bond_unknown": "✅ The existing bond was confirmed, but Home Assistant could not determine where it is stored.",
+      "pairing_outcome_unconfirmed": "⚠️ Pairing completed, but this bed gives Home Assistant no way to confirm the bond. Setup will finish; the integration will ask to pair again on its first connection rather than assume it worked.",
+      "pairing_outcome_not_advertising": "❌ The bed is not advertising, so no connection was attempted. Put it into pairing mode or move it closer to an adapter or proxy, then select **Try again**.",
+      "pairing_outcome_verification_failed": "❌ The bed connected, but the link is still unauthenticated, so the bond did not form. Put the bed back into pairing mode and select **Try again**.",
+      "pairing_outcome_verification_inconclusive": "⚠️ Home Assistant could not confirm whether the existing bond works. The bond may still be valid. Select **Try again**, or finish setup without replacing it.",
+      "pairing_outcome_not_supported": "❌ This Bluetooth adapter or proxy cannot pair. ESPHome proxies need ESPHome 2024.3.0 or newer; otherwise pair through a Bluetooth adapter on the Home Assistant host.",
+      "pairing_outcome_unpair_failed": "❌ The existing bond could not be removed, so pairing was not attempted and the old bond is still in place.",
+      "pairing_outcome_unpair_unconfirmed": "⚠️ Home Assistant asked BlueZ to remove the existing bond, but could not confirm whether it is still present. Pairing was not attempted. Check the host's Bluetooth settings before continuing.",
+      "pairing_outcome_connection_in_use": "❌ The bed's Bluetooth connection is already in use. Beds allow only one connection at a time, so close the manufacturer's app and put the physical remote down, then select **Try again**.",
+      "pairing_outcome_no_connection_slots": "❌ Every Bluetooth adapter and proxy that can reach this bed is out of free connections. Free one up, or add another proxy, then select **Try again**.",
+      "pairing_outcome_timeout": "❌ The bed stopped responding partway through. Put it back into pairing mode and select **Try again**.",
+      "pairing_outcome_cancelled": "❌ Pairing was cancelled.",
+      "pairing_outcome_failed": "❌ Could not pair. Another app or the bed's own remote may be holding the bed's connection, or it may be out of range. Select **Try again**."
     }
   },
   "options": {
