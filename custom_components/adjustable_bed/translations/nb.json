@@ -116,5 +116,29 @@
       "unpair_ambiguous": "Home Assistant kan ikke vite hvilken Bluetooth-kobling du mener for **{name}** ({address}). Enten er mer enn én adapter på denne verten koblet til den, eller så har ikke adapteren den ble paret gjennom noen kobling lenger. Sett sengens foretrukne adapter til den du vil rydde, og prøv igjen.",
       "unpair_changed": "Bluetooth-koblingene på denne verten endret seg mens bekreftelsen sto åpen, så ingenting ble fjernet. Åpne **Fjern Bluetooth-koblingen** på nytt for å se gjeldende tilstand og bekrefte derfra."
     }
+  },
+  "issues": {
+    "pairing_required": {
+      "fix_flow": {
+        "step": {
+          "proxy_bond": {
+            "title": "Koblingen er lagret på en Bluetooth-proxy",
+            "description": "**{name}** ({address}) klarte sist ikke å autentisere via **{transport}**, som er en Bluetooth-proxy og ikke denne Home Assistant-verten.\n\nEn proxy har sine egne Bluetooth-koblinger, og Home Assistant kan verken lese eller fjerne dem, så det er ingenting denne reparasjonen trygt kan endre.\n\nSlik rydder du opp: flash proxyen på nytt eller tilbakestill den, slik at den glemmer koblingene sine, og sett så sengen i paremodus så den pares igjen. Alternativt kan du sette sengens foretrukne adapter til en Bluetooth-adapter på Home Assistant-verten og pare der, hvor koblingen kan administreres."
+          },
+          "stale_bond_confirm": {
+            "title": "Erstatt en kobling sengen ikke lenger godtar",
+            "description": "**{name}** ({address}) kobler til, men alle krypterte lesinger avvises. Det er det som skjer når denne verten fortsatt har en Bluetooth-kobling som sengen selv har glemt, gjerne etter at sengen er tilbakestilt eller paret med noe annet.\n\n**Koblingen er lagret på:** {transport}\n\nFortsetter du, fjernes den koblingen og en ny opprettes. Home Assistant sjekker at sengen er tilgjengelig før noe fjernes, så en sovende seng blir ikke stående uten kobling, og den nye koblingen lagres først når den er bekreftet å virke.\n\nSett sengen i paremodus, og velg så **Send inn**."
+          },
+          "stale_bond_result": {
+            "title": "Gjenoppretting av kobling",
+            "description": "**{name}**\n\n{outcome}"
+          }
+        },
+        "abort": {
+          "proxy_bond_guidance": "Ingenting ble endret. Bluetooth-koblingen for denne sengen ligger på en proxy, der Home Assistant ikke når den.",
+          "stale_bond_recovery_failed": "Koblingen kunne ikke gjenopprettes, så denne reparasjonen forblir åpen. Sett sengen i paremodus og kjør den på nytt."
+        }
+      }
+    }
   }
 }
