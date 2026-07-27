@@ -252,6 +252,10 @@ class BluetoothOperationMixin:
         state = self.operation
         changed = state.action is not action
         state.action = action
+        if changed:
+            # Drop any bar left over from the previous phase. Carrying it would
+            # show a full bar through a phase whose duration is unknowable.
+            state.progress = None
         if progress is not None:
             state.progress = progress
             with contextlib.suppress(Exception):

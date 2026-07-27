@@ -182,10 +182,18 @@ def _async_sighting_from_scanner(
 
 
 @callback
-def _async_sighting(hass: HomeAssistant, address: str, source: str | None) -> _Sighting | None:
-    """Return the newest connectable sighting from the merged history."""
+def _async_sighting(
+    hass: HomeAssistant,
+    address: str,
+    source: str | None,
+    *,
+    connectable: bool = True,
+) -> _Sighting | None:
+    """Return the newest sighting from the merged history."""
     try:
-        service_info = bluetooth.async_last_service_info(hass, address, connectable=True)
+        service_info = bluetooth.async_last_service_info(
+            hass, address, connectable=connectable
+        )
     except Exception:  # noqa: BLE001 - absence of a manager is "no evidence"
         _LOGGER.debug("Could not read advertisement history for %s", address, exc_info=True)
         return None
@@ -235,7 +243,14 @@ def async_check_advertisement(
     else:
         sighting = _async_sighting(hass, normalized, source)
         if sighting is None:
-            _LOGGER.debug("No connectable advertisement history for %s", address)
+            # Some ESPHome proxies have been observed classifying a perfectly
+            # connectable bed as non-connectable. The integration has always
+            # allowed that fallback, so losing it here would stop setup working
+            # on exactly the hardware it was added for. The freshness rules
+            # still apply to whatever is found.
+            sighting = _async_sighting(hass, normalized, source, connectable=False)
+        if sighting is None:
+            _LOGGER.debug("No advertisement history for %s", address)
             return AdvertisementEvidence(status=FreshnessStatus.MISSING, source=source)
 
     info_source = sighting.source

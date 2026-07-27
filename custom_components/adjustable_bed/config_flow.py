@@ -51,6 +51,7 @@ from .bluetooth_freshness import (
 )
 from .bluetooth_transport import (
     ConnectionPath,
+    TransportClass,
     async_describe_actual,
     async_describe_prediction,
     async_path_for_source,
@@ -418,6 +419,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         # Carries the finalized entry across the optional verify_connection step
         self._pending_entry: dict[str, Any] | None = None
         self._pending_title: str | None = None
+        # True once the verify_connection form has actually been rendered, so a
+        # replayed submission from the previous form cannot be read as a
+        # confirmation of a result the user never saw.
+        self._verify_form_shown: bool = False
         _LOGGER.debug("AdjustableBedConfigFlow initialized")
 
     def _set_device_title_placeholders(self, name: str | None, address: str) -> None:
@@ -2546,7 +2551,9 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         _report(SetupAction.LOCATING)
         source = (
             preferred_adapter
-            if preferred_adapter and preferred_adapter != ADAPTER_AUTO
+            if preferred_adapter
+            and preferred_adapter != ADAPTER_AUTO
+            and prediction.preferred_available
             else None
         )
         if wait_progress is not None:
@@ -2575,7 +2582,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             prediction.chosen.source if prediction.chosen else None
         )
         report.via_proxy = bool(
-            evidence.path is not None and not evidence.path.owns_host_bond
+            evidence.path is not None and evidence.path.transport is TransportClass.PROXY
         )
 
         client: BleakClient | None = None
@@ -2603,10 +2610,18 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     if actual_source:
                         report.source = actual_source
                         report.actual_path = async_path_for_source(
-                            self.hass, actual_source, rssi=evidence.rssi
+                            self.hass,
+                            actual_source,
+                            # Only carry the measured signal over when the same
+                            # scanner measured it.
+                            rssi=(
+                                evidence.rssi if actual_source == evidence.source else None
+                            ),
                         )
                         if report.actual_path is not None:
-                            report.via_proxy = not report.actual_path.owns_host_bond
+                            report.via_proxy = (
+                                report.actual_path.transport is TransportClass.PROXY
+                            )
                         if path_reporter is not None:
                             path_reporter(report.actual_path)
                     _report(SetupAction.DISCOVERING_SERVICES)
@@ -2742,15 +2757,18 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         which re-runs the check in place, so the user can go wake the bed
         without losing everything they already filled in (#458).
 
-        It must never create an entry on ``user_input is None``. Home Assistant
-        re-enters a flow's current step on its own (the progress task's
-        done-callback, a frontend refresh), and an entry created from one of
-        those would be an entry the user never confirmed.
+        It creates an entry only from input submitted against *this* form.
+        ``FlowManager.async_configure`` re-passes the caller's original
+        ``user_input`` on every iteration of its progress-done loop, so a
+        duplicated submission of the previous form arriving just as the probe
+        finishes would otherwise be replayed here and read as confirmation -
+        creating an entry the user never saw a result for.
         """
         assert self._pending_entry is not None
 
-        if user_input is not None:
+        if user_input is not None and self._verify_form_shown:
             if user_input.get("action") == "retry":
+                self._verify_form_shown = False
                 self._async_start_probe_operation()
                 return await self.async_step_setup_progress()
             return self.async_create_entry(
@@ -2761,14 +2779,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         result = self.operation.result
         report = result.payload if result is not None else None
         if not isinstance(report, CapabilityReport):
-            # No operation ran (a direct call, or state lost). Fall back to a
-            # blocking probe rather than showing an empty checklist.
-            report = await self._probe_capabilities(
-                self._pending_entry[CONF_ADDRESS],
-                self._pending_entry.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO),
-                self._pending_entry.get(CONF_BED_TYPE),
-                self._pending_entry.get(CONF_PROTOCOL_VARIANT),
-            )
+            # The operation state is gone (a direct call, or a flow restored
+            # without it). Say so rather than running a blocking probe here:
+            # this is the step that exists so that nothing blocks.
+            report = CapabilityReport(freshness=FreshnessStatus.MISSING)
 
         schema: dict[vol.Marker, Any] = {}
         if report.freshness is not None and report.freshness is not FreshnessStatus.FRESH:
@@ -2777,14 +2791,13 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             # click away for the common case of "let me go wake the bed first".
             schema[vol.Required("action", default="finish")] = SelectSelector(
                 SelectSelectorConfig(
-                    options=[
-                        SelectOptionDict(value="finish", label="Finish setup anyway"),
-                        SelectOptionDict(value="retry", label="Check again"),
-                    ],
+                    options=["finish", "retry"],
                     mode=SelectSelectorMode.LIST,
+                    translation_key="verify_action",
                 )
             )
 
+        self._verify_form_shown = True
         return self.async_show_form(
             step_id="verify_connection",
             data_schema=vol.Schema(schema),
