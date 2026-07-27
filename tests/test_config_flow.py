@@ -4921,3 +4921,92 @@ async def test_existing_bond_verification_rejects_a_rerouted_connection(
     assert result.outcome is OperationOutcome.BOND_VERIFICATION_INCONCLUSIVE
     verifier.assert_not_awaited()
     client.disconnect.assert_awaited_once()
+
+
+async def test_verification_falls_back_to_the_matched_route_source(
+    hass: HomeAssistant,
+) -> None:
+    """BlueZ does not always publish an adapter address for a bond it holds."""
+    flow = _pairing_flow(hass)
+    record = LocalBondRecord(
+        address=_BONDED_ADDRESS,
+        device_path="/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+        adapter_path="/org/bluez/hci0",
+        adapter_address=None,
+        paired=True,
+        bonded=True,
+    )
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(record,))
+
+    with (
+        _patch_inventory(inventory),
+        _patch_local_prediction("11:22:33:44:55:66", "hci0"),
+        patch.object(flow, "_async_start_pairing_operation", AsyncMock()),
+    ):
+        await flow.async_step_manual_pairing({"action": "use_existing_bond"})
+
+    # The route was matched to this exact record, so its source names the same
+    # adapter the missing address would have.
+    assert flow._pairing_verify_source == "11:22:33:44:55:66"
+
+
+async def test_a_one_connection_bed_keeps_the_bond_it_was_told_to_use(
+    hass: HomeAssistant,
+) -> None:
+    """Deferring without the markers would ask the coordinator to pair anyway.
+
+    That spends the single connection the user avoided spending by picking the
+    existing bond in the first place.
+    """
+    flow = _pairing_flow(hass)
+    flow._manual_data[CONF_BED_TYPE] = BED_TYPE_LEGGETT_GEN2
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+
+    with (
+        _patch_inventory(inventory),
+        _patch_local_prediction(),
+        patch.object(flow, "_attempt_pairing") as attempt,
+    ):
+        result = await flow.async_step_manual_pairing({"action": "use_existing_bond"})
+
+    attempt.assert_not_called()
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_BLE_BOND_ESTABLISHED] is True
+    assert result["data"][CONF_BLE_BOND_CONTEXT]["source"] == "11:22:33:44:55:66"
+
+
+async def test_bond_replacement_reuses_the_device_it_already_resolved(
+    hass: HomeAssistant,
+) -> None:
+    """A second lookup can return None to scanner churn, after the bond is gone."""
+    flow = _pairing_flow(hass)
+    flow._pairing_remove_record = _bond_record()
+    flow._pairing_mode = "replace_local"
+    fresh = AdvertisementEvidence(
+        status=FreshnessStatus.FRESH, age_seconds=1.0, rssi=-55, source="hci0"
+    )
+    device = MagicMock()
+    removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=_bond_record())
+    wait = AsyncMock(return_value=(fresh, device))
+    attempt = AsyncMock(return_value=_verified_evidence())
+
+    with (
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
+            wait,
+        ),
+        _patch_inventory(
+            LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
+            AsyncMock(return_value=removed),
+        ),
+        patch.object(flow, "_attempt_pairing", attempt),
+    ):
+        result = await flow._async_pairing_worker()
+
+    assert result.outcome is OperationOutcome.SUCCESS
+    # Resolved once, before the removal, and carried into the replacement.
+    assert wait.await_count == 1
+    assert attempt.await_args.kwargs["device"] is device

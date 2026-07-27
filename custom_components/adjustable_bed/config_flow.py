@@ -200,7 +200,7 @@ from .validators import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from bleak.backends.device import BLEDevice
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -656,8 +656,9 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         # existing one, or replacing one.
         self._pairing_mode: str = "new"
         # The adapter that owns the bond being verified, so the check runs on the
-        # route that can actually authenticate.
+        # route that can actually authenticate, and the record it belongs to.
         self._pairing_verify_source: str | None = None
+        self._pairing_verify_record: LocalBondRecord | None = None
         _LOGGER.debug("AdjustableBedConfigFlow initialized")
 
     def _set_device_title_placeholders(self, name: str | None, address: str) -> None:
@@ -2484,9 +2485,15 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 # (issue #461).
                 self._pairing_mode = "verify_existing"
                 self._pairing_remove_record = None
-                # Verify on the adapter that holds the bond, not on whichever one
-                # happens to have the strongest signal.
-                self._pairing_verify_source = existing.adapter_address if existing else None
+                # Verify on the adapter that holds the bond, not on whichever
+                # one happens to have the strongest signal. BlueZ does not
+                # always publish an adapter address; the route was matched to
+                # this record above, so its source names the same adapter.
+                self._pairing_verify_source = (
+                    (existing.adapter_address if existing else None)
+                    or (prediction.chosen.source if prediction.chosen else None)
+                )
+                self._pairing_verify_record = existing
                 return await self._async_start_pairing_operation(address, prediction)
             if action == "remove_bond_and_pair" and can_replace_existing and existing is not None:
                 # Destroying a bond gets its own confirmation naming the exact
@@ -2498,6 +2505,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 self._pairing_mode = "new"
                 self._pairing_remove_record = None
                 self._pairing_verify_source = None
+                self._pairing_verify_record = None
                 return await self._async_start_pairing_operation(address, prediction)
 
         options = ["pair_now"]
@@ -2578,6 +2586,17 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
     ) -> ConfigFlowResult:
         """Begin a pairing operation, unless this bed must not spend a link."""
         assert self._manual_data is not None
+        if self._pairing_mode == "verify_existing" and self._pairing_verify_record is not None:
+            # A bed that grants one connection per pairing window must not spend
+            # it proving a bond BlueZ already reports. Deferring without the
+            # markers would be worse than not offering the action at all: the
+            # coordinator would ask to pair on the one connection it gets, which
+            # is exactly what picking "use the existing bond" was avoiding.
+            if grants_one_connection_per_pairing_window(
+                self._manual_data.get(CONF_BED_TYPE) or "",
+                self._manual_data.get(CONF_PROTOCOL_VARIANT),
+            ):
+                return self._create_entry_for_existing_bond(self._pairing_verify_record)
         deferred = self._async_deferred_pairing_entry()
         if deferred is not None:
             return deferred
@@ -2729,7 +2748,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             record = self._pairing_remove_record
             self._pairing_remove_record = None
             task = self.hass.async_create_task(
-                self._async_replace_bond(address, record),
+                self._async_replace_bond(address, record, _device),
                 "adjustable_bed_bond_replacement",
             )
             try:
@@ -2744,13 +2763,20 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         return await self._async_pair_and_classify(address, mode)
 
     async def _async_replace_bond(
-        self, address: str | None, record: LocalBondRecord
+        self,
+        address: str | None,
+        record: LocalBondRecord,
+        device: BLEDevice | None = None,
     ) -> OperationResult:
         """Remove one host bond and immediately pair a replacement.
 
         Run as a shielded unit (see ``_async_pairing_worker``): between the
         removal and the new bond the bed has no bond at all, and that window must
         not be left open by a flow the user walked away from.
+
+        ``device`` is the one the reachability gate already resolved. Resolving
+        again after the removal would let a moment of scanner churn return None
+        and abort the transaction with the old bond gone and no replacement.
         """
         if not address:
             return OperationResult(
@@ -2790,15 +2816,18 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 )
             # _attempt_pairing() re-enters this task-owned address lock, keeping
             # every other connector out from before removal through disconnect.
-            return await self._async_pair_and_classify(address, "replace_local")
+            return await self._async_pair_and_classify(address, "replace_local", device)
 
-    async def _async_pair_and_classify(self, address: str | None, mode: str) -> OperationResult:
+    async def _async_pair_and_classify(
+        self, address: str | None, mode: str, device: BLEDevice | None = None
+    ) -> OperationResult:
         """Connect, bond if asked, verify, and turn all of it into one outcome."""
         try:
             evidence = await self._attempt_pairing(
                 address,
                 request_bond=mode != "verify_existing",
                 track_for_flow_cleanup=mode != "replace_local",
+                device=device,
             )
         except BondRouteMismatchError as err:
             _LOGGER.info("Could not verify the existing bond for %s: %s", address, err)
@@ -2969,6 +2998,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         *,
         request_bond: bool = True,
         track_for_flow_cleanup: bool = True,
+        device: BLEDevice | None = None,
     ) -> BondEvidence:
         """Pair using the protocol's required connection ordering, and verify it.
 
@@ -3023,17 +3053,18 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             # authentication failure and steer the user into replacing a bond
             # that works.
             source = self._pairing_verify_source
-        # Someone who just put a bed into pairing mode is standing at the bed and
-        # expects to wait, so this wait is longer than the setup probe's.
-        evidence, device = await async_wait_for_advertisement(
-            self.hass,
-            address,
-            source=source,
-            wait_timeout=ADVERTISEMENT_WAIT_SECONDS,
-            on_progress=self.async_report_progress,
-        )
-        if not evidence.is_fresh or device is None:
-            raise NotAdvertisingError(evidence.status)
+        if device is None:
+            # Someone who just put a bed into pairing mode is standing at the bed
+            # and expects to wait, so this wait is longer than the setup probe's.
+            evidence, device = await async_wait_for_advertisement(
+                self.hass,
+                address,
+                source=source,
+                wait_timeout=ADVERTISEMENT_WAIT_SECONDS,
+                on_progress=self.async_report_progress,
+            )
+            if not evidence.is_fresh or device is None:
+                raise NotAdvertisingError(evidence.status)
 
         bed_type = self._manual_data.get(CONF_BED_TYPE) if self._manual_data else None
         protocol_variant = (
