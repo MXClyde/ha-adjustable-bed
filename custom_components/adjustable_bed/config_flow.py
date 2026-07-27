@@ -2178,6 +2178,12 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 self._manual_data.get(CONF_BED_TYPE),
                 self._manual_data.get(CONF_PROTOCOL_VARIANT),
             ),
+            "transport": await self._async_transport_note(
+                self._manual_data[CONF_ADDRESS],
+                self._manual_data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO),
+                self._manual_data.get(CONF_BED_TYPE),
+                self._manual_data.get(CONF_PROTOCOL_VARIANT),
+            ),
         }
 
         if user_input is not None:
@@ -2222,6 +2228,12 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         description_placeholders = {
             "name": self._manual_data.get(CONF_NAME, "Unknown"),
             "pairing_instructions": await self._get_pairing_instructions(
+                self._manual_data.get(CONF_BED_TYPE),
+                self._manual_data.get(CONF_PROTOCOL_VARIANT),
+            ),
+            "transport": await self._async_transport_note(
+                self._manual_data[CONF_ADDRESS],
+                self._manual_data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO),
                 self._manual_data.get(CONF_BED_TYPE),
                 self._manual_data.get(CONF_PROTOCOL_VARIANT),
             ),
@@ -2444,14 +2456,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             address=address,
             prediction=async_predict_path(self.hass, address, preferred),
             action=SetupAction.LOCATING,
-            policy=(
-                ConnectionLifetimePolicy.KEEP_FIRST_LINK
-                if _skips_setup_connection_probe(
-                    self._pending_entry.get(CONF_BED_TYPE),
-                    self._pending_entry.get(CONF_PROTOCOL_VARIANT),
-                )
-                else ConnectionLifetimePolicy.ORDINARY
-            ),
+            policy=ConnectionLifetimePolicy.ORDINARY,
             placeholders={
                 "name": self._pending_entry.get(CONF_NAME) or address,
                 "address": address,

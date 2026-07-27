@@ -97,7 +97,7 @@
           "transport_signal": "· {rssi} dBm",
           "transport_none": "⚠️ No Bluetooth adapter or proxy can currently see this device. You can still finish setup; Home Assistant will connect when it appears.",
           "transport_local_alternative": "A Bluetooth adapter on this Home Assistant host ({scanner}) can also see it.",
-          "transport_preferred_unavailable": "⚠️ The selected adapter ({adapter}) cannot currently see this device, so Home Assistant will choose a path automatically.",
+          "transport_preferred_unavailable": "⚠️ The selected adapter ({adapter}) is not currently available for this connection. Select Automatic to let Home Assistant choose another path, or restore the selected adapter before continuing.",
           "transport_not_guaranteed": "Home Assistant picks the path when it connects, so this is a prediction rather than a guarantee.",
           "transport_proxy_pairing_warning": "⚠️ This bed needs Bluetooth pairing, and pairing over a proxy stores the bond on the proxy rather than on Home Assistant. If you later move the bed to a different proxy or to a Home Assistant adapter, you will have to pair again. Home Assistant also cannot remove a bond that lives on a proxy.",
           "transport_all_busy": "⚠️ Every adapter that can see this device is currently out of free Bluetooth connections.",
@@ -244,7 +244,7 @@
       },
       "bluetooth_pairing": {
         "title": "Bluetooth Pairing Required",
-        "description": "**{name}** requires Bluetooth pairing.\n\n**To pair:**\n{pairing_instructions}\n\nIf you've already paired manually via system Bluetooth settings, click 'Skip'.",
+        "description": "**{name}** requires Bluetooth pairing.\n\n{transport}\n\n**To pair:**\n{pairing_instructions}\n\nIf you've already paired manually via system Bluetooth settings, click 'Skip'.",
         "data": {
           "action": "Action",
           "pairing_instructions_generic": "Pairing instructions (generic)",
@@ -261,14 +261,14 @@
       },
       "manual_pairing": {
         "title": "Bluetooth Pairing Required",
-        "description": "**{name}** requires Bluetooth pairing.\n\n**To pair:**\n{pairing_instructions}\n\nIf you've already paired manually via system Bluetooth settings, click 'Skip'.",
+        "description": "**{name}** requires Bluetooth pairing.\n\n{transport}\n\n**To pair:**\n{pairing_instructions}\n\nIf you've already paired manually via system Bluetooth settings, click 'Skip'.",
         "data": {
           "action": "Action"
         }
       },
       "verify_connection": {
         "title": "Verify Connection",
-        "description": "Checked the connection to **{name}** before finishing setup:\n\n{capabilities}\n\nSelect **Submit** to finish. You can finish even if something failed - the integration will keep trying to connect afterwards.",
+        "description": "Checked the connection to **{name}** before finishing setup:\n\n{capabilities}\n\nChoose what to do next, then submit. You can finish even if something failed, or retry the connection checks without losing your settings.",
         "submit": "Finish setup",
         "data": {
           "action": "What next"

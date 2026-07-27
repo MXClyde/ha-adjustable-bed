@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -15,6 +15,7 @@ from custom_components.adjustable_bed.bluetooth_transport import (
     async_connection_paths,
     async_path_for_source,
     async_predict_path,
+    async_resolve_ble_device,
     classify_scanner,
 )
 
@@ -146,6 +147,27 @@ class TestConnectionPaths:
             paths = async_connection_paths(hass, TEST_ADDRESS)
         assert [path.source for path in paths] == ["free", "busy"]
 
+    async def test_each_path_is_scored_once(self, hass: HomeAssistant) -> None:
+        """Ranking and path construction must share one slot-state snapshot."""
+        scorers = [MagicMock(return_value=-40.0), MagicMock(return_value=-60.0)]
+        devices = [
+            SimpleNamespace(
+                scanner=_scanner("hci0", scanner_type="usb"),
+                ble_device=SimpleNamespace(address=TEST_ADDRESS),
+                advertisement=SimpleNamespace(rssi=-40),
+                score_connection_path=scorers[0],
+            ),
+            SimpleNamespace(
+                scanner=_scanner("proxy", scanner_type="remote"),
+                ble_device=SimpleNamespace(address=TEST_ADDRESS),
+                advertisement=SimpleNamespace(rssi=-60),
+                score_connection_path=scorers[1],
+            ),
+        ]
+        with _patch_scanner_devices(devices):
+            async_connection_paths(hass, TEST_ADDRESS)
+        assert [scorer.call_count for scorer in scorers] == [1, 1]
+
     async def test_missing_rssi_sorts_last_and_reports_none(
         self, hass: HomeAssistant
     ) -> None:
@@ -244,6 +266,47 @@ class TestPathPrediction:
         assert prediction.proxy_pairing_risk is False
 
 
+class TestDeviceResolution:
+    """Freshness fallbacks must still produce a device that can be connected."""
+
+    async def test_preferred_source_uses_the_non_connectable_view(
+        self, hass: HomeAssistant
+    ) -> None:
+        device = SimpleNamespace(address=TEST_ADDRESS)
+        scanner_device = SimpleNamespace(
+            scanner=_scanner("proxy", scanner_type="remote"),
+            ble_device=device,
+        )
+
+        def scanner_lookup(
+            _hass: HomeAssistant, _address: str, *, connectable: bool
+        ) -> list[Any]:
+            return [] if connectable else [scanner_device]
+
+        with patch(
+            f"{_TRANSPORT}.bluetooth.async_scanner_devices_by_address",
+            side_effect=scanner_lookup,
+        ):
+            resolved = async_resolve_ble_device(hass, TEST_ADDRESS, "proxy")
+        assert resolved is device
+
+    async def test_generic_lookup_uses_the_non_connectable_view(
+        self, hass: HomeAssistant
+    ) -> None:
+        device = SimpleNamespace(address=TEST_ADDRESS)
+        lookup = MagicMock(side_effect=[None, device])
+        with patch(
+            f"{_TRANSPORT}.bluetooth.async_ble_device_from_address",
+            lookup,
+        ):
+            resolved = async_resolve_ble_device(hass, TEST_ADDRESS)
+        assert resolved is device
+        assert [call.kwargs["connectable"] for call in lookup.call_args_list] == [
+            True,
+            False,
+        ]
+
+
 class TestActualPath:
     """After connecting, the real transport must be resolvable from its source."""
 
@@ -319,6 +382,20 @@ class TestConnectionAvailability:
         ]
         with _patch_scanner_devices(devices):
             prediction = async_predict_path(hass, TEST_ADDRESS, "auto")
+        assert prediction.chosen is not None
+        assert prediction.chosen.source == "hci0"
+
+    async def test_a_full_preferred_adapter_is_skipped_for_a_free_path(
+        self, hass: HomeAssistant
+    ) -> None:
+        """A preference cannot override HA's live connection-capacity gate."""
+        devices = [
+            _scanner_device(self._proxy("proxy", can_connect=False), -40),
+            _scanner_device(self._busy_local("hci0", free=2), -80),
+        ]
+        with _patch_scanner_devices(devices):
+            prediction = async_predict_path(hass, TEST_ADDRESS, "proxy")
+        assert prediction.preferred_available is False
         assert prediction.chosen is not None
         assert prediction.chosen.source == "hci0"
 

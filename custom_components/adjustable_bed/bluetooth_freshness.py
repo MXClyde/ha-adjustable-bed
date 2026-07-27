@@ -358,6 +358,9 @@ async def async_wait_for_advertisement(
     while True:
         remaining = deadline - _monotonic()
         if remaining <= 0:
+            if on_progress is not None:
+                with contextlib.suppress(Exception):
+                    on_progress(1.0)
             return evidence, None
         if on_progress is not None:
             elapsed = wait_timeout - remaining
