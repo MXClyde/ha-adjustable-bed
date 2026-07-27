@@ -4298,11 +4298,15 @@ async def test_pairing_refuses_rather_than_bonding_through_another_adapter(
     """A bond belongs to whichever transport made it.
 
     Falling back to some other adapter would store it somewhere the user did not
-    choose, while the marker claimed pairing was done.
+    choose, while the marker claimed pairing was done. The refusal comes from
+    the freshness lookup rather than the prediction: only the lookup checks the
+    non-connectable bucket, which is where some proxies file a bed they can
+    connect to perfectly well.
     """
     flow = _pairing_flow(hass)
     flow._manual_data[CONF_PREFERRED_ADAPTER] = "hci0"
     elsewhere = ConnectionPath(source="proxy", transport=TransportClass.PROXY)
+    unavailable = AdvertisementEvidence(status=FreshnessStatus.SOURCE_UNAVAILABLE)
     with (
         patch(
             "custom_components.adjustable_bed.config_flow.async_predict_path",
@@ -4314,13 +4318,51 @@ async def test_pairing_refuses_rather_than_bonding_through_another_adapter(
             ),
         ),
         patch("bleak_retry_connector.establish_connection") as connects,
-        patch("custom_components.adjustable_bed.config_flow.async_wait_for_advertisement") as wait,
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
+            AsyncMock(return_value=(unavailable, None)),
+        ) as wait,
         pytest.raises(NotAdvertisingError),
     ):
         await flow._attempt_pairing("AA:BB:CC:DD:EE:01")
 
-    wait.assert_not_called()
+    # The pinned adapter is what was asked about, and nothing connected.
+    assert wait.await_args.kwargs["source"] == "hci0"
     connects.assert_not_called()
+
+
+async def test_a_pinned_proxy_seen_only_as_non_connectable_can_still_pair(
+    hass: HomeAssistant,
+) -> None:
+    """Some ESPHome proxies file a connectable bed in the non-connectable bucket.
+
+    The prediction only enumerates connectable scanners, so deciding there would
+    block pairing over exactly the proxy that Automatic mode uses happily.
+    """
+    flow = _pairing_flow(hass)
+    flow._manual_data[CONF_PREFERRED_ADAPTER] = "bedroom_proxy"
+    fresh = AdvertisementEvidence(
+        status=FreshnessStatus.FRESH, age_seconds=1.0, rssi=-60, source="bedroom_proxy"
+    )
+    device = MagicMock()
+    with (
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_predict_path",
+            return_value=PathPrediction(
+                chosen=None,
+                paths=(),
+                preferred_adapter="bedroom_proxy",
+                preferred_available=False,
+            ),
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
+            AsyncMock(return_value=(fresh, device)),
+        ),
+    ):
+        resolved, _prediction = await flow._async_resolve_pairing_device("AA:BB:CC:DD:EE:01")
+
+    assert resolved is device
 
 
 async def test_a_legacy_entry_now_routing_through_a_proxy_cannot_unpair(

@@ -251,6 +251,12 @@ _BOND_STATE_FALLBACKS: Final[dict[str, str]] = {
         "⚠️ More than one Bluetooth adapter on this host is bonded to this bed. "
         "Pairing again will use whichever adapter Home Assistant connects through."
     ),
+    "bond_state_mismatched": (
+        "ℹ️ This Home Assistant host has a Bluetooth bond for this bed, but on a "
+        "different adapter from the one this connection will use. Bonds belong "
+        "to one adapter, so that one cannot be used here. Pair again to create a "
+        "bond on this adapter, or select the bonded adapter instead."
+    ),
     "bond_state_none": ("ℹ️ This Home Assistant host has no Bluetooth bond for this bed yet."),
 }
 
@@ -2394,6 +2400,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             key = "bond_state_existing"
         elif len(inventory.bonded_records) > 1:
             key = "bond_state_multiple"
+        elif inventory.bonded_records:
+            # A bond exists, just not one this route can use. Saying "no bond"
+            # would be false, and it invites pairing again alongside a bond that
+            # is sitting right there.
+            key = "bond_state_mismatched"
         else:
             key = "bond_state_none"
         return await self._get_config_translation(
@@ -2590,10 +2601,14 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             preferred_adapter = self._manual_data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO)
         prediction = async_predict_path(self.hass, address, preferred_adapter)
         pinned = bool(preferred_adapter and preferred_adapter != ADAPTER_AUTO)
-        if pinned and not prediction.preferred_available:
-            raise NotAdvertisingError(FreshnessStatus.SOURCE_UNAVAILABLE)
         source = preferred_adapter if pinned else None
 
+        # Whether the pinned source can reach the bed is decided by the
+        # freshness lookup, not by the prediction. async_predict_path only
+        # enumerates connectable scanners, and some ESPHome proxies file a
+        # perfectly connectable bed under non-connectable; the lookup checks
+        # both buckets, so refusing here would block pairing over exactly the
+        # proxy that Automatic mode uses happily.
         self.async_report_action(SetupAction.LOCATING)
         evidence, device = await async_wait_for_advertisement(
             self.hass,

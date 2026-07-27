@@ -587,6 +587,17 @@ class AdjustableBedCoordinator:
         return self._malouf_memory_slots
 
     @property
+    def last_bond_evidence(self) -> BondEvidence | None:
+        """Return what the most recent authentication-gated check actually saw.
+
+        Exposed so a repair can tell "this pairing was proven, and provenance is
+        already recorded" from "nothing established an owner this time". The
+        difference decides whether an existing provenance record is still
+        trustworthy or has to be dropped.
+        """
+        return self._last_bond_evidence
+
+    @property
     def bed_type(self) -> str:
         """Return the bed type."""
         return self._bed_type

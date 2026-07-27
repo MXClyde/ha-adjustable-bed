@@ -200,7 +200,6 @@ class PairingRequiredRepairFlow(RepairsFlow):
 
         coordinator = self.hass.data.get(DOMAIN, {}).get(self._entry_id)
         if coordinator is not None:
-            previous_context = entry.data.get(CONF_BLE_BOND_CONTEXT)
             _LOGGER.info(
                 "Repair: pairing %s through the existing coordinator so the "
                 "bed's single connection is kept rather than spent",
@@ -214,21 +213,24 @@ class PairingRequiredRepairFlow(RepairsFlow):
                 _LOGGER.warning("Repair: pairing failed for %s: %s", self._address, err)
                 return False
             if paired:
-                # The coordinator normally records fresh provenance when its
-                # auth-gated probe succeeds. If it did not, discard the context
-                # for the pre-repair bond rather than retaining stale ownership.
-                current = self.hass.config_entries.async_get_entry(self._entry_id)
-                if (
-                    current is not None
-                    and current.data.get(CONF_BLE_BOND_CONTEXT) == previous_context
-                ):
+                # What matters is whether this pairing was proven, not whether
+                # the stored context changed. The coordinator deliberately skips
+                # rewriting provenance when the owner is identical, so comparing
+                # contexts would read a correctly re-verified same-adapter bond
+                # as "nothing was established" and delete a valid record.
+                evidence = getattr(coordinator, "last_bond_evidence", None)
+                if isinstance(evidence, BondEvidence) and evidence.proves_bond:
+                    self._persist_repaired_bond(evidence.owner)
+                else:
+                    # Nothing established an owner this time, so the stored
+                    # context still describes the pre-repair bond and can no
+                    # longer authorize a host-side removal.
                     self._persist_repaired_bond(None)
             return paired
 
         # No coordinator: the entry failed setup and is retrying. Clear the bond
         # marker so the next setup requests the bond, then let setup own the one
         # connection instead of racing it with a client of our own.
-        previous_context = entry.data.get(CONF_BLE_BOND_CONTEXT)
         if entry.data.get(CONF_BLE_BOND_ESTABLISHED):
             self.hass.config_entries.async_update_entry(
                 entry,
@@ -246,11 +248,15 @@ class PairingRequiredRepairFlow(RepairsFlow):
             return False
         bonded = self._bonded_now()
         if bonded:
-            current = self.hass.config_entries.async_get_entry(self._entry_id)
-            if (
-                current is not None
-                and current.data.get(CONF_BLE_BOND_CONTEXT) == previous_context
-            ):
+            # Same rule as the coordinator-driven branch above: an unchanged
+            # context is the expected result of re-verifying the same adapter,
+            # so ask the reloaded coordinator what it actually proved rather
+            # than reading "unchanged" as "unproven".
+            reloaded = self.hass.data.get(DOMAIN, {}).get(self._entry_id)
+            evidence = getattr(reloaded, "last_bond_evidence", None)
+            if isinstance(evidence, BondEvidence) and evidence.proves_bond:
+                self._persist_repaired_bond(evidence.owner)
+            else:
                 self._persist_repaired_bond(None)
         return bonded
 

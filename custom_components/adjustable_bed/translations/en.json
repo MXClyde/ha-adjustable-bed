@@ -256,7 +256,8 @@
           "bond_state_unreadable": "Bond state: unknown",
           "bond_state_existing": "Bond state: already bonded",
           "bond_state_multiple": "Bond state: several adapters",
-          "bond_state_none": "Bond state: not bonded"
+          "bond_state_none": "Bond state: not bonded",
+          "bond_state_mismatched": "Bond state"
         },
         "data_description": {
           "pairing_instructions_generic": "1. Put your bed in pairing mode (hold lamp button until blue light blinks, or unplug for 30+ seconds)\n2. Click 'Pair Now'",
@@ -268,7 +269,8 @@
           "bond_state_unreadable": "ℹ️ Home Assistant could not read the Bluetooth bonds on this host, so it cannot tell whether this bed is already paired.",
           "bond_state_existing": "✅ This Home Assistant host already has a Bluetooth bond for this bed. You can set it up using that bond, or remove it and pair again.",
           "bond_state_multiple": "⚠️ More than one Bluetooth adapter on this host is bonded to this bed. Pairing again will use whichever adapter Home Assistant connects through.",
-          "bond_state_none": "ℹ️ This Home Assistant host has no Bluetooth bond for this bed yet."
+          "bond_state_none": "ℹ️ This Home Assistant host has no Bluetooth bond for this bed yet.",
+          "bond_state_mismatched": "ℹ️ This Home Assistant host has a Bluetooth bond for this bed, but on a different adapter from the one this connection will use. Bonds belong to one adapter, so that one cannot be used here. Pair again to create a bond on this adapter, or select the bonded adapter instead."
         }
       },
       "manual_pairing": {
