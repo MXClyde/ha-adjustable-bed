@@ -354,3 +354,4 @@ class TestWaitForAdvertisement:
         assert seen
         assert all(0.0 <= value <= 1.0 for value in seen)
         assert seen == sorted(seen)
+        assert seen[-1] == 1.0

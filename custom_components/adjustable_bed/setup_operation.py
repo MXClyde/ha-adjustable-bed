@@ -135,9 +135,6 @@ class OperationResult:
 class SetupOperationState:
     """Everything a progress view and its result step need to know."""
 
-    # Bumped for every new operation, so a refresh scheduled by an operation the
-    # user has already moved on from cannot write into the current one.
-    generation: int = 0
     action: SetupAction = SetupAction.LOCATING
     prediction: PathPrediction | None = None
     actual: ConnectionPath | None = None
@@ -237,7 +234,6 @@ class BluetoothOperationMixin:
         an explicit Retry — never on re-entry while a task is running, which is
         what makes double submits harmless.
         """
-        previous = self._operation
         # Defensive: a caller should only start an operation when none is
         # running, but replacing the state while a task still holds a client
         # would orphan both, so tear the old one down first.
@@ -249,7 +245,6 @@ class BluetoothOperationMixin:
             if hass is not None:
                 hass.async_create_task(_async_disconnect_quietly(stray))
         self._operation = SetupOperationState(
-            generation=(previous.generation + 1) if previous is not None else 1,
             action=action,
             prediction=prediction,
             name=name,
@@ -293,7 +288,7 @@ class BluetoothOperationMixin:
         state = self.operation
         state.progress = progress
         with contextlib.suppress(Exception):
-            self.async_update_progress(progress)  # type: ignore[attr-defined]
+            self.async_update_progress(progress)
 
     @callback
     def async_report_path(self, path: ConnectionPath | None) -> None:

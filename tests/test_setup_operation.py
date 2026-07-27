@@ -381,13 +381,6 @@ class TestCleanup:
 class TestOperationState:
     """The shared state is what both the progress view and the result step read."""
 
-    async def test_a_new_operation_bumps_the_generation(
-        self, hass: HomeAssistant, flow: _Flow
-    ) -> None:
-        first = flow.async_begin_operation()
-        second = flow.async_begin_operation()
-        assert second.generation == first.generation + 1
-
     async def test_a_retry_clears_the_previous_terminal_state(
         self, hass: HomeAssistant, flow: _Flow
     ) -> None:
