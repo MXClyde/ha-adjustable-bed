@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,6 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.adjustable_bed.bluetooth_bond import LocalBondRecord
 from custom_components.adjustable_bed.bluetooth_transport import (
     ConnectionPath,
     TransportClass,
@@ -592,3 +594,37 @@ async def test_try_pair_returns_false_on_auth_error(hass: HomeAssistant) -> None
         assert await flow._async_try_pair() is False
 
     client.disconnect.assert_awaited_once()
+
+
+async def test_a_reconnect_between_confirm_and_removal_does_not_block_recovery(
+    hass: HomeAssistant,
+) -> None:
+    """Volatile fields change while the dialog is open; identity does not.
+
+    Comparing whole records made a bed that merely connected look like a
+    different bond, and refused a removal the user had already approved for
+    exactly this one.
+    """
+    pinned = LocalBondRecord(
+        address=TEST_ADDRESS,
+        device_path="/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+        adapter_path="/org/bluez/hci0",
+        adapter_address="11:22:33:44:55:66",
+        paired=True,
+        bonded=True,
+        connected=False,
+        trusted=False,
+    )
+    reconnected = replace(pinned, connected=True, trusted=True)
+
+    assert pinned.is_same_bond_as(reconnected)
+    # A bond that is actually gone is still a different answer.
+    assert not pinned.is_same_bond_as(replace(pinned, paired=False, bonded=False))
+    # So is one on another adapter.
+    assert not pinned.is_same_bond_as(
+        replace(
+            pinned,
+            adapter_path="/org/bluez/hci1",
+            device_path="/org/bluez/hci1/dev_AA_BB_CC_DD_EE_FF",
+        )
+    )

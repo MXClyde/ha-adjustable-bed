@@ -229,7 +229,9 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
         )
         if (
             not current_offer.is_eligible
-            or current_offer.record != previous_offer.record
+            or current_offer.record is None
+            or previous_offer.record is None
+            or not current_offer.record.is_same_bond_as(previous_offer.record)
             or current_offer.owner != previous_offer.owner
         ):
             return OperationResult(

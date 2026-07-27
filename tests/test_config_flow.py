@@ -136,6 +136,7 @@ from custom_components.adjustable_bed.kaidi_protocol import (
 from custom_components.adjustable_bed.setup_operation import (
     OperationOutcome,
     OperationResult,
+    SetupAction,
 )
 
 
@@ -3864,13 +3865,15 @@ async def test_an_unauthenticated_link_is_not_recorded_as_a_bond(
     assert result.outcome is OperationOutcome.BOND_VERIFICATION_FAILED
 
 
-async def test_an_unprovable_bond_does_not_write_the_marker(
+async def test_an_unprovable_bond_records_pairing_without_ownership(
     hass: HomeAssistant,
 ) -> None:
-    """No evidence-backed verifier means no claim of a bond.
+    """Most pairing-required protocols have no bond-gated read to prove this.
 
-    Setup still completes; the coordinator asks to pair on its first connection
-    rather than skipping it on our say-so.
+    The marker still has to be written, or the coordinator pairs again on its
+    first connection - and re-pairing an already-bonded proxy device can return
+    auth error 82 and wedge the link. The provenance is what stays absent: an
+    unproven owner must never authorize removing a host bond.
     """
     flow = _pairing_flow(hass)
     unsupported = BondEvidence(
@@ -3883,14 +3886,18 @@ async def test_an_unprovable_bond_does_not_write_the_marker(
         result = await _run_pairing(hass, flow)
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"].get(CONF_BLE_BOND_ESTABLISHED) is not True
+    assert result["data"][CONF_BLE_BOND_ESTABLISHED] is True
     assert CONF_BLE_BOND_CONTEXT not in result["data"]
 
 
-async def test_an_inconclusive_probe_does_not_write_the_marker(
+async def test_an_inconclusive_probe_records_pairing_without_ownership(
     hass: HomeAssistant,
 ) -> None:
-    """A timeout or a missing characteristic proves nothing either way."""
+    """A timeout or a missing characteristic proves nothing either way.
+
+    Nothing contradicted the pairing, so the same rule applies as for a protocol
+    with no verifier at all: record that it happened, claim no owner.
+    """
     flow = _pairing_flow(hass)
     inconclusive = BondEvidence(
         status=BondVerificationStatus.INCONCLUSIVE,
@@ -3903,7 +3910,8 @@ async def test_an_inconclusive_probe_does_not_write_the_marker(
         result = await _run_pairing(hass, flow)
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"].get(CONF_BLE_BOND_ESTABLISHED) is not True
+    assert result["data"][CONF_BLE_BOND_ESTABLISHED] is True
+    assert CONF_BLE_BOND_CONTEXT not in result["data"]
 
 
 async def test_a_verified_bond_over_a_proxy_records_the_proxy_as_owner(
@@ -4817,3 +4825,37 @@ async def test_existing_bond_verification_rejects_a_rerouted_connection(
     assert result.outcome is OperationOutcome.BOND_VERIFICATION_INCONCLUSIVE
     verifier.assert_not_awaited()
     client.disconnect.assert_awaited_once()
+
+
+async def test_verifying_an_existing_bond_never_invents_a_marker(
+    hass: HomeAssistant,
+) -> None:
+    """Verification mode asks for no bond, so an unproven result claims nothing.
+
+    Only a mode that actually requested a bond may record that one happened.
+    """
+    flow = _pairing_flow(hass)
+    flow._pairing_mode = "verify_existing"
+    unsupported = BondEvidence(
+        status=BondVerificationStatus.UNSUPPORTED,
+        owner=BondOwner(transport=TransportClass.LOCAL, source="hci0"),
+        operation="verify_existing_bond",
+        observed_at="2026-07-27T00:00:00+00:00",
+    )
+
+    flow.async_begin_operation(
+        name="Paired Okimat",
+        address=flow._manual_data[CONF_ADDRESS],
+        prediction=PathPrediction(chosen=None, paths=()),
+        action=SetupAction.LOCATING,
+        placeholders={},
+    )
+    flow.operation.result = OperationResult(
+        outcome=OperationOutcome.SUCCESS, payload=unsupported
+    )
+    flow._pairing_result_shown = True
+    result = await flow.async_step_pairing_result({})
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"].get(CONF_BLE_BOND_ESTABLISHED) is not True
+    assert CONF_BLE_BOND_CONTEXT not in result["data"]

@@ -314,8 +314,10 @@ _PAIRING_OUTCOME_FALLBACKS: Final[dict[str, str]] = {
     ),
     "unproven": (
         "⚠️ Pairing completed, but this bed gives Home Assistant no way to "
-        "confirm the bond. Setup will finish; the integration will ask to pair "
-        "again on its first connection rather than assume it worked."
+        "confirm the bond. Setup will finish and record that pairing happened, "
+        "so the first connection does not try to pair on top of it. If the bond "
+        "did not really form, Home Assistant will raise a repair asking you to "
+        "pair again."
     ),
     "not_advertising": (
         "❌ The bed is not advertising, so no connection was attempted. Put it "
@@ -2860,12 +2862,21 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 )
             entry_data = dict(self._manual_data)
             if isinstance(evidence, BondEvidence) and evidence.proves_bond:
-                # Only a positively verified bond writes the marker, and it
-                # records which transport owns it so a later unpair knows where
-                # to look.
+                # A positively verified bond writes the marker *and* records
+                # which transport owns it, so a later unpair knows where to look.
                 entry_data = self._mark_ble_bond_established(entry_data)
                 entry_data[CONF_BLE_BOND_CONTEXT] = build_bond_context(evidence)
                 self._pairing_success_evidence = evidence
+            elif succeeded and self._pairing_mode != "verify_existing":
+                # A bond was asked for and nothing contradicted it, but this
+                # protocol has no authentication-gated read to prove it with.
+                # Record that pairing happened, without provenance: the marker
+                # keeps the coordinator from immediately re-pairing a bed that
+                # just paired, which over a proxy can return auth error 82 and
+                # wedge the connection, while the missing context means this
+                # cannot later authorize removing a host bond.
+                entry_data = self._mark_ble_bond_established(entry_data)
+                entry_data.pop(CONF_BLE_BOND_CONTEXT, None)
             return self.async_create_entry(
                 title=self._manual_data.get(CONF_NAME, "Adjustable Bed"),
                 data=entry_data,
@@ -4193,11 +4204,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
     @staticmethod
     def _same_bond_record(pinned: LocalBondRecord, current: LocalBondRecord) -> bool:
         """Return True when two reads describe the same BlueZ device object."""
-        return (
-            pinned.device_path == current.device_path
-            and pinned.adapter_path == current.adapter_path
-            and pinned.address.upper() == current.address.upper()
-        )
+        return pinned.is_same_bond_as(current)
 
     async def _async_unpair_worker(self) -> OperationResult:
         """Stop using the bed, then remove the bond and confirm it is gone."""

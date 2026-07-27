@@ -360,7 +360,7 @@
           "outcome_existing_verified_local": "✅ The existing bond works. It is stored on this Home Assistant host ({transport}), and setup will use it as it is.",
           "outcome_existing_verified_proxy": "✅ The existing bond works. It is stored on the Bluetooth proxy {transport}, so moving this bed to a different proxy will mean pairing again.",
           "outcome_existing_verified_unknown": "✅ The existing bond works, but Home Assistant could not tell which adapter or proxy carried the check, so it does not know where the bond is stored.",
-          "outcome_unproven": "⚠️ Pairing completed, but this bed gives Home Assistant no way to confirm the bond. Setup will finish; the integration will ask to pair again on its first connection rather than assume it worked.",
+          "outcome_unproven": "⚠️ Pairing completed, but this bed gives Home Assistant no way to confirm the bond. Setup will finish and record that pairing happened, so the first connection does not try to pair on top of it. If the bond did not really form, Home Assistant will raise a repair asking you to pair again.",
           "outcome_not_advertising": "❌ The bed is not advertising, so no connection was attempted. Put it into pairing mode or move it closer to an adapter or proxy, then select **Try again**.",
           "outcome_auth_failed": "❌ The bed connected, but the link is still unauthenticated, so the bond did not form. Put the bed back into pairing mode and select **Try again**.",
           "outcome_inconclusive": "⚠️ Home Assistant could not confirm the existing bond either way: the check timed out or the bed does not answer it. The bond may well be fine. You can try again, or pair from scratch if the bed does not respond afterwards.",

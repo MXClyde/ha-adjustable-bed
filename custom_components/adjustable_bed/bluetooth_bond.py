@@ -94,6 +94,22 @@ class LocalBondRecord:
         """Return True only when BlueZ positively reports a bond."""
         return self.paired or self.bonded
 
+    def is_same_bond_as(self, other: LocalBondRecord) -> bool:
+        """Return True when two reads describe the same BlueZ bond.
+
+        Identity is the device object and the adapter holding it, plus the fact
+        that a bond is still there. Whole-dataclass equality would also compare
+        ``connected`` and ``trusted``, which change while a confirmation dialog
+        is open and would refuse a removal the user already approved for exactly
+        this bond.
+        """
+        return (
+            self.device_path == other.device_path
+            and self.adapter_path == other.adapter_path
+            and self.address.upper() == other.address.upper()
+            and self.has_bond == other.has_bond
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class LocalBondInventory:
