@@ -348,7 +348,8 @@
           "outcome_no_slots": "Outcome: no slots",
           "outcome_timed_out": "Outcome: timed out",
           "outcome_cancelled": "Outcome: cancelled",
-          "outcome_connection_failed": "Outcome: connection failed"
+          "outcome_connection_failed": "Outcome: connection failed",
+          "outcome_removal_unconfirmed": "Outcome: removal unconfirmed"
         },
         "data_description": {
           "action": "Try again keeps the bed type, adapter and protocol settings you already chose.",
@@ -364,12 +365,13 @@
           "outcome_auth_failed": "❌ The bed connected, but the link is still unauthenticated, so the bond did not form. Put the bed back into pairing mode and select **Try again**.",
           "outcome_inconclusive": "⚠️ Home Assistant could not confirm the existing bond either way: the check timed out or the bed does not answer it. The bond may well be fine. You can try again, or pair from scratch if the bed does not respond afterwards.",
           "outcome_unsupported": "❌ This Bluetooth adapter or proxy cannot pair. ESPHome proxies need ESPHome 2024.3.0 or newer; otherwise pair through a Bluetooth adapter on the Home Assistant host.",
-          "outcome_removal_failed": "⚠️ The existing bond could not be confirmed as removed, so pairing was not attempted. Home Assistant does not know whether that bond is still in place. Try again, and use Remove the Bluetooth bond from the device's options if it persists.",
+          "outcome_removal_failed": "❌ The existing bond could not be removed, so pairing was not attempted and the old bond is still in place. Try again, and use Remove the Bluetooth bond from the device's options if it persists.",
           "outcome_in_use": "❌ The bed's Bluetooth connection is already in use. Beds allow only one connection at a time, so close the manufacturer's app and put the physical remote down, then select **Try again**.",
           "outcome_no_slots": "❌ Every Bluetooth adapter and proxy that can reach this bed is out of free connections. Free one up, or add another proxy, then select **Try again**.",
           "outcome_timed_out": "❌ The bed stopped responding partway through. Put it back into pairing mode and select **Try again**.",
           "outcome_cancelled": "❌ Pairing was cancelled.",
-          "outcome_connection_failed": "❌ Could not pair. Another app or the bed's own remote may be holding the bed's connection, or it may be out of range. Select **Try again**."
+          "outcome_connection_failed": "❌ Could not pair. Another app or the bed's own remote may be holding the bed's connection, or it may be out of range. Select **Try again**.",
+          "outcome_removal_unconfirmed": "⚠️ Home Assistant asked BlueZ to remove the existing bond but could not confirm whether it is gone, so pairing was not attempted. Check the host's Bluetooth settings, then select **Try again**."
         }
       },
       "pairing_replace_confirm": {

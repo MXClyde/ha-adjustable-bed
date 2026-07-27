@@ -54,12 +54,13 @@
           "outcome_auth_failed": "❌ Sengen koblet til, men forbindelsen er fortsatt uautentisert, så koblingen ble ikke opprettet. Sett sengen i paremodus igjen og velg **Prøv igjen**.",
           "outcome_inconclusive": "⚠️ Home Assistant fikk ikke bekreftet den eksisterende koblingen i noen retning: sjekken gikk ut på tid, eller sengen svarer ikke på den. Koblingen kan godt være i orden. Du kan prøve igjen, eller pare fra bunnen av hvis sengen ikke svarer etterpå.",
           "outcome_unsupported": "❌ Denne Bluetooth-adapteren eller proxyen kan ikke pare. ESPHome-proxyer trenger ESPHome 2024.3.0 eller nyere; ellers må du pare via en Bluetooth-adapter på Home Assistant-verten.",
-          "outcome_removal_failed": "⚠️ Den eksisterende koblingen kunne ikke bekreftes fjernet, så paring ble ikke forsøkt. Home Assistant vet ikke om koblingen fortsatt finnes. Prøv igjen, og bruk «Fjern Bluetooth-koblingen» i enhetens innstillinger hvis den blir værende.",
+          "outcome_removal_failed": "❌ Den eksisterende koblingen kunne ikke fjernes, så paring ble ikke forsøkt, og den gamle koblingen er fortsatt på plass. Prøv igjen, og bruk «Fjern Bluetooth-koblingen» i enhetens innstillinger hvis den blir værende.",
           "outcome_in_use": "❌ Sengens Bluetooth-tilkobling er allerede i bruk. Senger tillater bare én tilkobling om gangen, så lukk produsentens app og legg fra deg fjernkontrollen, og velg **Prøv igjen**.",
           "outcome_no_slots": "❌ Alle Bluetooth-adaptere og proxyer som når denne sengen er tomme for ledige tilkoblinger. Frigjør én, eller legg til en proxy til, og velg **Prøv igjen**.",
           "outcome_timed_out": "❌ Sengen sluttet å svare underveis. Sett den i paremodus igjen og velg **Prøv igjen**.",
           "outcome_cancelled": "❌ Paringen ble avbrutt.",
-          "outcome_connection_failed": "❌ Klarte ikke å pare. En annen app eller sengens egen fjernkontroll kan holde tilkoblingen, eller sengen kan være utenfor rekkevidde. Velg **Prøv igjen**."
+          "outcome_connection_failed": "❌ Klarte ikke å pare. En annen app eller sengens egen fjernkontroll kan holde tilkoblingen, eller sengen kan være utenfor rekkevidde. Velg **Prøv igjen**.",
+          "outcome_removal_unconfirmed": "⚠️ Home Assistant ba BlueZ om å fjerne den eksisterende koblingen, men fikk ikke bekreftet om den er borte, så paring ble ikke forsøkt. Sjekk Bluetooth-innstillingene på verten, og velg **Prøv igjen**."
         }
       },
       "pairing_replace_confirm": {

@@ -102,6 +102,7 @@ class OperationOutcome(StrEnum):
     BOND_VERIFICATION_INCONCLUSIVE = "bond_verification_inconclusive"
     PROXY_OWNED_BOND = "proxy_owned_bond"
     UNPAIR_FAILED = "unpair_failed"
+    UNPAIR_UNCONFIRMED = "unpair_unconfirmed"
     CANCELLED = "cancelled"
 
 
