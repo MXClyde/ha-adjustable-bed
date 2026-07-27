@@ -48,6 +48,7 @@ from .bond_verification import (
     BondEvidence,
     BondOwner,
     BondVerificationStatus,
+    bond_context_matches,
     bond_owner_from_entry,
     build_bond_context,
 )
@@ -809,6 +810,7 @@ class AdjustableBedCoordinator:
         *,
         established: bool | None = None,
         unreliable: bool | None = None,
+        context: dict[str, Any] | None = None,
     ) -> None:
         """Apply bond-state changes to runtime state and entry data in ONE write.
 
@@ -834,6 +836,8 @@ class AdjustableBedCoordinator:
                 data[CONF_BLE_BOND_MARKER_UNRELIABLE] = True
             else:
                 data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
+        if context is not None:
+            data[CONF_BLE_BOND_CONTEXT] = context
         if data != dict(self.entry.data):
             self._begin_internal_entry_update(
                 bool(data.get(CONF_BLE_BOND_ESTABLISHED, False))
@@ -860,13 +864,12 @@ class AdjustableBedCoordinator:
             observed_at=datetime.now(UTC).isoformat(),
         )
         context = build_bond_context(evidence)
-        if self.entry.data.get(CONF_BLE_BOND_CONTEXT) == context:
+        if bond_context_matches(self.entry.data.get(CONF_BLE_BOND_CONTEXT), context):
+            # Same owner as last time. The observation timestamp always differs,
+            # so comparing whole contexts would rewrite the entry on every
+            # reconnect, and every write fires the options listener.
             return
-        data = {**self.entry.data, CONF_BLE_BOND_CONTEXT: context}
-        self._begin_internal_entry_update(
-            bool(data.get(CONF_BLE_BOND_ESTABLISHED, False))
-        )
-        self.hass.config_entries.async_update_entry(self.entry, data=data)
+        self._persist_bond_flags(established=True, context=context)
 
     def _begin_internal_entry_update(self, bond_established: bool) -> None:
         """Mark the next entry update as an internal bond-marker write.
@@ -1234,6 +1237,10 @@ class AdjustableBedCoordinator:
         # Read succeeded → the encrypted link works → we are bonded. Record which
         # transport carried that proof, so a later unpair or recovery knows where
         # the bond actually lives instead of guessing (issue #459).
+        # The link is authenticated now, so any earlier authentication failure
+        # is history. Leaving it in place would let a later repair believe it
+        # still had grounds to remove a bond that is demonstrably working.
+        self._last_bond_evidence = None
         self._record_bond_provenance()
         release_latch = False
         if self._ble_bond_marker_unreliable:

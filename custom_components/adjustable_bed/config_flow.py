@@ -2232,7 +2232,14 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             prediction.chosen is not None
             and prediction.chosen.transport is TransportClass.PROXY
         )
-        can_use_existing = existing is not None and not over_proxy
+        # "Not a proxy" is not the same as "provably the host". An unknown or
+        # absent path cannot show that the bond BlueZ is holding is the one this
+        # bed will actually use, so it is not offered as usable.
+        proven_local = (
+            prediction.chosen is not None
+            and prediction.chosen.transport is TransportClass.LOCAL
+        )
+        can_use_existing = existing is not None and proven_local and not over_proxy
 
         if user_input is not None:
             action = user_input.get("action")
@@ -2490,13 +2497,13 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             try:
                 # The routed transport is only knowable now, and it decides who
                 # owns any bond this attempt creates.
+                # Ownership has to come from the route actually taken. A
+                # prediction is explicitly not a guarantee, and recording one as
+                # the bond owner could persist "local" for a bond stored on a
+                # proxy, later authorizing removal of an unrelated host bond.
                 actual_source = client_source(client)
-                path = (
-                    async_path_for_source(self.hass, actual_source)
-                    if actual_source
-                    else prediction.chosen
-                )
-                self.async_report_path(path)
+                path = async_path_for_source(self.hass, actual_source) if actual_source else None
+                self.async_report_path(path or prediction.chosen)
 
                 if pair_after_service_discovery:
                     _LOGGER.info(
@@ -3486,9 +3493,13 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 requested_variant,
             ):
                 # These markers describe the old protocol's authentication
-                # requirements and must not steer pairing for the new one.
+                # requirements and must not steer pairing for the new one. That
+                # includes the recorded owner: leaving stale proxy provenance
+                # behind would keep blocking Unpair after the new protocol has
+                # established a perfectly ordinary local bond.
                 new_data.pop(CONF_BLE_BOND_ESTABLISHED, None)
                 new_data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
+                new_data.pop(CONF_BLE_BOND_CONTEXT, None)
             # Record that the stored cadence is the user's choice rather than a
             # value the flow generated, so protocol migrations leave it alone.
             # The pulse fields are always present in this form, so saving it at
@@ -3628,7 +3639,11 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
 
         coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
         if coordinator is None:
-            return self._unpair_result(await async_remove_local_bond(record))
+            # No coordinator to quiesce, but the address still has to be held:
+            # a config or repair flow could otherwise connect to this bed while
+            # its bond is being removed.
+            async with async_get_connect_lock(self.hass, record.address):
+                return self._unpair_result(await async_remove_local_bond(record))
 
         # Hold the bed out of use for the whole transaction, through the
         # coordinator's own locking order. Releasing the locks before the

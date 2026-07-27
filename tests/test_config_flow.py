@@ -385,11 +385,32 @@ class TestPairingPersistence:
         inventory = LocalBondInventory(
             status=BluezReadStatus.OK, records=(_bond_record(),)
         )
-        with _patch_inventory(inventory):
+        # The bond is only offerable when the path is provably local; an unknown
+        # path cannot show that BlueZ's record is the one this bed will use.
+        with _patch_inventory(inventory), _patch_local_prediction():
             result = await getattr(flow, step)({"action": "use_existing_bond"})
 
         assert result["type"] is FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_BLE_BOND_ESTABLISHED] is True
+
+    @pytest.mark.parametrize(
+        "step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"]
+    )
+    async def test_an_existing_bond_is_not_offered_without_a_proven_local_path(
+        self, hass: HomeAssistant, step: str
+    ) -> None:
+        """Not-a-proxy is not the same as provably the host."""
+        flow = self._new_pairing_flow(hass)
+        inventory = LocalBondInventory(
+            status=BluezReadStatus.OK, records=(_bond_record(),)
+        )
+        with _patch_inventory(inventory):
+            result = await getattr(flow, step)(None)
+
+        options = result["data_schema"].schema[
+            next(iter(result["data_schema"].schema))
+        ].config["options"]
+        assert options == ["pair_now"]
 
     @pytest.mark.parametrize(
         "step", ["async_step_bluetooth_pairing", "async_step_manual_pairing"]
@@ -3396,6 +3417,15 @@ def _bond_record(adapter_address: str = "11:22:33:44:55:66") -> LocalBondRecord:
         adapter_address=adapter_address,
         paired=True,
         bonded=True,
+    )
+
+
+def _patch_local_prediction(source: str = "hci0"):
+    """Make the predicted path a proven local adapter."""
+    path = ConnectionPath(source=source, transport=TransportClass.LOCAL, adapter=source)
+    return patch(
+        "custom_components.adjustable_bed.config_flow.async_predict_path",
+        return_value=PathPrediction(chosen=path, paths=(path,)),
     )
 
 
