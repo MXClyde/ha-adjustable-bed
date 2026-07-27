@@ -2619,9 +2619,17 @@ class TestCoordinatorWriteCommand:
         assert coordinator._ble_bond_established is False
         assert coordinator._bond_probe_timed_out is False
         assert entry.data[CONF_BLE_BOND_ESTABLISHED] is False
-        mock_create_issue.assert_awaited_once_with(
-            hass, TEST_ADDRESS, TEST_NAME, "okimat_auth_failure_test"
+        mock_create_issue.assert_awaited_once()
+        assert mock_create_issue.await_args[0][:4] == (
+            hass,
+            TEST_ADDRESS,
+            TEST_NAME,
+            "okimat_auth_failure_test",
         )
+        # The repair has to know which transport saw the failure, or a
+        # recovery cannot tell a host bond from a proxy one.
+        evidence = mock_create_issue.await_args.kwargs["evidence"]
+        assert evidence["status"] == "auth_failed"
         mock_disconnect.assert_awaited_once_with(reason="authentication_failed")
 
     async def test_controller_startup_auth_failure_clears_bond_marker(
@@ -2708,9 +2716,17 @@ class TestCoordinatorWriteCommand:
         assert coordinator._ble_bond_established is False
         assert coordinator._bond_probe_timed_out is False
         assert entry.data[CONF_BLE_BOND_ESTABLISHED] is False
-        mock_create_issue.assert_awaited_once_with(
-            hass, TEST_ADDRESS, TEST_NAME, "okimat_startup_auth_failure_test"
+        mock_create_issue.assert_awaited_once()
+        assert mock_create_issue.await_args[0][:4] == (
+            hass,
+            TEST_ADDRESS,
+            TEST_NAME,
+            "okimat_startup_auth_failure_test",
         )
+        # The repair has to know which transport saw the failure, or a
+        # recovery cannot tell a host bond from a proxy one.
+        evidence = mock_create_issue.await_args.kwargs["evidence"]
+        assert evidence["status"] == "auth_failed"
 
     async def test_startup_auth_recovery_survives_failing_disconnect(
         self,
@@ -2800,9 +2816,17 @@ class TestCoordinatorWriteCommand:
         # The recovery still ran despite the failing disconnect.
         assert coordinator._ble_bond_established is False
         assert entry.data[CONF_BLE_BOND_ESTABLISHED] is False
-        mock_create_issue.assert_awaited_once_with(
-            hass, TEST_ADDRESS, TEST_NAME, "okimat_startup_auth_failing_disconnect_test"
+        mock_create_issue.assert_awaited_once()
+        assert mock_create_issue.await_args[0][:4] == (
+            hass,
+            TEST_ADDRESS,
+            TEST_NAME,
+            "okimat_startup_auth_failing_disconnect_test",
         )
+        # The repair has to know which transport saw the failure, or a
+        # recovery cannot tell a host bond from a proxy one.
+        evidence = mock_create_issue.await_args.kwargs["evidence"]
+        assert evidence["status"] == "auth_failed"
 
     async def test_failed_pairing_does_not_persist_bond_marker(
         self,
@@ -2938,9 +2962,17 @@ class TestCoordinatorWriteCommand:
             coordinator.pairing_diagnostics["last_bond_verification"]["status"]
             == "authentication_failed"
         )
-        mock_create_issue.assert_awaited_once_with(
-            hass, TEST_ADDRESS, TEST_NAME, "okimat_verify_bonded_test"
+        mock_create_issue.assert_awaited_once()
+        assert mock_create_issue.await_args[0][:4] == (
+            hass,
+            TEST_ADDRESS,
+            TEST_NAME,
+            "okimat_verify_bonded_test",
         )
+        # The repair has to know which transport saw the failure, or a
+        # recovery cannot tell a host bond from a proxy one.
+        evidence = mock_create_issue.await_args.kwargs["evidence"]
+        assert evidence["status"] == "auth_failed"
         # Disconnect ran via the lock-free path and cleared the client.
         client.disconnect.assert_awaited_once()
         assert coordinator._client is None
@@ -4747,3 +4779,84 @@ class TestStopAfterCancel:
 
         # Verify that commands were sent (movement + stop)
         assert len(commands_sent) > 0
+
+
+class TestBondProvenanceAndTransportGate:
+    """Who owns a bond, and holding the bed still while it is changed."""
+
+    async def test_the_transport_gate_holds_the_address_lock(
+        self, hass: HomeAssistant, mock_config_entry
+    ) -> None:
+        """A config or repair flow must not connect during a bond removal.
+
+        Excluding the coordinator's own commands is not enough: the per-address
+        connect lock is what stops another flow opening a link to the same bed
+        while its bond is being removed.
+        """
+        from custom_components.adjustable_bed.address_lock import async_get_connect_lock
+        from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+
+        mock_config_entry.add_to_hass(hass)
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        lock = async_get_connect_lock(hass, coordinator._address)
+
+        async with coordinator.async_transport_operation("unpair"):
+            assert lock.locked()
+        assert not lock.locked()
+
+        await coordinator.async_shutdown()
+
+    async def test_an_authenticated_read_records_who_owns_the_bond(
+        self, hass: HomeAssistant, mock_config_entry
+    ) -> None:
+        """A successful auth-gated read is the runtime proof of a bond."""
+        from custom_components.adjustable_bed.bluetooth_transport import (
+            ConnectionPath,
+            TransportClass,
+        )
+        from custom_components.adjustable_bed.bond_verification import (
+            CONF_BLE_BOND_CONTEXT,
+        )
+        from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+
+        mock_config_entry.add_to_hass(hass)
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._connection_path = ConnectionPath(
+            source="AA:BB:CC:11:22:33",
+            transport=TransportClass.LOCAL,
+            adapter="hci0",
+        )
+        coordinator._record_bond_provenance()
+        await hass.async_block_till_done()
+
+        context = mock_config_entry.data.get(CONF_BLE_BOND_CONTEXT)
+        assert context is not None
+        assert context["transport"] == "local"
+        assert context["source"] == "AA:BB:CC:11:22:33"
+
+        await coordinator.async_shutdown()
+
+    async def test_an_unknown_transport_records_no_provenance(
+        self, hass: HomeAssistant, mock_config_entry
+    ) -> None:
+        """Unknown ownership must not be written as if it were established."""
+        from custom_components.adjustable_bed.bluetooth_transport import (
+            ConnectionPath,
+            TransportClass,
+        )
+        from custom_components.adjustable_bed.bond_verification import (
+            CONF_BLE_BOND_CONTEXT,
+        )
+        from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+
+        mock_config_entry.add_to_hass(hass)
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._connection_path = ConnectionPath(
+            source="mystery", transport=TransportClass.UNKNOWN
+        )
+        coordinator._record_bond_provenance()
+        await hass.async_block_till_done()
+
+        assert CONF_BLE_BOND_CONTEXT not in mock_config_entry.data
+
+        await coordinator.async_shutdown()

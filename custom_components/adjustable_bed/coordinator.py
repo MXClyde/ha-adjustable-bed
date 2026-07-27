@@ -42,13 +42,14 @@ from .adapter import (
 )
 from .address_lock import async_get_connect_lock
 from .ble_auth import is_ble_authentication_error
-from .bluetooth_transport import ConnectionPath, async_path_for_source
+from .bluetooth_transport import ConnectionPath, TransportClass, async_path_for_source
 from .bond_verification import (
     CONF_BLE_BOND_CONTEXT,
     BondEvidence,
     BondOwner,
     BondVerificationStatus,
     bond_owner_from_entry,
+    build_bond_context,
 )
 from .const import (
     ADAPTER_AUTO,
@@ -839,6 +840,34 @@ class AdjustableBedCoordinator:
             )
             self.hass.config_entries.async_update_entry(self.entry, data=data)
 
+    def _record_bond_provenance(self) -> None:
+        """Persist which transport owns the bond this link just proved.
+
+        Only ever called after an authentication-gated read succeeded. An
+        inconclusive or skipped probe proves nothing and must leave whatever was
+        recorded before untouched, because provenance is what later authorizes a
+        host-side removal.
+        """
+        path = self._connection_path
+        if path is None or path.transport is TransportClass.UNKNOWN:
+            # Nothing worth recording: an unknown transport must not be written
+            # as if it were established fact.
+            return
+        evidence = BondEvidence(
+            status=BondVerificationStatus.VERIFIED,
+            owner=BondOwner.from_path(path),
+            operation="runtime_authenticated_read",
+            observed_at=datetime.now(UTC).isoformat(),
+        )
+        context = build_bond_context(evidence)
+        if self.entry.data.get(CONF_BLE_BOND_CONTEXT) == context:
+            return
+        data = {**self.entry.data, CONF_BLE_BOND_CONTEXT: context}
+        self._begin_internal_entry_update(
+            bool(data.get(CONF_BLE_BOND_ESTABLISHED, False))
+        )
+        self.hass.config_entries.async_update_entry(self.entry, data=data)
+
     def _begin_internal_entry_update(self, bond_established: bool) -> None:
         """Mark the next entry update as an internal bond-marker write.
 
@@ -992,7 +1021,15 @@ class AdjustableBedCoordinator:
         """Surface the guided pairing repair, best-effort."""
         try:
             await create_pairing_required_issue(
-                self.hass, self._address, self._name, self.entry.entry_id
+                self.hass,
+                self._address,
+                self._name,
+                self.entry.entry_id,
+                evidence=(
+                    self._last_bond_evidence.as_dict()
+                    if self._last_bond_evidence is not None
+                    else None
+                ),
             )
         except Exception:
             _LOGGER.debug(
@@ -1194,7 +1231,10 @@ class AdjustableBedCoordinator:
             self._record_bond_verification("timed_out", err, attempt_details)
             return True
 
-        # Read succeeded → the encrypted link works → we are bonded.
+        # Read succeeded → the encrypted link works → we are bonded. Record which
+        # transport carried that proof, so a later unpair or recovery knows where
+        # the bond actually lives instead of guessing (issue #459).
+        self._record_bond_provenance()
         release_latch = False
         if self._ble_bond_marker_unreliable:
             if not self._attempt_used_pairing:
@@ -3152,7 +3192,17 @@ class AdjustableBedCoordinator:
         refuse to touch the bond rather than remove it blindly.
         """
         _LOGGER.info("Releasing %s for a %s operation", self._address, operation)
-        async with self._command_lock, self._lock:
+        # Command lock, then connection lock, then the per-address connect lock:
+        # the coordinator's established order. Excluding our own commands is not
+        # enough - a config or repair flow connecting to the same address during
+        # a bond removal is exactly what the address lock exists to prevent, and
+        # taking it last is what keeps this from deadlocking against a command
+        # that already holds the command lock and is waiting for the address.
+        async with (
+            self._command_lock,
+            self._lock,
+            async_get_connect_lock(self.hass, self._address),
+        ):
             client = self._client
             await self._async_disconnect_locked(f"transport_operation_{operation}")
             if client is not None and client.is_connected:
