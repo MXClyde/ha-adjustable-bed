@@ -183,6 +183,16 @@ class _RecoveryState:
     removal_started: bool = False
 
 
+async def _async_await_task_completion[T](task: asyncio.Task[T]) -> T:
+    """Wait for a task without forwarding cancellation from the current task."""
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
+
+
 async def async_recover_local_bond(
     hass: HomeAssistant,
     *,
@@ -237,7 +247,7 @@ async def async_recover_local_bond(
             "Finishing bond recovery for %s after the Repairs flow was cancelled",
             address,
         )
-        result = await transaction
+        result = await _async_await_task_completion(transaction)
     if result.succeeded and on_verified is not None:
         async def _persist() -> None:
             await on_verified(result)
@@ -246,7 +256,7 @@ async def async_recover_local_bond(
         try:
             await asyncio.shield(persistence)
         except asyncio.CancelledError:
-            await persistence
+            await _async_await_task_completion(persistence)
     return result
 
 
@@ -469,8 +479,17 @@ async def _async_connect_and_verify(
     finally:
         report_action(SetupAction.DISCONNECTING)
         if client is not None:
+            disconnect = hass.async_create_task(
+                client.disconnect(), eager_start=False
+            )
             try:
-                await asyncio.shield(client.disconnect())
+                await asyncio.shield(disconnect)
+            except asyncio.CancelledError:
+                try:
+                    await _async_await_task_completion(disconnect)
+                except Exception:  # noqa: BLE001 - preserve cancellation
+                    _LOGGER.debug("Disconnect after recovery failed", exc_info=True)
+                raise
             except Exception:  # noqa: BLE001 - cleanup must not mask the result
                 _LOGGER.debug("Disconnect after recovery failed", exc_info=True)
 

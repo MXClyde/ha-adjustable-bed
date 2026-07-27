@@ -561,8 +561,10 @@ class TestRunningRecovery:
         @contextlib.asynccontextmanager
         async def transport_gate(operation: str):
             gate_events.append(f"enter:{operation}")
-            yield
-            gate_events.append(f"exit:{operation}")
+            try:
+                yield
+            finally:
+                gate_events.append(f"exit:{operation}")
 
         with (
             patch(
@@ -599,11 +601,81 @@ class TestRunningRecovery:
             )
             await removal_started.wait()
             task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
             release_removal.set()
             result = await task
 
         assert result.succeeded
         persisted.assert_awaited_once_with(result)
+        assert gate_events == [
+            "enter:stale_bond_recovery",
+            "exit:stale_bond_recovery",
+        ]
+
+    async def test_cancellation_waits_for_preflight_disconnect_before_gate_exit(
+        self, hass: HomeAssistant
+    ) -> None:
+        fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
+        disconnect_started = asyncio.Event()
+        release_disconnect = asyncio.Event()
+        gate_events: list[str] = []
+        client = _client()
+
+        async def disconnect() -> None:
+            disconnect_started.set()
+            await release_disconnect.wait()
+
+        client.disconnect.side_effect = disconnect
+
+        @contextlib.asynccontextmanager
+        async def transport_gate(operation: str):
+            gate_events.append(f"enter:{operation}")
+            try:
+                yield
+            finally:
+                gate_events.append(f"exit:{operation}")
+
+        with (
+            patch(
+                f"{_RECOVERY}.async_wait_for_advertisement",
+                AsyncMock(return_value=(fresh, MagicMock())),
+            ),
+            patch(
+                "bleak_retry_connector.establish_connection",
+                AsyncMock(return_value=client),
+            ),
+            patch(f"{_RECOVERY}.async_path_for_source", return_value=_local_path()),
+            patch(
+                f"{_RECOVERY}.async_verify_authenticated_access",
+                AsyncMock(
+                    return_value=_bond(
+                        BondVerificationStatus.AUTH_FAILED, "preflight"
+                    )
+                ),
+            ),
+        ):
+            task = asyncio.create_task(
+                async_recover_local_bond(
+                    hass,
+                    address=TEST_ADDRESS,
+                    name="Bed",
+                    offer=self._offer(),
+                    bed_type=BED_TYPE_OKIMAT,
+                    protocol_variant=None,
+                    transport_operation=transport_gate,
+                )
+            )
+            await disconnect_started.wait()
+            task.cancel()
+            await asyncio.sleep(0)
+
+            assert gate_events == ["enter:stale_bond_recovery"]
+
+            release_disconnect.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
         assert gate_events == [
             "enter:stale_bond_recovery",
             "exit:stale_bond_recovery",
