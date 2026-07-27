@@ -3599,6 +3599,24 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
         if owner.transport is TransportClass.PROXY:
             return self._async_abort_unpair("proxy_owned", name, address, owner)
 
+        if not owner.is_host:
+            # No recorded owner, which is every entry paired before provenance
+            # existed. The host's own BlueZ still holds a record for this exact
+            # address, so there is something concrete to remove, but if the bed
+            # is currently routing through a proxy then the bond that matters to
+            # the user lives there and this one is a leftover. Refuse rather
+            # than act on a guess about which the user means.
+            prediction = async_predict_path(
+                self.hass,
+                address,
+                self.config_entry.data.get(CONF_PREFERRED_ADAPTER, ADAPTER_AUTO),
+            )
+            if (
+                prediction.chosen is not None
+                and prediction.chosen.transport is TransportClass.PROXY
+            ):
+                return self._async_abort_unpair("proxy_owned", name, address, owner)
+
         selection = select_local_bond(
             inventory,
             owner_source=owner.source,

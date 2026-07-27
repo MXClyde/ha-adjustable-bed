@@ -4088,3 +4088,29 @@ async def test_pairing_refuses_rather_than_bonding_through_another_adapter(
 
     wait.assert_not_called()
     connects.assert_not_called()
+
+
+async def test_a_legacy_entry_now_routing_through_a_proxy_cannot_unpair(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
+) -> None:
+    """No provenance plus a proxy route means the host record is a leftover.
+
+    The bond that matters to the user lives on the proxy, so acting on the
+    host's copy would be guessing which one they meant.
+    """
+    mock_config_entry.add_to_hass(hass)
+    proxy = ConnectionPath(source="proxy", transport=TransportClass.PROXY)
+    inventory = LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+    with (
+        _patch_inventory(inventory),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_predict_path",
+            return_value=PathPrediction(chosen=proxy, paths=(proxy,)),
+        ),
+        patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
+    ):
+        result = await _open_unpair(hass, mock_config_entry.entry_id)
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "unpair_proxy_owned"
+    removal.assert_not_called()
