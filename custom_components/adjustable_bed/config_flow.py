@@ -46,10 +46,12 @@ from .adapter import (
 from .address_lock import async_get_connect_lock
 from .bluetooth_bond import (
     BondRemovalResult,
+    BondSelectionStatus,
     LocalBondInventory,
     LocalBondRecord,
     async_read_local_bonds,
     async_remove_local_bond,
+    select_local_bond,
 )
 from .bluetooth_freshness import (
     ADVERTISEMENT_WAIT_SECONDS,
@@ -3667,54 +3669,54 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
         inventory = await async_read_local_bonds(address)
         return inventory, bond_owner_from_entry(self.config_entry.data)
 
-    @staticmethod
-    def _async_unpair_blocker(
-        inventory: LocalBondInventory, owner: BondOwner
-    ) -> str | None:
-        """Return why a host-side unpair must not be offered, or None.
-
-        A proxy-owned bond is the important case: the host cannot reach it, and
-        showing a destructive button that quietly does nothing to the bond the
-        user is actually thinking about is worse than showing no button at all.
-        """
-        if owner.transport is TransportClass.PROXY:
-            return "proxy_owned"
-        if not inventory.readable:
-            return "bluez_unavailable"
-        if not inventory.bonded_records:
-            return "no_bond"
-        if len(inventory.bonded_records) > 1 and owner.adapter is None:
-            return "ambiguous"
-        return None
-
     async def async_step_unpair(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Explain what will be removed and ask for explicit confirmation."""
+        """Explain exactly what will be removed and ask for confirmation.
+
+        The record is identified once, when the confirmation is rendered, and
+        pinned. On submission the inventory is read again and the pinned record
+        must still be there unchanged. Without that, the bond shown to the user
+        and the bond actually removed are two separate lookups, and anything
+        that changes BlueZ in between (another adapter pairing, a bond removed
+        elsewhere) means removing something the user never saw.
+        """
         inventory, owner = await self._async_bond_situation()
-        blocker = self._async_unpair_blocker(inventory, owner)
         name = self.config_entry.data.get(CONF_NAME) or self.config_entry.title
         address = self.config_entry.data.get(CONF_ADDRESS, "")
 
-        if blocker is not None:
-            return self.async_abort(
-                reason=f"unpair_{blocker}",
-                description_placeholders={
-                    "name": name,
-                    "address": address,
-                    "transport": owner.source or str(owner.transport),
-                },
-            )
+        # Proxy-owned bonds are refused before anything else: the host cannot
+        # reach them, and a destructive button that quietly does nothing to the
+        # bond the user has in mind is worse than no button.
+        if owner.transport is TransportClass.PROXY:
+            return self._async_abort_unpair("proxy_owned", name, address, owner)
 
-        record = inventory.bonded_records[0]
-        if owner.adapter is not None:
-            for candidate in inventory.bonded_records:
-                if candidate.adapter_address == owner.adapter:
-                    record = candidate
-                    break
+        selection = select_local_bond(
+            inventory,
+            owner_source=owner.source,
+            owner_adapter=owner.adapter,
+        )
+        if selection.status is BondSelectionStatus.UNREADABLE:
+            return self._async_abort_unpair("bluez_unavailable", name, address, owner)
+        if selection.status is BondSelectionStatus.NO_BOND:
+            return self._async_abort_unpair("no_bond", name, address, owner)
+        if selection.status is BondSelectionStatus.AMBIGUOUS:
+            return self._async_abort_unpair("ambiguous", name, address, owner)
+        if selection.status is BondSelectionStatus.UNKNOWN_OWNER:
+            # Provenance names an adapter that no longer holds a bond for this
+            # bed. Acting anyway would mean removing a record nothing pointed at.
+            return self._async_abort_unpair("ambiguous", name, address, owner)
+
+        record = selection.record
+        assert record is not None
 
         if user_input is not None:
-            self._unpair_record = record
+            pinned = self._unpair_record
+            if pinned is None or not self._same_bond_record(pinned, record):
+                # The host's bond state moved between showing the confirmation
+                # and acting on it. Re-confirm rather than remove something else.
+                self._unpair_record = None
+                return self._async_abort_unpair("changed", name, address, owner)
             self.async_begin_operation(
                 name=name,
                 address=address,
@@ -3723,6 +3725,8 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
             )
             return await self.async_step_unpair_progress()
 
+        # Pin what is being shown, so the submission can prove it is the same.
+        self._unpair_record = record
         return self.async_show_form(
             step_id="unpair",
             data_schema=vol.Schema({}),
@@ -3730,7 +3734,38 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 "name": name,
                 "address": address,
                 "transport": record.adapter_address or record.adapter_path,
+                "provenance": (
+                    ""
+                    if owner.is_host
+                    else (
+                        "\n\n⚠️ Home Assistant has no record of which transport created "
+                        "this bond, because it predates that being tracked. This is the "
+                        "only Bluetooth bond this host holds for that address."
+                    )
+                ),
             },
+        )
+
+    def _async_abort_unpair(
+        self, reason: str, name: str, address: str, owner: BondOwner
+    ) -> ConfigFlowResult:
+        """Abort the unpair with an explanation of why it is not offered."""
+        return self.async_abort(
+            reason=f"unpair_{reason}",
+            description_placeholders={
+                "name": name,
+                "address": address,
+                "transport": owner.source or str(owner.transport),
+            },
+        )
+
+    @staticmethod
+    def _same_bond_record(pinned: LocalBondRecord, current: LocalBondRecord) -> bool:
+        """Return True when two reads describe the same BlueZ device object."""
+        return (
+            pinned.device_path == current.device_path
+            and pinned.adapter_path == current.adapter_path
+            and pinned.address.upper() == current.address.upper()
         )
 
     async def _async_unpair_worker(self) -> OperationResult:

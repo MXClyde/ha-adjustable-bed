@@ -10,10 +10,13 @@ import pytest
 from custom_components.adjustable_bed.bluetooth_bond import (
     BluezReadStatus,
     BondRemovalStatus,
+    BondSelectionStatus,
+    LocalBondInventory,
     LocalBondRecord,
     async_read_local_bonds,
     async_remove_host_bond,
     async_remove_local_bond,
+    select_local_bond,
 )
 
 TEST_ADDRESS = "AA:BB:CC:DD:EE:FF"
@@ -370,3 +373,102 @@ class TestManagedObjectRead:
             inventory = await async_read_local_bonds(TEST_ADDRESS)
         assert inventory.readable
         assert inventory.records == ()
+
+
+class TestSelectingWhichRecord:
+    """The removal target must be identified, never defaulted to.
+
+    A local scanner's ``source`` is its adapter MAC, while ``adapter`` is the
+    interface name. Matching the wrong one of those against BlueZ's
+    ``Device1.Adapter`` MAC silently matches nothing, and on a two-adapter host
+    that used to mean "remove whichever record came first".
+    """
+
+    def _inventory(self, *records: LocalBondRecord) -> LocalBondInventory:
+        return LocalBondInventory(status=BluezReadStatus.OK, records=records)
+
+    def _record(self, adapter_path: str, adapter_address: str) -> LocalBondRecord:
+        return LocalBondRecord(
+            address=TEST_ADDRESS,
+            device_path=f"{adapter_path}/dev_AA_BB_CC_DD_EE_FF",
+            adapter_path=adapter_path,
+            adapter_address=adapter_address,
+            paired=True,
+            bonded=True,
+        )
+
+    def test_the_named_adapter_wins_on_a_two_adapter_host(self) -> None:
+        first = self._record(_ADAPTER_0, "11:22:33:44:55:66")
+        second = self._record(_ADAPTER_1, "AA:AA:AA:AA:AA:AA")
+        selection = select_local_bond(
+            self._inventory(first, second), owner_source="AA:AA:AA:AA:AA:AA"
+        )
+        assert selection.is_exact
+        assert selection.record is not None
+        assert selection.record.adapter_path == _ADAPTER_1
+
+    def test_an_interface_name_matches_the_adapter_path(self) -> None:
+        """Provenance may carry hci1 rather than the adapter's MAC."""
+        first = self._record(_ADAPTER_0, "11:22:33:44:55:66")
+        second = self._record(_ADAPTER_1, "AA:AA:AA:AA:AA:AA")
+        selection = select_local_bond(
+            self._inventory(first, second), owner_adapter="hci1"
+        )
+        assert selection.is_exact
+        assert selection.record is not None
+        assert selection.record.adapter_path == _ADAPTER_1
+
+    def test_provenance_naming_an_adapter_with_no_bond_is_not_exact(self) -> None:
+        """The old code fell through to the first record here and removed it."""
+        first = self._record(_ADAPTER_0, "11:22:33:44:55:66")
+        second = self._record(_ADAPTER_1, "AA:AA:AA:AA:AA:AA")
+        selection = select_local_bond(
+            self._inventory(first, second), owner_source="99:99:99:99:99:99"
+        )
+        assert not selection.is_exact
+        assert selection.status is BondSelectionStatus.AMBIGUOUS
+
+    def test_two_bonds_and_no_provenance_is_ambiguous(self) -> None:
+        first = self._record(_ADAPTER_0, "11:22:33:44:55:66")
+        second = self._record(_ADAPTER_1, "AA:AA:AA:AA:AA:AA")
+        selection = select_local_bond(self._inventory(first, second))
+        assert selection.status is BondSelectionStatus.AMBIGUOUS
+        assert selection.record is None
+
+    def test_one_bond_and_no_provenance_is_exact(self) -> None:
+        """A legacy entry with a single host bond has nothing to choose between."""
+        only = self._record(_ADAPTER_0, "11:22:33:44:55:66")
+        selection = select_local_bond(self._inventory(only))
+        assert selection.is_exact
+        assert selection.record is only
+
+    def test_one_bond_but_provenance_names_another_adapter(self) -> None:
+        only = self._record(_ADAPTER_0, "11:22:33:44:55:66")
+        selection = select_local_bond(
+            self._inventory(only), owner_source="AA:AA:AA:AA:AA:AA"
+        )
+        assert selection.status is BondSelectionStatus.UNKNOWN_OWNER
+
+    def test_an_unreadable_inventory_selects_nothing(self) -> None:
+        selection = select_local_bond(
+            LocalBondInventory(status=BluezReadStatus.UNAVAILABLE)
+        )
+        assert selection.status is BondSelectionStatus.UNREADABLE
+        assert selection.record is None
+
+    def test_no_bond_selects_nothing(self) -> None:
+        selection = select_local_bond(self._inventory())
+        assert selection.status is BondSelectionStatus.NO_BOND
+        assert selection.record is None
+
+    def test_unbonded_records_are_never_selected(self) -> None:
+        known = LocalBondRecord(
+            address=TEST_ADDRESS,
+            device_path=_DEVICE_0,
+            adapter_path=_ADAPTER_0,
+            adapter_address="11:22:33:44:55:66",
+            paired=False,
+            bonded=False,
+        )
+        selection = select_local_bond(self._inventory(known))
+        assert selection.status is BondSelectionStatus.NO_BOND

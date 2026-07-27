@@ -121,6 +121,94 @@ class LocalBondInventory:
         return bonded[0] if len(bonded) == 1 else None
 
 
+class BondSelectionStatus(StrEnum):
+    """Whether a specific host bond record could be identified for removal."""
+
+    EXACT = "exact"
+    UNKNOWN_OWNER = "unknown_owner"
+    AMBIGUOUS = "ambiguous"
+    NO_BOND = "no_bond"
+    UNREADABLE = "unreadable"
+
+
+@dataclass(frozen=True, slots=True)
+class BondSelection:
+    """The one record a removal may target, or why there is not one."""
+
+    status: BondSelectionStatus
+    record: LocalBondRecord | None = None
+
+    @property
+    def is_exact(self) -> bool:
+        """Return True when exactly one record was positively identified."""
+        return self.status is BondSelectionStatus.EXACT and self.record is not None
+
+
+def select_local_bond(
+    inventory: LocalBondInventory,
+    *,
+    owner_source: str | None = None,
+    owner_adapter: str | None = None,
+) -> BondSelection:
+    """Pick the single host bond record a removal may target.
+
+    Ownership is matched on the adapter's MAC address, because that is what
+    both sides actually hold: a local scanner's ``source`` IS its adapter MAC,
+    while ``adapter`` is the interface name (``hci0``). Comparing the interface
+    name against ``Device1.Adapter``'s MAC never matches, and a near-miss here
+    is not harmless - it would silently fall through to "whichever record came
+    first", which on a two-adapter host is the wrong bond.
+
+    Returning a typed status rather than an optional record is deliberate: a
+    caller cannot accidentally treat "could not identify one" as "use any".
+    """
+    if not inventory.readable:
+        return BondSelection(status=BondSelectionStatus.UNREADABLE)
+
+    bonded = inventory.bonded_records
+    if not bonded:
+        return BondSelection(status=BondSelectionStatus.NO_BOND)
+
+    wanted_mac = (owner_source or "").upper()
+    if wanted_mac:
+        matches = [
+            record
+            for record in bonded
+            if (record.adapter_address or "").upper() == wanted_mac
+        ]
+        if len(matches) == 1:
+            return BondSelection(status=BondSelectionStatus.EXACT, record=matches[0])
+        if len(matches) > 1:
+            return BondSelection(status=BondSelectionStatus.AMBIGUOUS)
+
+    if owner_adapter:
+        # Secondary: BlueZ adapter object paths end in the interface name.
+        suffix = f"/{owner_adapter}"
+        matches = [
+            record for record in bonded if record.adapter_path.endswith(suffix)
+        ]
+        if len(matches) == 1:
+            return BondSelection(status=BondSelectionStatus.EXACT, record=matches[0])
+        if len(matches) > 1:
+            return BondSelection(status=BondSelectionStatus.AMBIGUOUS)
+
+    if len(bonded) == 1:
+        # No provenance, but the host holds exactly one bond for this exact
+        # address, so there is nothing to choose between. The caller still has
+        # to decide whether it is willing to act without provenance.
+        return BondSelection(
+            status=(
+                BondSelectionStatus.EXACT
+                if not (owner_source or owner_adapter)
+                else BondSelectionStatus.UNKNOWN_OWNER
+            ),
+            record=bonded[0],
+        )
+
+    # Several bonds and nothing that names one of them. Never guess.
+    return BondSelection(status=BondSelectionStatus.AMBIGUOUS)
+
+
 @dataclass(frozen=True, slots=True)
 class BondRemovalResult:
     """What a host-side unpair actually achieved."""
