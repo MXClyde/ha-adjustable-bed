@@ -71,7 +71,6 @@ from .const import (
     CONNECTION_PROFILES,
     DEFAULT_CONNECTION_PROFILE,
     grants_one_connection_per_pairing_window,
-    requires_pairing_after_service_discovery,
 )
 from .setup_operation import OperationOutcome, OperationResult, SetupAction
 
@@ -162,9 +161,10 @@ async def async_recovery_offer(
         )
 
     inventory = await async_read_local_bonds(address)
-    selection = select_local_bond(
-        inventory, owner_source=owner.source, owner_adapter=owner.adapter
-    )
+    # The source is the adapter's stable MAC address. Once evidence records it,
+    # never fall back to the reusable interface name (for example hci0), which
+    # may belong to a replacement adapter now.
+    selection = select_local_bond(inventory, owner_source=owner.source)
     if selection.status is BondSelectionStatus.UNREADABLE:
         return RecoveryOffer(eligibility=RecoveryEligibility.UNREADABLE, owner=owner)
     if selection.status is BondSelectionStatus.NO_BOND:
@@ -196,7 +196,6 @@ async def async_recover_local_bond(
     report_action: Callable[[SetupAction], None] | None = None,
     report_progress: Callable[[float], None] | None = None,
     report_path: Callable[[ConnectionPath | None], None] | None = None,
-    track_client: Callable[[BleakClient | None], None] | None = None,
 ) -> OperationResult:
     """Remove one exact host bond, pair again, and prove the new bond.
 
@@ -222,7 +221,6 @@ async def async_recover_local_bond(
             report_action=report_action,
             report_progress=report_progress,
             report_path=report_path,
-            track_client=track_client,
             state=state,
         ),
         eager_start=False,
@@ -264,7 +262,6 @@ async def _async_recovery_transaction(
     report_action: Callable[[SetupAction], None] | None,
     report_progress: Callable[[float], None] | None,
     report_path: Callable[[ConnectionPath | None], None] | None,
-    track_client: Callable[[BleakClient | None], None] | None,
     state: _RecoveryState,
 ) -> OperationResult:
     """Run one serialized, source-pinned recovery transaction."""
@@ -318,11 +315,9 @@ async def _async_recovery_transaction(
             bed_type=bed_type,
             protocol_variant=protocol_variant,
             pair=False,
-            pair_after_discovery=False,
             operation="stale_bond_recovery_preflight",
             report_action=_report,
             report_path=report_path,
-            track_client=track_client,
         )
         if isinstance(current_bond, OperationResult):
             return current_bond
@@ -374,10 +369,6 @@ async def _async_recovery_transaction(
                 payload=removal,
             )
 
-        pair_after_discovery = bool(
-            bed_type
-            and requires_pairing_after_service_discovery(bed_type, protocol_variant)
-        )
         bond = await _async_connect_and_verify(
             hass,
             address=address,
@@ -386,12 +377,10 @@ async def _async_recovery_transaction(
             target_source=target_source,
             bed_type=bed_type,
             protocol_variant=protocol_variant,
-            pair=not pair_after_discovery,
-            pair_after_discovery=pair_after_discovery,
+            pair=True,
             operation="stale_bond_recovery",
             report_action=_report,
             report_path=report_path,
-            track_client=track_client,
         )
         if isinstance(bond, OperationResult):
             return OperationResult(
@@ -422,11 +411,9 @@ async def _async_connect_and_verify(
     bed_type: str | None,
     protocol_variant: str | None,
     pair: bool,
-    pair_after_discovery: bool,
     operation: str,
     report_action: Callable[[SetupAction], None],
     report_path: Callable[[ConnectionPath | None], None] | None,
-    track_client: Callable[[BleakClient | None], None] | None,
 ) -> BondEvidence | OperationResult:
     """Connect through the intended host scanner and verify authentication."""
     from bleak import BleakClient
@@ -441,11 +428,11 @@ async def _async_connect_and_verify(
             address,
             max_attempts=1,
             timeout=CONNECTION_PROFILES[DEFAULT_CONNECTION_PROFILE].connection_timeout,
-            pair=pair,
+            # HaBleakClientWrapper may reroute a scanner-specific BLEDevice
+            # during connect. Pair only after the resulting source is proven.
+            pair=False,
             use_services_cache=False,
         )
-        if track_client is not None:
-            track_client(client)
 
         actual_source = client_source(client)
         path = async_path_for_source(hass, actual_source) if actual_source else None
@@ -461,7 +448,7 @@ async def _async_connect_and_verify(
                 detail="unexpected_connection_source",
             )
 
-        if pair_after_discovery:
+        if pair:
             report_action(SetupAction.PAIRING)
             await client.pair()
 
@@ -486,8 +473,6 @@ async def _async_connect_and_verify(
                 await asyncio.shield(client.disconnect())
             except Exception:  # noqa: BLE001 - cleanup must not mask the result
                 _LOGGER.debug("Disconnect after recovery failed", exc_info=True)
-            if track_client is not None:
-                track_client(None)
 
 
 def bond_path(bond: Any) -> ConnectionPath | None:

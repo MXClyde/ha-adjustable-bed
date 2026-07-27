@@ -34,7 +34,11 @@ from custom_components.adjustable_bed.bond_verification import (
     BondOwner,
     BondVerificationStatus,
 )
-from custom_components.adjustable_bed.const import BED_TYPE_LEGGETT_GEN2, BED_TYPE_OKIMAT
+from custom_components.adjustable_bed.const import (
+    BED_TYPE_LEGGETT_GEN2,
+    BED_TYPE_OKIMAT,
+    BED_TYPE_OKIN_CST,
+)
 from custom_components.adjustable_bed.setup_operation import OperationOutcome
 
 TEST_ADDRESS = "AA:BB:CC:DD:EE:FF"
@@ -164,6 +168,20 @@ class TestWhenRecoveryIsOffered:
             )
         assert offer.eligibility == RecoveryEligibility.NO_VERIFIER
 
+    async def test_okin_cst_has_no_destructive_offer(
+        self, hass: HomeAssistant
+    ) -> None:
+        """Its auth-gated read never positively verifies a replacement bond."""
+        with _patch_inventory(_record()):
+            offer = await async_recovery_offer(
+                hass,
+                address=TEST_ADDRESS,
+                issue_data=_local_auth_evidence(),
+                bed_type=BED_TYPE_OKIN_CST,
+                protocol_variant=None,
+            )
+        assert offer.eligibility == RecoveryEligibility.NO_VERIFIER
+
     async def test_a_legacy_issue_without_evidence_is_not_eligible(
         self, hass: HomeAssistant
     ) -> None:
@@ -217,6 +235,20 @@ class TestWhenRecoveryIsOffered:
                 protocol_variant=None,
             )
         assert not offer.is_eligible
+
+    async def test_replaced_adapter_does_not_inherit_the_interface_match(
+        self, hass: HomeAssistant
+    ) -> None:
+        """A new adapter on hci0 must not inherit evidence about the old MAC."""
+        with _patch_inventory(_record("AA:AA:AA:AA:AA:AA", adapter="hci0")):
+            offer = await async_recovery_offer(
+                hass,
+                address=TEST_ADDRESS,
+                issue_data=_local_auth_evidence(),
+                bed_type=BED_TYPE_OKIMAT,
+                protocol_variant=None,
+            )
+        assert offer.eligibility == RecoveryEligibility.AMBIGUOUS
 
     def test_evidence_predicate_needs_both_halves(self) -> None:
         assert evidence_is_local_auth_failure(_local_auth_evidence())
@@ -291,6 +323,58 @@ class TestRunningRecovery:
         assert result.detail == "unexpected_connection_source"
         removal.assert_not_called()
 
+    async def test_a_different_recovery_source_is_rejected_before_pairing(
+        self, hass: HomeAssistant
+    ) -> None:
+        """Rerouting after removal must not create a bond on a proxy."""
+        fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
+        removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=_record())
+        preflight_client = _client()
+        recovery_client = _client("proxy-source")
+        with (
+            patch(
+                f"{_RECOVERY}.async_wait_for_advertisement",
+                AsyncMock(return_value=(fresh, MagicMock())),
+            ),
+            patch(
+                f"{_RECOVERY}.async_remove_local_bond",
+                AsyncMock(return_value=removed),
+            ),
+            patch(
+                "bleak_retry_connector.establish_connection",
+                AsyncMock(side_effect=[preflight_client, recovery_client]),
+            ),
+            patch(
+                f"{_RECOVERY}.async_path_for_source",
+                side_effect=[
+                    _local_path(),
+                    ConnectionPath(
+                        source="proxy-source", transport=TransportClass.PROXY
+                    ),
+                ],
+            ),
+            patch(
+                f"{_RECOVERY}.async_verify_authenticated_access",
+                AsyncMock(
+                    return_value=_bond(
+                        BondVerificationStatus.AUTH_FAILED, "preflight"
+                    )
+                ),
+            ),
+        ):
+            result = await async_recover_local_bond(
+                hass,
+                address=TEST_ADDRESS,
+                name="Bed",
+                offer=self._offer(),
+                bed_type=BED_TYPE_OKIMAT,
+                protocol_variant=None,
+            )
+        assert result.outcome is OperationOutcome.BOND_VERIFICATION_FAILED
+        assert result.detail == "unexpected_connection_source"
+        preflight_client.pair.assert_not_awaited()
+        recovery_client.pair.assert_not_awaited()
+
     async def test_a_failed_removal_stops_before_pairing(
         self, hass: HomeAssistant
     ) -> None:
@@ -334,7 +418,8 @@ class TestRunningRecovery:
         """The old bond is gone; claiming success would close a live problem."""
         fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
         removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=_record())
-        client = _client()
+        preflight_client = _client()
+        recovery_client = _client()
         with (
             patch(
                 f"{_RECOVERY}.async_wait_for_advertisement",
@@ -345,7 +430,7 @@ class TestRunningRecovery:
             ),
             patch(
                 "bleak_retry_connector.establish_connection",
-                AsyncMock(return_value=client),
+                AsyncMock(side_effect=[preflight_client, recovery_client]),
             ),
             patch(
                 f"{_RECOVERY}.async_verify_authenticated_access",
@@ -367,14 +452,16 @@ class TestRunningRecovery:
                 protocol_variant=None,
             )
         assert result.outcome is OperationOutcome.BOND_VERIFICATION_FAILED
-        assert client.disconnect.await_count == 2
+        preflight_client.disconnect.assert_awaited_once_with()
+        recovery_client.disconnect.assert_awaited_once_with()
 
     async def test_a_verified_new_bond_succeeds_and_carries_its_owner(
         self, hass: HomeAssistant
     ) -> None:
         fresh = AdvertisementEvidence(status=FreshnessStatus.FRESH, age_seconds=1.0)
         removed = BondRemovalResult(status=BondRemovalStatus.REMOVED, record=_record())
-        client = _client()
+        preflight_client = _client()
+        recovery_client = _client()
         with (
             patch(
                 f"{_RECOVERY}.async_wait_for_advertisement",
@@ -385,7 +472,7 @@ class TestRunningRecovery:
             ),
             patch(
                 "bleak_retry_connector.establish_connection",
-                AsyncMock(return_value=client),
+                AsyncMock(side_effect=[preflight_client, recovery_client]),
             ),
             patch(
                 f"{_RECOVERY}.async_verify_authenticated_access",
@@ -409,6 +496,8 @@ class TestRunningRecovery:
         assert result.succeeded
         assert result.path is not None
         assert result.path.transport is TransportClass.LOCAL
+        preflight_client.pair.assert_not_awaited()
+        recovery_client.pair.assert_awaited_once_with()
 
     async def test_reconnect_uses_a_device_resolved_after_removal(
         self, hass: HomeAssistant

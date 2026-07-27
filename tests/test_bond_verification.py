@@ -25,6 +25,7 @@ from custom_components.adjustable_bed.bond_verification import (
 from custom_components.adjustable_bed.const import (
     BED_TYPE_LINAK,
     BED_TYPE_OKIMAT,
+    BED_TYPE_OKIN_CST,
 )
 
 _LOCAL = ConnectionPath(source="hci0", transport=TransportClass.LOCAL, adapter="hci0")
@@ -50,6 +51,9 @@ class TestVerifierApplicability:
     def test_a_bed_that_never_bonds_has_no_verifier(self) -> None:
         """A successful read on an unbonded protocol proves nothing at all."""
         assert not has_evidence_backed_verifier(BED_TYPE_LINAK, None)
+
+    def test_okin_cst_has_no_positive_verifier(self) -> None:
+        assert not has_evidence_backed_verifier(BED_TYPE_OKIN_CST, None)
 
     async def test_no_verifier_reports_unsupported_without_reading(self) -> None:
         client = _client()

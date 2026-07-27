@@ -36,7 +36,12 @@ from typing import TYPE_CHECKING, Any
 
 from .ble_auth import is_ble_authentication_error
 from .bluetooth_transport import ConnectionPath, TransportClass
-from .const import DEVICE_INFO_CHARS, DEVICE_INFO_READ_TIMEOUT, requires_pairing
+from .const import (
+    BED_TYPE_OKIN_CST,
+    DEVICE_INFO_CHARS,
+    DEVICE_INFO_READ_TIMEOUT,
+    requires_pairing,
+)
 
 if TYPE_CHECKING:
     from bleak import BleakClient
@@ -139,7 +144,11 @@ def has_evidence_backed_verifier(bed_type: str | None, protocol_variant: str | N
     is gated at all, so a successful read would prove nothing and must not be
     dressed up as verification.
     """
-    return requires_pairing(bed_type or "", protocol_variant)
+    # This receiver never answers the Device Information read, even when bonded,
+    # so recovery could destroy its old bond but could never prove a replacement.
+    return bed_type != BED_TYPE_OKIN_CST and requires_pairing(
+        bed_type or "", protocol_variant
+    )
 
 
 async def async_verify_authenticated_access(

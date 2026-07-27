@@ -57,6 +57,36 @@ async def test_confirm_step_shows_form_first(hass: HomeAssistant) -> None:
     assert result["description_placeholders"]["address"] == TEST_ADDRESS
 
 
+async def test_one_link_proxy_failure_keeps_the_guided_pairing_flow(
+    hass: HomeAssistant,
+) -> None:
+    """A live coordinator can safely pair the one link already held via a proxy."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_ADDRESS: TEST_ADDRESS,
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_LEGGETT_GEN2,
+        },
+        unique_id=TEST_ADDRESS,
+        entry_id="repair_gen2_proxy_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(
+        TEST_ADDRESS,
+        TEST_NAME,
+        entry.entry_id,
+        issue_data={"evidence_transport": "proxy", "evidence_source": "proxy-source"},
+    )
+    flow.hass = hass
+
+    result = await flow.async_step_init()
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "confirm"
+
+
 async def test_confirm_step_resolves_on_successful_pair(hass: HomeAssistant) -> None:
     """Submitting the form resolves the issue when pairing succeeds."""
     flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, None)

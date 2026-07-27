@@ -25,6 +25,7 @@ from .address_lock import async_get_connect_lock
 from .ble_auth import is_ble_authentication_error
 from .bluetooth_transport import TransportClass
 from .bond_recovery import (
+    RecoveryEligibility,
     RecoveryOffer,
     async_recover_local_bond,
     async_recovery_offer,
@@ -110,6 +111,8 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
         )
         if self._offer.is_eligible:
             return await self.async_step_stale_bond_confirm()
+        if self._offer.eligibility == RecoveryEligibility.KEEPS_FIRST_LINK:
+            return await self.async_step_confirm()
         if self._issue_data.get("evidence_transport") == TransportClass.PROXY.value:
             # The bond lives on a proxy. Nothing here can clear it, and offering
             # a host-side action would only look like it had.
@@ -214,7 +217,6 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
             report_action=self.async_report_action,
             report_progress=self.async_report_progress,
             report_path=self.async_report_path,
-            track_client=self.async_track_client,
         )
 
     async def async_step_stale_bond_progress(
