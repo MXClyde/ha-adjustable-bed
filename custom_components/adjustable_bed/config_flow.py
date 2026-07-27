@@ -2795,7 +2795,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
     async def _async_pair_and_classify(self, address: str | None, mode: str) -> OperationResult:
         """Connect, bond if asked, verify, and turn all of it into one outcome."""
         try:
-            evidence = await self._attempt_pairing(address, request_bond=mode != "verify_existing")
+            evidence = await self._attempt_pairing(
+                address,
+                request_bond=mode != "verify_existing",
+                track_for_flow_cleanup=mode != "replace_local",
+            )
         except BondRouteMismatchError as err:
             _LOGGER.info("Could not verify the existing bond for %s: %s", address, err)
             return OperationResult(
@@ -2960,7 +2964,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         )
 
     async def _attempt_pairing(
-        self, address: str | None, *, request_bond: bool = True
+        self,
+        address: str | None,
+        *,
+        request_bond: bool = True,
+        track_for_flow_cleanup: bool = True,
     ) -> BondEvidence:
         """Pair using the protocol's required connection ordering, and verify it.
 
@@ -2968,6 +2976,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         connection is not a bond, and ``client.pair()`` returning is not a bond
         either. Only an authentication-gated operation that succeeded proves one
         (issue #461).
+
+        Shielded bond replacement owns its client within the detached task, so
+        flow cleanup must not disconnect it while the replacement is still
+        running. Ordinary attempts are tracked so cancelling their flow closes
+        the connection promptly.
 
         The bed must have advertised recently before anything is attempted.
         Without that check a bed that is asleep or unplugged still looks present
@@ -3059,7 +3072,8 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 timeout=CONNECTION_PROFILES[DEFAULT_CONNECTION_PROFILE].connection_timeout,
                 **connect_kwargs,
             )
-            self.async_track_client(client)
+            if track_for_flow_cleanup:
+                self.async_track_client(client)
             try:
                 # The routed transport is only knowable now, and it decides who
                 # owns any bond this attempt creates.

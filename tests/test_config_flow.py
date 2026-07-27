@@ -4681,6 +4681,61 @@ async def test_bond_replacement_completes_even_if_the_flow_goes_away(
     assert paired.is_set()
 
 
+async def test_flow_cleanup_does_not_disconnect_a_running_bond_replacement(
+    hass: HomeAssistant,
+) -> None:
+    """The detached replacement task owns its client until verification ends."""
+    flow = _pairing_flow(hass)
+    flow._pairing_remove_record = _bond_record()
+    flow._pairing_mode = "replace_local"
+    client = MagicMock()
+    client.disconnect = AsyncMock()
+    verification_started = asyncio.Event()
+    finish_verification = asyncio.Event()
+
+    async def verify(*_args: Any, **_kwargs: Any) -> BondEvidence:
+        verification_started.set()
+        await finish_verification.wait()
+        return _verified_evidence()
+
+    with (
+        _patch_pairing_gate(),
+        _patch_inventory(
+            LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
+            AsyncMock(return_value=BondRemovalResult(status=BondRemovalStatus.REMOVED)),
+        ),
+        patch(
+            "bleak_retry_connector.establish_connection",
+            AsyncMock(return_value=client),
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.client_source",
+            return_value="hci0",
+        ),
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_verify_authenticated_access",
+            side_effect=verify,
+        ),
+    ):
+        worker = hass.async_create_task(flow._async_pairing_worker())
+        await asyncio.wait_for(verification_started.wait(), timeout=1)
+        worker.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker
+
+        flow.async_remove()
+        await asyncio.sleep(0)
+        client.disconnect.assert_not_awaited()
+
+        finish_verification.set()
+        await hass.async_block_till_done()
+
+    client.disconnect.assert_awaited_once()
+
+
 async def test_a_confirmed_unpair_persists_without_the_result_screen(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, enable_custom_integrations
 ) -> None:
