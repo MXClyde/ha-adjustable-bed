@@ -2690,9 +2690,18 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             # first would leave a sleeping bed with no bond and no way to make a
             # new one until someone walks over to it.
             self.async_report_action(SetupAction.LOCATING)
+            preferred_adapter = self._manual_data.get(
+                CONF_PREFERRED_ADAPTER, ADAPTER_AUTO
+            )
+            source = (
+                preferred_adapter
+                if preferred_adapter and preferred_adapter != ADAPTER_AUTO
+                else None
+            )
             evidence, _device = await async_wait_for_advertisement(
                 self.hass,
                 address or "",
+                source=source,
                 wait_timeout=ADVERTISEMENT_WAIT_SECONDS,
                 on_progress=self.async_report_progress,
             )
@@ -2749,6 +2758,16 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 detail="missing_address",
             )
         async with async_get_connect_lock(self.hass, address):
+            current = await async_read_local_bonds(address)
+            if current.sole_bond != record:
+                _LOGGER.warning(
+                    "Not replacing the bond for %s: the confirmed BlueZ record changed",
+                    address,
+                )
+                return OperationResult(
+                    outcome=OperationOutcome.UNPAIR_FAILED,
+                    detail="bond_changed_before_removal",
+                )
             self.async_report_action(SetupAction.UNPAIRING)
             removal = await async_remove_local_bond(record)
             if not removal.succeeded:

@@ -3940,6 +3940,9 @@ async def test_replacing_a_bond_that_cannot_be_removed_does_not_pair(
             "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
             AsyncMock(return_value=(fresh, MagicMock())),
         ),
+        _patch_inventory(
+            LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+        ),
         patch(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
             AsyncMock(return_value=failed),
@@ -3971,6 +3974,9 @@ async def test_unverified_bond_removal_does_not_claim_the_bond_remains(
             "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
             AsyncMock(return_value=(fresh, MagicMock())),
         ),
+        _patch_inventory(
+            LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+        ),
         patch(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
             AsyncMock(return_value=unconfirmed),
@@ -3992,11 +3998,13 @@ async def test_a_sleeping_bed_never_loses_its_bond_to_a_replacement(
     flow = _pairing_flow(hass)
     flow._pairing_remove_record = _bond_record()
     flow._pairing_mode = "replace_local"
+    flow._manual_data[CONF_PREFERRED_ADAPTER] = "11:22:33:44:55:66"
     stale = AdvertisementEvidence(status=FreshnessStatus.STALE, age_seconds=600.0)
+    wait = AsyncMock(return_value=(stale, None))
     with (
         patch(
             "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
-            AsyncMock(return_value=(stale, None)),
+            wait,
         ),
         patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
         patch.object(flow, "_attempt_pairing") as attempt,
@@ -4005,6 +4013,7 @@ async def test_a_sleeping_bed_never_loses_its_bond_to_a_replacement(
 
     removal.assert_not_called()
     attempt.assert_not_called()
+    assert wait.await_args.kwargs["source"] == "11:22:33:44:55:66"
     assert result.outcome is OperationOutcome.NOT_ADVERTISING
 
 
@@ -4085,6 +4094,9 @@ async def test_bond_replacement_holds_the_address_lock_through_pairing(
         patch(
             "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
             AsyncMock(return_value=(fresh, MagicMock())),
+        ),
+        _patch_inventory(
+            LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
         ),
         patch(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
@@ -4649,6 +4661,9 @@ async def test_bond_replacement_completes_even_if_the_flow_goes_away(
             "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
             AsyncMock(return_value=(fresh, MagicMock())),
         ),
+        _patch_inventory(
+            LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+        ),
         patch(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
             AsyncMock(return_value=removed),
@@ -4718,6 +4733,34 @@ async def test_replacement_confirmation_revalidates_the_exact_bond(
     start.assert_not_called()
 
 
+async def test_replacement_revalidates_the_bond_under_the_address_lock(
+    hass: HomeAssistant,
+) -> None:
+    """A changed BlueZ record must never inherit an earlier confirmation."""
+    flow = _pairing_flow(hass)
+    address = flow._manual_data[CONF_ADDRESS]
+    lock = async_get_connect_lock(hass, address)
+
+    async def changed_inventory(_address: str) -> LocalBondInventory:
+        assert lock.locked()
+        return LocalBondInventory(status=BluezReadStatus.OK)
+
+    with (
+        patch(
+            "custom_components.adjustable_bed.config_flow.async_read_local_bonds",
+            AsyncMock(side_effect=changed_inventory),
+        ),
+        patch("custom_components.adjustable_bed.config_flow.async_remove_local_bond") as removal,
+        patch.object(flow, "_attempt_pairing") as attempt,
+    ):
+        result = await flow._async_replace_bond(address, _bond_record())
+
+    removal.assert_not_called()
+    attempt.assert_not_called()
+    assert result.outcome is OperationOutcome.UNPAIR_FAILED
+    assert result.detail == "bond_changed_before_removal"
+
+
 async def test_replacement_holds_the_address_lock_until_pairing_finishes(
     hass: HomeAssistant,
 ) -> None:
@@ -4747,6 +4790,9 @@ async def test_replacement_holds_the_address_lock_until_pairing_finishes(
             "custom_components.adjustable_bed.config_flow.async_get_connect_lock",
             address_lock,
         ),
+        _patch_inventory(
+            LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+        ),
         patch(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
             side_effect=remove,
@@ -4769,6 +4815,9 @@ async def test_rpc_failure_leaves_bond_removal_unconfirmed(
         error="timed out",
     )
     with (
+        _patch_inventory(
+            LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
+        ),
         patch(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
             AsyncMock(return_value=uncertain),
