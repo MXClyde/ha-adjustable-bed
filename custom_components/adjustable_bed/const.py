@@ -2271,6 +2271,8 @@ BEDS_WITH_DISCONNECT_AFTER_COMMAND_DEFAULT_DISABLED: Final = (
             BED_TYPE_JIECANG,
             BED_TYPE_KAIDI,
             BED_TYPE_OKIN_CB24,
+            BED_TYPE_OKIN_UUID,
+            BED_TYPE_SLEEPYS_BOX25,
             BED_TYPE_VIBRADORM,
         }
     )

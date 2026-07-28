@@ -15,11 +15,13 @@ from types import SimpleNamespace
 import pytest
 from homeassistant.helpers.device_registry import DeviceInfo
 
+from custom_components.adjustable_bed.beds.okin_cb24 import OkinCB24Controller
 from custom_components.adjustable_bed.beds.sbi import SBIController
 from custom_components.adjustable_bed.beds.sleep_number import SleepNumberController
 from custom_components.adjustable_bed.const import (
     BED_TYPE_LINAK,
     BED_TYPE_OCTO,
+    BED_TYPE_OKIN_CB24,
     BED_TYPE_SBI,
     BED_TYPE_SLEEP_NUMBER,
     CONF_BED_TYPE,
@@ -613,16 +615,42 @@ class TestSingleAddressCoordinator:
             (DOMAIN, "AA:BB:CC:DD:EE:50")
         }
 
-    def test_inner_position_updates_relay_to_each_side(self):
-        coordinator = self._coordinator(BED_TYPE_SBI, SBIController)
+    def test_shared_cb24_position_updates_relay_to_each_side(self):
+        coordinator = self._coordinator(BED_TYPE_OKIN_CB24, OkinCB24Controller)
         left = coordinator.children[SIDE_LEFT]
-        updates = []
-        left.register_position_callback(updates.append)
+        right = coordinator.children[SIDE_RIGHT]
+        left_updates = []
+        right_updates = []
+        left.register_position_callback(left_updates.append)
+        right.register_position_callback(right_updates.append)
 
         coordinator._single_inner.update_positions({"back": 42.0})
 
         assert left.position_data == {"back": 42.0}
-        assert updates == [{"back": 42.0}]
+        assert right.position_data == {"back": 42.0}
+        assert left_updates == [{"back": 42.0}]
+        assert right_updates == [{"back": 42.0}]
+
+    async def test_sbi_position_updates_remain_side_scoped(self):
+        coordinator = self._coordinator(BED_TYPE_SBI, SBIController)
+        left = coordinator.children[SIDE_LEFT]
+        right = coordinator.children[SIDE_RIGHT]
+        left_updates = []
+        right_updates = []
+        left.register_position_callback(left_updates.append)
+        right.register_position_callback(right_updates.append)
+
+        async def update_position(_controller):
+            coordinator._single_inner.update_positions({"back": 42.0})
+
+        await coordinator.async_execute_controller_command(
+            update_position, side=SIDE_LEFT
+        )
+
+        assert left.position_data == {"back": 42.0}
+        assert right.position_data == {}
+        assert left_updates == [{"back": 42.0}]
+        assert right_updates == []
 
 
 class TestConnectionModeResolution:

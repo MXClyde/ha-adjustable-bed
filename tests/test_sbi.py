@@ -392,6 +392,16 @@ class TestSBIController:
 
         assert coordinator.controller.supports_position_feedback is True
 
+    async def test_may_seek_with_retained_position(
+        self,
+        hass: HomeAssistant,
+        mock_sbi_config_entry,
+    ) -> None:
+        """SBI cannot explicitly refresh notification-only position feedback."""
+        coordinator = AdjustableBedCoordinator(hass, mock_sbi_config_entry)
+
+        assert SBIController(coordinator).may_seek_with_retained_position
+
 
 # -----------------------------------------------------------------------------
 # Movement Tests

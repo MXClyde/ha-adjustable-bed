@@ -212,6 +212,11 @@ class SBIController(BedController):
         return True
 
     @property
+    def may_seek_with_retained_position(self) -> bool:
+        """Allow seeks when SBI feedback is only available by notification."""
+        return True
+
+    @property
     def head_angle(self) -> int:
         """Get current head angle in degrees (0-60)."""
         return self._head_angle

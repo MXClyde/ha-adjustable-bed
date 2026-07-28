@@ -27,6 +27,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 
 from .const import (
+    BED_TYPE_OKIN_CB24,
     BED_TYPE_SLEEP_NUMBER,
     CONF_BED_TYPE,
     CONF_PAIR_CONNECTION_MODE,
@@ -633,13 +634,16 @@ class SingleAddressSideCoordinator:
         object.__setattr__(self, "_single_position_data", {})
         object.__setattr__(self, "_single_position_callbacks", set())
         # CB24 reports one shared set of axes, so reconnect hydration can relay
-        # it to both views. Sleep Number uses the same axis keys per side, where
-        # relaying an unbound response would overwrite the other side's state.
-        if inner.bed_type != BED_TYPE_SLEEP_NUMBER:
+        # it to both views. Other single-address protocols use the same axis
+        # keys per side, where an unbound response would overwrite the other
+        # side's state.
+        if inner.bed_type == BED_TYPE_OKIN_CB24:
             object.__setattr__(
                 self,
                 "_single_unregister_position_callback",
-                inner.register_position_callback(lambda _positions: self._sync_position_state()),
+                inner.register_position_callback(
+                    lambda _positions: self._sync_position_state()
+                ),
             )
 
     def __getattr__(self, name: str) -> Any:
