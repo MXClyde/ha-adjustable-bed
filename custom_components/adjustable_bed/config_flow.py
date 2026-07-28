@@ -2636,7 +2636,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                             user_input,
                             bed_type,
                             protocol_variant,
-                            rendered_default=default_disconnect_after_command,
+                            rendered_default=(
+                                default_disconnect_after_command
+                                if preselected_bed_type
+                                else None
+                            ),
                         ),
                         CONF_IDLE_DISCONNECT_SECONDS: user_input.get(
                             CONF_IDLE_DISCONNECT_SECONDS, DEFAULT_IDLE_DISCONNECT_SECONDS
@@ -2735,13 +2739,17 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     CONF_MOTOR_PULSE_DELAY_MS, default=str(default_pulse_delay)
                 ): TextSelector(TextSelectorConfig()),
                 vol.Optional(
-                    CONF_DISCONNECT_AFTER_COMMAND, default=default_disconnect_after_command
-                ): bool,
-                vol.Optional(
                     CONF_IDLE_DISCONNECT_SECONDS, default=DEFAULT_IDLE_DISCONNECT_SECONDS
                 ): vol.All(vol.Coerce(int), vol.Range(min=10, max=300)),
             }
         )
+        # The manual form picks the bed type in the same step, so its static
+        # schema cannot render the selected protocol's default reliably. Leave
+        # this field absent and derive the default after the user selects it.
+        if preselected_bed_type:
+            schema_dict[vol.Optional(
+                CONF_DISCONNECT_AFTER_COMMAND, default=default_disconnect_after_command
+            )] = bool
         if preselected_bed_type in MALOUF_BED_TYPES:
             _add_malouf_schema_fields(schema_dict)
         if preselected_bed_type == BED_TYPE_OKIN_CB24:

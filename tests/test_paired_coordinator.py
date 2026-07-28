@@ -495,6 +495,7 @@ class SingleAddressInner:
         self.motor_pulse_count = 1
         self.motor_pulse_delay_ms = 1
         self.position_data = {}
+        self._position_callbacks = set()
 
     @property
     def client(self):
@@ -514,6 +515,19 @@ class SingleAddressInner:
 
     def register_connection_state_callback(self, _callback):
         return lambda: None
+
+    def register_position_callback(self, callback):
+        self._position_callbacks.add(callback)
+
+        def unregister():
+            self._position_callbacks.discard(callback)
+
+        return unregister
+
+    def update_positions(self, positions):
+        self.position_data.update(positions)
+        for callback in list(self._position_callbacks):
+            callback(self.position_data)
 
     async def async_connect(self):
         self.is_connected = True
@@ -597,6 +611,17 @@ class TestSingleAddressCoordinator:
         assert coordinator.device_info["identifiers"] == {
             (DOMAIN, "AA:BB:CC:DD:EE:50")
         }
+
+    def test_inner_position_updates_relay_to_each_side(self):
+        coordinator = self._coordinator(BED_TYPE_SBI, SBIController)
+        left = coordinator.children[SIDE_LEFT]
+        updates = []
+        left.register_position_callback(updates.append)
+
+        coordinator._single_inner.update_positions({"back": 42.0})
+
+        assert left.position_data == {"back": 42.0}
+        assert updates == [{"back": 42.0}]
 
 
 class TestConnectionModeResolution:

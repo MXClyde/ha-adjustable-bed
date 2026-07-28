@@ -1326,10 +1326,12 @@ class TestBluetoothDiscoveryFlow:
         """Beds that must hold the link open keep the option off; others get it on."""
         from custom_components.adjustable_bed.const import (
             BED_TYPE_JENSEN,
+            BED_TYPE_JIECANG,
             BED_TYPE_LEGGETT_GEN2,
             BED_TYPE_LEGGETT_PLATT,
             BED_TYPE_LINAK,
             BED_TYPE_SLEEP_NUMBER_MCR,
+            BED_TYPE_VIBRADORM,
             LEGGETT_VARIANT_GEN2,
             VARIANT_AUTO,
             disconnect_after_command_default_enabled,
@@ -1339,6 +1341,8 @@ class TestBluetoothDiscoveryFlow:
         assert disconnect_after_command_default_enabled(BED_TYPE_LEGGETT_GEN2, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_SLEEP_NUMBER_MCR, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_JENSEN, None) is False
+        assert disconnect_after_command_default_enabled(BED_TYPE_JIECANG, None) is False
+        assert disconnect_after_command_default_enabled(BED_TYPE_VIBRADORM, None) is False
         # An umbrella type resolves through its explicit variant.
         assert (
             disconnect_after_command_default_enabled(BED_TYPE_LEGGETT_PLATT, LEGGETT_VARIANT_GEN2)
@@ -2391,10 +2395,9 @@ class TestManualFlow:
         assert result["data"][CONF_ADDRESS] == "11:22:33:44:55:66"
         assert result["data"][CONF_BED_TYPE] == BED_TYPE_LINAK
         assert result["data"][CONF_MOTOR_COUNT] == 3
-        # The form was rendered before a bed type was selected, so its visible
-        # checkbox default was off. Preserve that submitted value after Linak is
-        # chosen; equality with the old default does not prove it was untouched.
-        assert result["data"][CONF_DISCONNECT_AFTER_COMMAND] is False
+        # The initial manual form has no static checkbox default because the
+        # selected bed type decides it after submission.
+        assert result["data"][CONF_DISCONNECT_AFTER_COMMAND] is True
 
     async def test_manual_entry_malouf_collects_layout(
         self, hass: HomeAssistant, enable_custom_integrations

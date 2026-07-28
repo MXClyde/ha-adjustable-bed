@@ -2260,11 +2260,12 @@ BEDS_REQUIRING_PERSISTENT_CONNECTION: Final = frozenset(
     }
 )
 
-# Jensen tracks massage and light state inside the connection-scoped controller.
-# It can reconnect on demand, but a new entry must retain the controller by
-# default so consecutive controls keep their intended toggle and intensity state.
+# These controllers track massage or light state in the connection-scoped
+# controller. They can reconnect on demand, but a new entry must retain the
+# controller by default so consecutive controls keep their intended state.
 BEDS_WITH_DISCONNECT_AFTER_COMMAND_DEFAULT_DISABLED: Final = (
-    BEDS_REQUIRING_PERSISTENT_CONNECTION | frozenset({BED_TYPE_JENSEN})
+    BEDS_REQUIRING_PERSISTENT_CONNECTION
+    | frozenset({BED_TYPE_JENSEN, BED_TYPE_JIECANG, BED_TYPE_VIBRADORM})
 )
 
 
