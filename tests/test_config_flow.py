@@ -1391,6 +1391,17 @@ class TestBluetoothDiscoveryFlow:
 
         # Field absent from the submission: fall back to the chosen bed type.
         assert flow._disconnect_after_command_choice({}, BED_TYPE_LINAK, VARIANT_AUTO) is True
+        # When a form rendered before the bed type was selected, preserve that
+        # rendered fallback even if the selected bed has a different default.
+        assert (
+            flow._disconnect_after_command_choice(
+                {},
+                BED_TYPE_LINAK,
+                VARIANT_AUTO,
+                rendered_default=False,
+            )
+            is False
+        )
 
     async def test_explicitly_unchecking_disconnect_after_command_is_kept(
         self,
@@ -1946,6 +1957,14 @@ class TestBluetoothDiscoveryFlow:
         # Should proceed to confirm step with full bed type list available
         assert result["type"] == FlowResultType.FORM
         assert result["step_id"] == "bluetooth_confirm"
+        disconnect_marker = next(
+            marker
+            for marker in result["data_schema"].schema
+            if marker.schema == CONF_DISCONNECT_AFTER_COMMAND
+        )
+        # The low-confidence candidate would default this to True, but the form
+        # actually defaults to Auto-detect, whose conservative default is False.
+        assert disconnect_marker.default() is False
 
     async def test_bluetooth_disambiguate_creates_entry_with_selected_type(
         self,

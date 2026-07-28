@@ -161,6 +161,34 @@ def _build_diagnostic_client(services: _FakeServices) -> MagicMock:
 class TestBleDiagnosticsRunner:
     """Test enriched BLE diagnostics output."""
 
+    async def test_run_diagnostics_resumes_hydration_when_pause_raises(
+        self,
+        hass: HomeAssistant,
+    ):
+        """A partial hydration pause must be unwound when pausing raises."""
+        coordinator = MagicMock()
+        coordinator.async_pause_position_hydration = AsyncMock(
+            side_effect=RuntimeError("pause failed")
+        )
+        coordinator.resume_position_hydration = MagicMock()
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.ble_diagnostics."
+                "get_service_info_snapshots_by_address",
+                return_value=[],
+            ),
+            pytest.raises(RuntimeError, match="pause failed"),
+        ):
+            await BLEDiagnosticRunner(
+                hass,
+                "AA:BB:CC:DD:EE:FF",
+                capture_duration=0,
+                coordinator=coordinator,
+            ).run_diagnostics()
+
+        coordinator.resume_position_hydration.assert_called_once_with()
+
     async def test_run_diagnostics_enriches_detection_gatt_and_notifications(
         self,
         hass: HomeAssistant,
