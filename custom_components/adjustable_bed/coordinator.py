@@ -10,7 +10,7 @@ import random
 import time
 import traceback
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Callable, Collection, Coroutine, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -259,10 +259,20 @@ class ChildEntryView:
     def options(self) -> Mapping[str, Any]:
         return inheritable_child_fields(self._parent.options)
 
-    def persist_data(self, new_data: Mapping[str, Any]) -> None:
-        """Update this side's config in place and route it to the parent."""
+    def persist_data(
+        self,
+        new_data: Mapping[str, Any],
+        *,
+        keys: Collection[str] | None = None,
+    ) -> None:
+        """Update this side's config in place and route selected keys to the parent."""
         self._child_data = dict(new_data)
-        self._persist_cb(self._child_data)
+        persisted_data = (
+            self._child_data
+            if keys is None
+            else {key: self._child_data[key] for key in keys if key in self._child_data}
+        )
+        self._persist_cb(persisted_data)
 
     def __getattr__(self, name: str) -> Any:
         # Anything not overridden above (entry_id, title, unique_id, version,

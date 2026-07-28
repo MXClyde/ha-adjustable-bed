@@ -1670,6 +1670,11 @@ async def test_loaded_combined_repair_updates_the_child_view_and_runtime(
         assert children[SIDE_LEFT]._ble_bond_established is True
         assert children[SIDE_LEFT]._ble_bond_marker_unreliable is False
         assert coordinator.consume_internal_entry_update(entry) is True
+        raw_left = get_child(entry.data, SIDE_LEFT)
+        assert raw_left is not None
+        assert raw_left[CONF_BLE_BOND_ESTABLISHED] is True
+        assert CONF_BLE_BOND_MARKER_UNRELIABLE not in raw_left
+        assert CONF_NAME not in raw_left
     finally:
         hass.data[DOMAIN].pop(entry.entry_id, None)
 

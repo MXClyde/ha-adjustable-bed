@@ -5083,9 +5083,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
         if coordinator is None or side is None:
             return coordinator
         child_for_side = getattr(coordinator, "child_for_side", None)
-        if not callable(child_for_side):
-            return coordinator
-        return child_for_side(side) or coordinator
+        return child_for_side(side) if callable(child_for_side) else None
 
     async def async_step_remove_bond_side(
         self, user_input: dict[str, Any] | None = None

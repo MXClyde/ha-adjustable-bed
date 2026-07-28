@@ -366,7 +366,7 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
             child_entry = getattr(coordinator, "entry", None)
             persist_child_data = getattr(child_entry, "persist_data", None)
             if callable(persist_child_data):
-                persist_child_data(target_data)
+                persist_child_data(target_data, keys=RUNTIME_BOND_KEYS)
                 return True
         self.hass.config_entries.async_update_entry(entry, data=new_entry_data)
         return True

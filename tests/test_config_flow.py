@@ -54,6 +54,7 @@ from custom_components.adjustable_bed.bond_verification import (
 )
 from custom_components.adjustable_bed.config_flow import (
     AdjustableBedConfigFlow,
+    AdjustableBedOptionsFlow,
     NotAdvertisingError,
     _default_motor_count,
     _is_valid_motor_count,
@@ -4051,6 +4052,53 @@ async def test_combined_bond_removal_targets_the_selected_child(
     assert CONF_BLE_BOND_CONTEXT not in left
     assert right[CONF_BLE_BOND_ESTABLISHED] is True
     assert right[CONF_BLE_BOND_CONTEXT]["source"] == "bedroom-proxy"
+
+
+async def test_combined_bond_removal_does_not_fall_back_to_parent_coordinator(
+    hass: HomeAssistant,
+) -> None:
+    """A missing child must not make a side-specific removal lock the whole pair."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Combined bed",
+        data={
+            CONF_NAME: "Combined bed",
+            CONF_BED_TYPE: BED_TYPE_OKIMAT,
+            CONF_PAIR_ID: "pair_missing_child_coordinator",
+            CONF_PAIR_MODE: PAIR_MODE_SEPARATE_ADDRESS,
+            CONF_PAIR_MEMBER_ADDRESSES: [
+                _BONDED_ADDRESS,
+                "AA:BB:CC:DD:EE:01",
+            ],
+            CONF_PAIR_CHILDREN: [
+                {
+                    CONF_SIDE: SIDE_LEFT,
+                    CONF_ADDRESS: _BONDED_ADDRESS,
+                    CONF_BED_TYPE: BED_TYPE_OKIMAT,
+                },
+                {
+                    CONF_SIDE: SIDE_RIGHT,
+                    CONF_ADDRESS: "AA:BB:CC:DD:EE:01",
+                    CONF_BED_TYPE: BED_TYPE_OKIMAT,
+                },
+            ],
+        },
+        unique_id="pair_missing_child_coordinator",
+        entry_id="pair_missing_child_coordinator",
+        version=4,
+    )
+    entry.add_to_hass(hass)
+    flow = AdjustableBedOptionsFlow(entry)
+    flow.hass = hass
+    flow.handler = entry.entry_id
+    flow._bond_removal_side = SIDE_LEFT
+    parent_coordinator = MagicMock()
+    parent_coordinator.child_for_side.return_value = None
+
+    with _stubbed_coordinator(hass, entry.entry_id, parent_coordinator):
+        assert flow._bond_target_coordinator() is None
+
+    parent_coordinator.child_for_side.assert_called_once_with(SIDE_LEFT)
 
 
 async def test_cancelling_unpair_removes_nothing(
