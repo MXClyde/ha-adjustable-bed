@@ -628,9 +628,15 @@ class PairedBedCoordinator:
 class SingleAddressSideCoordinator:
     """Logical left/right coordinator view over one physical BLE coordinator."""
 
-    def __init__(self, inner: AdjustableBedCoordinator, side: str) -> None:
+    def __init__(
+        self,
+        inner: AdjustableBedCoordinator,
+        side: str,
+        hydration_owner: SingleAddressPairedCoordinator,
+    ) -> None:
         object.__setattr__(self, "_single_inner", inner)
         object.__setattr__(self, "_single_side", side)
+        object.__setattr__(self, "_single_hydration_owner", hydration_owner)
         object.__setattr__(self, "_single_position_data", {})
         object.__setattr__(self, "_single_position_callbacks", set())
         # CB24 reports one shared set of axes, so reconnect hydration can relay
@@ -790,6 +796,14 @@ class SingleAddressSideCoordinator:
         )
         self._sync_position_state()
 
+    async def async_pause_position_hydration(self) -> None:
+        """Pause both physical and logical hydration through the paired owner."""
+        await self._single_hydration_owner.async_pause_position_hydration()
+
+    def resume_position_hydration(self) -> None:
+        """Resume both physical and logical hydration through the paired owner."""
+        self._single_hydration_owner.resume_position_hydration()
+
     async def async_stop_command(self, **_kwargs: Any) -> None:
         self._single_inner.request_command_cancel()
 
@@ -815,10 +829,10 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
         self._single_position_hydration_task: asyncio.Task[None] | None = None
         self._single_position_hydration_pause_count = 0
         children = {
-            SIDE_LEFT: SingleAddressSideCoordinator(inner, SIDE_LEFT),
-            SIDE_RIGHT: SingleAddressSideCoordinator(inner, SIDE_RIGHT),
+            SIDE_LEFT: SingleAddressSideCoordinator(inner, SIDE_LEFT, self),
+            SIDE_RIGHT: SingleAddressSideCoordinator(inner, SIDE_RIGHT, self),
         }
-        self._single_both = SingleAddressSideCoordinator(inner, SIDE_BOTH)
+        self._single_both = SingleAddressSideCoordinator(inner, SIDE_BOTH, self)
         super().__init__(
             hass,
             entry,

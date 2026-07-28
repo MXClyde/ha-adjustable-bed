@@ -3365,6 +3365,16 @@ class AdjustableBedCoordinator:
                         for attempt in range(
                             1, _INITIAL_POSITION_READ_MAX_ATTEMPTS + 1
                         ):
+                            # A command that established this connection may
+                            # have refreshed every axis while hydration waited
+                            # for the command lock. Avoid entering the query
+                            # path, which would reconnect a bed that has since
+                            # disconnected after that command.
+                            if all(
+                                self._position_is_current(axis)
+                                for axis in expected_axes
+                            ):
+                                return
 
                             async def _read_initial_positions(
                                 controller: BedController,

@@ -643,6 +643,7 @@ class TestSingleAddressCoordinator:
 
     async def test_sleep_number_diagnostics_pause_logical_hydration(self):
         coordinator = self._coordinator(BED_TYPE_SLEEP_NUMBER, SleepNumberController)
+        side = coordinator.children[SIDE_LEFT]
         hydrated = asyncio.Event()
 
         async def hydrate():
@@ -651,7 +652,7 @@ class TestSingleAddressCoordinator:
         for child in coordinator.children.values():
             object.__setattr__(child, "async_read_initial_positions", hydrate)
 
-        await coordinator.async_pause_position_hydration()
+        await side.async_pause_position_hydration()
         coordinator._on_child_connection_change(True)
         await asyncio.sleep(0)
 
@@ -659,7 +660,7 @@ class TestSingleAddressCoordinator:
         assert coordinator._single_position_hydration_task is None
         assert coordinator._single_inner.position_hydration_pause_count == 1
 
-        coordinator.resume_position_hydration()
+        side.resume_position_hydration()
         task = cast(
             asyncio.Task[None], coordinator._single_position_hydration_task
         )

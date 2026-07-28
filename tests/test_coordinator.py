@@ -928,6 +928,33 @@ class TestCoordinatorConnection:
         assert isinstance(result[0], asyncio.CancelledError)
         controller.prepare_for_position_read.assert_not_awaited()
 
+    async def test_initial_position_read_skips_query_after_command_refresh(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+    ) -> None:
+        """Fresh command feedback must not reconnect a disconnected bed."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._disable_angle_sensing = False
+        coordinator._position_connection_generation = 1
+        coordinator._controller = make_controller_mock(
+            position_number_specs=(
+                SimpleNamespace(position_key="back"),
+                SimpleNamespace(position_key="legs"),
+            )
+        )
+        coordinator._handle_position_update("back", 12.0)
+        coordinator._handle_position_update("legs", 4.0)
+
+        with patch.object(
+            coordinator,
+            "async_execute_controller_query",
+            new_callable=AsyncMock,
+        ) as execute_query:
+            await coordinator.async_read_initial_positions()
+
+        execute_query.assert_not_awaited()
+
     async def test_initial_position_read_has_overall_retry_deadline(
         self,
         hass: HomeAssistant,
