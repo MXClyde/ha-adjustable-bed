@@ -4822,15 +4822,13 @@ class AdjustableBedCoordinator:
                 supports_direct_position_control = controller.supports_direct_position_control
 
                 # Cached values survive disconnects for display, but must not
-                # satisfy the target tolerance on a new BLE session. Attempt
-                # one read whenever this session has not reported the requested
-                # axis. Notification-only controllers may use retained data to
-                # choose the initial direction, and their first movement update
-                # then makes the feedback current.
-                current_angle_is_current = self._position_is_current(position_key)
+                # drive direction or tolerance decisions on a new BLE session.
+                # Attempt one read whenever this session has not reported the
+                # requested axis. Direct-position controllers can still operate
+                # if the read produces no fresh value.
                 current_angle = (
                     self._position_data.get(position_key)
-                    if current_angle_is_current
+                    if self._position_is_current(position_key)
                     else None
                 )
                 if current_angle is None:
@@ -4839,19 +4837,11 @@ class AdjustableBedCoordinator:
                         position_key,
                     )
                     await self._async_read_positions()
-                    current_angle_is_current = self._position_is_current(position_key)
                     current_angle = (
                         self._position_data.get(position_key)
-                        if current_angle_is_current
+                        if self._position_is_current(position_key)
                         else None
                     )
-                    if current_angle is None and controller.may_seek_with_retained_position:
-                        current_angle = self._position_data.get(position_key)
-                        if current_angle is not None:
-                            _LOGGER.debug(
-                                "Using retained position data for notification-only %s seek",
-                                position_key,
-                            )
                     if current_angle is None and not supports_direct_position_control:
                         raise NotConnectedError(
                             f"Cannot seek {position_key}: no position data available"
@@ -4868,8 +4858,7 @@ class AdjustableBedCoordinator:
 
                 # Check if already at target (within tolerance)
                 if (
-                    current_angle_is_current
-                    and current_angle is not None
+                    current_angle is not None
                     and abs(current_angle - target_angle) <= position_tolerance
                 ):
                     _LOGGER.debug(

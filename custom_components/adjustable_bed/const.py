@@ -2270,6 +2270,7 @@ BEDS_WITH_DISCONNECT_AFTER_COMMAND_DEFAULT_DISABLED: Final = (
             BED_TYPE_JENSEN,
             BED_TYPE_JIECANG,
             BED_TYPE_KAIDI,
+            BED_TYPE_LEGGETT_WILINKE,
             BED_TYPE_OKIN_CB24,
             BED_TYPE_OKIN_CST,
             BED_TYPE_OKIN_UUID,
@@ -2293,10 +2294,8 @@ def disconnect_after_command_default_enabled(
     expires. Handing the link straight back is the better default; beds that
     need it held open keep the option off.
 
-    A legacy umbrella bed type with an auto variant (leggett_platt) cannot be
-    resolved here, so it gets the permissive default. That is safe: if it
-    resolves to a persistent protocol at connect time, the coordinator suppresses
-    the disconnect anyway.
+    Legacy umbrella types with an auto variant stay conservative when a
+    connection-scoped controller cannot be ruled out before connecting.
 
     Only new entries consult this. An existing entry already stores its own
     value, which is left alone.
@@ -2304,6 +2303,20 @@ def disconnect_after_command_default_enabled(
     if not bed_type:
         return DEFAULT_DISCONNECT_AFTER_COMMAND
     resolved = resolve_explicit_bed_type(bed_type, protocol_variant)
+    if bed_type == BED_TYPE_KEESON and protocol_variant in {
+        None,
+        "",
+        VARIANT_AUTO,
+        KEESON_VARIANT_SINO,
+        "ore",
+    }:
+        return False
+    if bed_type == BED_TYPE_LEGGETT_PLATT and protocol_variant in {
+        None,
+        "",
+        VARIANT_AUTO,
+    }:
+        return False
     return resolved not in BEDS_WITH_DISCONNECT_AFTER_COMMAND_DEFAULT_DISABLED
 
 

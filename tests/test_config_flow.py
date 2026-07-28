@@ -1328,8 +1328,10 @@ class TestBluetoothDiscoveryFlow:
             BED_TYPE_JENSEN,
             BED_TYPE_JIECANG,
             BED_TYPE_KAIDI,
+            BED_TYPE_KEESON,
             BED_TYPE_LEGGETT_GEN2,
             BED_TYPE_LEGGETT_PLATT,
+            BED_TYPE_LEGGETT_WILINKE,
             BED_TYPE_LINAK,
             BED_TYPE_OKIN_CB24,
             BED_TYPE_OKIN_CST,
@@ -1340,7 +1342,9 @@ class TestBluetoothDiscoveryFlow:
             BED_TYPE_SLEEPSTAR,
             BED_TYPE_SLEEPYS_BOX25,
             BED_TYPE_VIBRADORM,
+            KEESON_VARIANT_SINO,
             LEGGETT_VARIANT_GEN2,
+            LEGGETT_VARIANT_MLRM,
             VARIANT_AUTO,
             disconnect_after_command_default_enabled,
         )
@@ -1351,6 +1355,15 @@ class TestBluetoothDiscoveryFlow:
         assert disconnect_after_command_default_enabled(BED_TYPE_JENSEN, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_JIECANG, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_KAIDI, None) is False
+        assert disconnect_after_command_default_enabled(BED_TYPE_KEESON, VARIANT_AUTO) is False
+        assert (
+            disconnect_after_command_default_enabled(BED_TYPE_KEESON, KEESON_VARIANT_SINO)
+            is False
+        )
+        assert (
+            disconnect_after_command_default_enabled(BED_TYPE_KEESON, KEESON_VARIANT_ERGOMOTION)
+            is True
+        )
         assert disconnect_after_command_default_enabled(BED_TYPE_OKIN_CB24, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_OKIN_CST, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_OKIN_UUID, None) is False
@@ -1364,6 +1377,12 @@ class TestBluetoothDiscoveryFlow:
             disconnect_after_command_default_enabled(BED_TYPE_LEGGETT_PLATT, LEGGETT_VARIANT_GEN2)
             is False
         )
+        assert (
+            disconnect_after_command_default_enabled(BED_TYPE_LEGGETT_PLATT, LEGGETT_VARIANT_MLRM)
+            is False
+        )
+        assert disconnect_after_command_default_enabled(BED_TYPE_LEGGETT_PLATT, VARIANT_AUTO) is False
+        assert disconnect_after_command_default_enabled(BED_TYPE_LEGGETT_WILINKE, None) is False
         # No bed type chosen yet (auto-detect): keep the conservative default.
         assert disconnect_after_command_default_enabled(None, None) is False
 

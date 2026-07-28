@@ -72,6 +72,7 @@ from custom_components.adjustable_bed.const import (
 from custom_components.adjustable_bed.coordinator import (
     BOND_LATCH_RETEST_AFTER,
     AdjustableBedCoordinator,
+    NotConnectedError,
 )
 
 from .conftest import TEST_ADDRESS, TEST_NAME, make_controller_mock
@@ -1295,60 +1296,12 @@ class TestCoordinatorPositionSeek:
         controller.set_motor_position.assert_awaited_once_with("back", 50)
         assert coordinator._position_data_generation["back"] == 2
 
-    async def test_notification_only_seek_uses_retained_position_after_reconnect(
+    async def test_notification_only_seek_rejects_retained_position_after_reconnect(
         self,
         hass: HomeAssistant,
         mock_config_entry,
     ) -> None:
-        """Notification-only feedback must not make a reconnect seek fail closed."""
-        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
-        coordinator._client = MagicMock()
-        coordinator._client.is_connected = True
-        coordinator._position_connection_generation = 2
-        coordinator._position_data["back"] = 30.0
-        coordinator._position_data_generation["back"] = 1
-
-        controller = make_controller_mock(may_seek_with_retained_position=True)
-        coordinator._controller = controller
-        move_up = AsyncMock()
-        move_stop = AsyncMock()
-        read_count = 0
-
-        async def _read_positions() -> None:
-            nonlocal read_count
-            read_count += 1
-            if read_count == 2:
-                coordinator._handle_position_update("back", 50.0)
-
-        with (
-            patch.object(
-                coordinator,
-                "_async_read_positions",
-                new=AsyncMock(side_effect=_read_positions),
-            ) as read_positions,
-            patch(
-                "custom_components.adjustable_bed.coordinator.asyncio.sleep",
-                new=AsyncMock(),
-            ),
-        ):
-            await coordinator.async_seek_position(
-                "back",
-                50.0,
-                lambda c: move_up(c),
-                AsyncMock(),
-                lambda c: move_stop(c),
-            )
-
-        assert read_positions.await_count == 2
-        move_up.assert_awaited_once_with(controller)
-        move_stop.assert_awaited_once_with(controller)
-
-    async def test_notification_only_seek_does_not_accept_retained_target(
-        self,
-        hass: HomeAssistant,
-        mock_config_entry,
-    ) -> None:
-        """A retained target value must not suppress movement after reconnect."""
+        """Prior-session feedback must not choose a notification-only seek direction."""
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         coordinator._client = MagicMock()
         coordinator._client.is_connected = True
@@ -1356,37 +1309,32 @@ class TestCoordinatorPositionSeek:
         coordinator._position_data["back"] = 50.0
         coordinator._position_data_generation["back"] = 1
 
-        controller = make_controller_mock(may_seek_with_retained_position=True)
+        controller = make_controller_mock()
         coordinator._controller = controller
+        move_up = AsyncMock()
         move_down = AsyncMock()
         move_stop = AsyncMock()
-
-        async def _read_positions() -> None:
-            if move_down.await_count:
-                coordinator._handle_position_update("back", 51.0)
 
         with (
             patch.object(
                 coordinator,
                 "_async_read_positions",
-                new=AsyncMock(side_effect=_read_positions),
-            ) as read_positions,
-            patch(
-                "custom_components.adjustable_bed.coordinator.asyncio.sleep",
                 new=AsyncMock(),
-            ),
+            ) as read_positions,
+            pytest.raises(NotConnectedError, match="no position data available"),
         ):
             await coordinator.async_seek_position(
                 "back",
                 50.0,
-                AsyncMock(),
+                lambda c: move_up(c),
                 lambda c: move_down(c),
                 lambda c: move_stop(c),
             )
 
-        assert read_positions.await_count == 2
-        move_down.assert_awaited_once_with(controller)
-        move_stop.assert_awaited_once_with(controller)
+        read_positions.assert_awaited_once_with()
+        move_up.assert_not_awaited()
+        move_down.assert_not_awaited()
+        move_stop.assert_not_awaited()
 
     async def test_seek_stops_on_first_target_crossing_for_single_direction_controllers(
         self,
