@@ -883,6 +883,88 @@ class TestCoordinatorConnection:
         assert controller.prepare_for_position_read.await_count == 2
         mock_sleep.assert_awaited_once()
 
+    async def test_initial_position_read_survives_a_failed_attempt(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+    ) -> None:
+        """One slow or failing attempt must not consume the whole retry budget."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._disable_angle_sensing = False
+        coordinator._client = MagicMock()
+        coordinator._client.is_connected = True
+
+        controller = MagicMock()
+        controller.prepare_for_position_read = AsyncMock()
+        coordinator._controller = controller
+
+        read_count = 0
+
+        async def _read_positions() -> None:
+            nonlocal read_count
+            read_count += 1
+            if read_count == 1:
+                raise TimeoutError
+            if read_count == 2:
+                raise BleakError("read failed")
+            coordinator._position_data["back"] = 12.0
+            coordinator._position_data["legs"] = 4.0
+
+        with (
+            patch.object(
+                coordinator,
+                "_async_read_positions",
+                new=AsyncMock(side_effect=_read_positions),
+            ) as mock_read_positions,
+            patch(
+                "custom_components.adjustable_bed.coordinator.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            await coordinator.async_read_initial_positions()
+
+        assert mock_read_positions.await_count == 3
+        assert coordinator.position_data == {"back": 12.0, "legs": 4.0}
+
+    async def test_position_hydration_scheduled_only_while_axes_are_missing(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+    ) -> None:
+        """A connect re-reads unknown axes, and stays quiet once they are known."""
+        mock_config_entry.add_to_hass(hass)
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._disable_angle_sensing = False
+
+        with patch.object(
+            coordinator, "async_read_initial_positions", new=AsyncMock()
+        ) as mock_read:
+            coordinator._schedule_position_hydration()
+            assert coordinator._position_hydration_task is not None
+            await coordinator._position_hydration_task
+            mock_read.assert_awaited_once()
+
+            # Every expected axis has reported: nothing left to hydrate.
+            coordinator._position_data.update({"back": 10.0, "legs": 5.0})
+            coordinator._position_hydration_task = None
+            coordinator._schedule_position_hydration()
+            assert coordinator._position_hydration_task is None
+            assert mock_read.await_count == 1
+
+    async def test_position_hydration_skipped_when_angle_sensing_disabled(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+    ) -> None:
+        """Angle sensing off means no background reads at all."""
+        mock_config_entry.add_to_hass(hass)
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._disable_angle_sensing = True
+
+        coordinator._schedule_position_hydration()
+
+        assert coordinator._position_hydration_task is None
+
     async def test_cst_initial_position_axes_ignore_unreported_extra_motors(
         self,
         hass: HomeAssistant,

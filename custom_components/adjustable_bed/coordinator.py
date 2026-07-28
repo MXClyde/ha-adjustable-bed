@@ -393,6 +393,8 @@ class AdjustableBedCoordinator:
         self._controller_state_refresh_completed = False
         self._passive_position_reconciliation_interval_s: float | None = None
         self._passive_position_reconciliation_task: asyncio.Task[None] | None = None
+        self._position_hydration_task: asyncio.Task[None] | None = None
+        self._position_hydration_running = False
 
         # Connection state callbacks
         self._connection_state_callbacks: set[Callable[[bool], None]] = set()
@@ -3018,6 +3020,11 @@ class AdjustableBedCoordinator:
                 self._notify_connection_state_change(True)
                 self._connection_attempt_details.append(attempt_details)
 
+                # Background, and only for axes still unknown: a bed that could
+                # not answer at setup gets another chance on every connect
+                # instead of staying "unknown" until the user moves it.
+                self._schedule_position_hydration()
+
                 return True
 
             except (BleakError, TimeoutError, OSError) as err:
@@ -3303,14 +3310,18 @@ class AdjustableBedCoordinator:
             )
 
     async def async_read_initial_positions(self) -> None:
-        """Read positions at startup to initialize sensors.
+        """Read positions to initialize sensors.
 
-        Called after initial connection to populate position sensors with
-        actual values instead of starting as 'unknown'.
-        Runs in background with short timeout to not block startup.
+        Called after a connection is established to populate position sensors
+        with actual values instead of leaving them 'unknown'. Runs in background
+        with short timeouts so it never blocks startup.
 
         Uses the command lock to prevent concurrent GATT operations with
         commands that may start immediately after connection.
+
+        Each attempt is isolated: a bed that is slow to answer its first read
+        must not consume the whole retry budget, because nothing else reads
+        positions outside a movement command.
         """
         if self._disable_angle_sensing:
             _LOGGER.debug("Skipping initial position read (angle sensing disabled)")
@@ -3321,22 +3332,51 @@ class AdjustableBedCoordinator:
             _LOGGER.debug("Skipping initial position read (no expected axes)")
             return
 
-        _LOGGER.debug("Reading initial positions for %s", self._address)
-        try:
-            for attempt in range(1, _INITIAL_POSITION_READ_MAX_ATTEMPTS + 1):
-                async with asyncio.timeout(_INITIAL_POSITION_READ_TIMEOUT):
-                    # Use command lock to prevent concurrent GATT operations
-                    async with self._command_lock:
-                        controller = self._controller
-                        if (
-                            controller is None
-                            or self._client is None
-                            or not self._client.is_connected
-                        ):
-                            return
-                        await controller.prepare_for_position_read()
-                        await self._async_read_positions()
+        if self._position_hydration_running:
+            _LOGGER.debug(
+                "Initial position read already running for %s - skipping", self._address
+            )
+            return
 
+        self._position_hydration_running = True
+        try:
+            _LOGGER.debug("Reading initial positions for %s", self._address)
+            for attempt in range(1, _INITIAL_POSITION_READ_MAX_ATTEMPTS + 1):
+                try:
+                    async with asyncio.timeout(_INITIAL_POSITION_READ_TIMEOUT):
+                        # Use command lock to prevent concurrent GATT operations
+                        async with self._command_lock:
+                            controller = self._controller
+                            if (
+                                controller is None
+                                or self._client is None
+                                or not self._client.is_connected
+                            ):
+                                # A later connect re-schedules this, so give the
+                                # link back instead of burning the retry budget.
+                                return
+                            await controller.prepare_for_position_read()
+                            await self._async_read_positions()
+                except TimeoutError:
+                    _LOGGER.debug(
+                        "Initial position read attempt %d/%d for %s timed out",
+                        attempt,
+                        _INITIAL_POSITION_READ_MAX_ATTEMPTS,
+                        self._address,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as err:
+                    _LOGGER.debug(
+                        "Initial position read attempt %d/%d for %s failed: %s",
+                        attempt,
+                        _INITIAL_POSITION_READ_MAX_ATTEMPTS,
+                        self._address,
+                        err,
+                    )
+
+                # Checked even after a failed attempt: a partial read (or a
+                # notification that landed meanwhile) may already be enough.
                 received_axes = expected_axes & self._position_data.keys()
                 if received_axes >= expected_axes:
                     _LOGGER.info(
@@ -3366,13 +3406,38 @@ class AdjustableBedCoordinator:
                     {k: f"{v}°" for k, v in self._position_data.items()},
                 )
             else:
-                _LOGGER.debug("Initial position read completed but no data received")
-        except TimeoutError:
-            _LOGGER.debug("Initial position read timed out - sensors will update on first command")
-        except Exception as err:
-            _LOGGER.debug(
-                "Initial position read failed: %s - sensors will update on first command", err
-            )
+                _LOGGER.debug(
+                    "Initial position read for %s produced no data - retrying on the next connect",
+                    self._address,
+                )
+        finally:
+            self._position_hydration_running = False
+
+    def _schedule_position_hydration(self) -> None:
+        """Fill in still-unknown position axes in the background after a connect.
+
+        Entry setup schedules the first read, but a bed that was busy, asleep or
+        unreachable then would otherwise sit at "unknown" until the user moved
+        it: outside a movement command nothing reads positions. Repeating the
+        read on every connect closes that gap, and costs nothing once every axis
+        has reported, since hydrated axes are kept across disconnects.
+        """
+        if self._disable_angle_sensing:
+            return
+
+        expected_axes = self._expected_initial_position_axes()
+        if not expected_axes or expected_axes <= self._position_data.keys():
+            return
+
+        task = self._position_hydration_task
+        if task is not None and not task.done():
+            return
+
+        self._position_hydration_task = self.entry.async_create_background_task(
+            self.hass,
+            self.async_read_initial_positions(),
+            name=f"adjustable_bed_position_hydration_{self._address}",
+        )
 
     def _expected_initial_position_axes(self) -> set[str]:
         """Return the logical position axes that startup hydration should populate."""

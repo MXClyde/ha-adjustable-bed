@@ -171,6 +171,7 @@ from .const import (
     VARIANT_AUTO,
     DetectionResult,
     bed_type_has_position_feedback,
+    disconnect_after_command_default_enabled,
     get_richmat_features,
     get_richmat_motor_count,
     grants_one_connection_per_pairing_window,
@@ -689,6 +690,25 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             data=entry_data,
         )
 
+    def _disconnect_after_command_choice(
+        self,
+        user_input: dict[str, Any],
+        bed_type: str | None,
+        protocol_variant: str | None,
+    ) -> bool:
+        """Return the "disconnect after each command" value to persist.
+
+        The checkbox is rendered from the bed type the step defaulted to, but the
+        user can pick a different type from the dropdown in the same submit. A
+        submitted value that still equals what was rendered was never touched, so
+        recompute it for the bed type actually chosen rather than storing a
+        default meant for a different bed.
+        """
+        submitted = user_input.get(CONF_DISCONNECT_AFTER_COMMAND)
+        if submitted is None or submitted == self._rendered_disconnect_default:
+            return disconnect_after_command_default_enabled(bed_type, protocol_variant)
+        return bool(submitted)
+
     @staticmethod
     def _needs_malouf_step(bed_type: str | None, user_input: dict[str, Any]) -> bool:
         """Return True when the Malouf layout/memory fields still need collecting.
@@ -744,6 +764,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         self._disambiguation_types: list[str] | None = None
         self._disambiguated_bed_type: str | None = None
         self._show_full_bed_type_list: bool = False
+        # The "disconnect after each command" default the last form rendered. The
+        # checkbox is built from the bed type the step defaulted to, so this is
+        # what tells a submitted value apart from an untouched default when the
+        # user picks a different bed type in the same submit.
+        self._rendered_disconnect_default: bool | None = None
         self._retrying_devices: dict[str, tuple[ConfigEntry, BluetoothServiceInfoBleak | None]] = {}
         # Carries the finalized entry across the optional verify_connection step
         self._pending_entry: dict[str, Any] | None = None
@@ -1474,8 +1499,8 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     # The user saw and submitted these, so a protocol
                     # migration must not treat them as generated defaults.
                     CONF_MOTOR_PULSE_USER_SET: True,
-                    CONF_DISCONNECT_AFTER_COMMAND: user_input.get(
-                        CONF_DISCONNECT_AFTER_COMMAND, DEFAULT_DISCONNECT_AFTER_COMMAND
+                    CONF_DISCONNECT_AFTER_COMMAND: self._disconnect_after_command_choice(
+                        user_input, selected_bed_type, protocol_variant
                     ),
                     CONF_IDLE_DISCONNECT_SECONDS: user_input.get(
                         CONF_IDLE_DISCONNECT_SECONDS, DEFAULT_IDLE_DISCONNECT_SECONDS
@@ -1543,6 +1568,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         # and this matches plain BEDS_WITH_POSITION_FEEDBACK membership. Going through
         # the shared predicate keeps this in step with the paths that do know a variant.
         default_disable_angle = not bed_type_has_position_feedback(bed_type, VARIANT_AUTO)
+        default_disconnect_after_command = disconnect_after_command_default_enabled(
+            bed_type, VARIANT_AUTO
+        )
+        self._rendered_disconnect_default = default_disconnect_after_command
 
         # Get bed-type-specific motor pulse defaults
         pulse_defaults = (
@@ -1634,7 +1663,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 TextSelectorConfig()
             ),
             vol.Optional(
-                CONF_DISCONNECT_AFTER_COMMAND, default=DEFAULT_DISCONNECT_AFTER_COMMAND
+                CONF_DISCONNECT_AFTER_COMMAND, default=default_disconnect_after_command
             ): bool,
             vol.Optional(
                 CONF_IDLE_DISCONNECT_SECONDS, default=DEFAULT_IDLE_DISCONNECT_SECONDS
@@ -2334,8 +2363,8 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     # The user saw and submitted these, so a protocol
                     # migration must not treat them as generated defaults.
                     CONF_MOTOR_PULSE_USER_SET: True,
-                    CONF_DISCONNECT_AFTER_COMMAND: user_input.get(
-                        CONF_DISCONNECT_AFTER_COMMAND, DEFAULT_DISCONNECT_AFTER_COMMAND
+                    CONF_DISCONNECT_AFTER_COMMAND: self._disconnect_after_command_choice(
+                        user_input, bed_type, protocol_variant
                     ),
                     CONF_IDLE_DISCONNECT_SECONDS: user_input.get(
                         CONF_IDLE_DISCONNECT_SECONDS, DEFAULT_IDLE_DISCONNECT_SECONDS
@@ -2432,6 +2461,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         # Auto-detect default resolves to. Otherwise a one-click "accept the
         # default" would persist generic timing/angle options for a known bed.
         defaults_bed_type = preselected_bed_type or confident_bed_type
+        default_disconnect_after_command = disconnect_after_command_default_enabled(
+            defaults_bed_type, preselected_protocol_variant
+        )
+        self._rendered_disconnect_default = default_disconnect_after_command
         if defaults_bed_type:
             # Keeson with Ergomotion variant supports position feedback
             has_position_feedback = bed_type_has_position_feedback(
@@ -2474,7 +2507,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     CONF_MOTOR_PULSE_DELAY_MS, default=str(default_pulse_delay)
                 ): TextSelector(TextSelectorConfig()),
                 vol.Optional(
-                    CONF_DISCONNECT_AFTER_COMMAND, default=DEFAULT_DISCONNECT_AFTER_COMMAND
+                    CONF_DISCONNECT_AFTER_COMMAND, default=default_disconnect_after_command
                 ): bool,
                 vol.Optional(
                     CONF_IDLE_DISCONNECT_SECONDS, default=DEFAULT_IDLE_DISCONNECT_SECONDS
@@ -2589,8 +2622,8 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                         # The user saw and submitted these, so a protocol
                         # migration must not treat them as generated defaults.
                         CONF_MOTOR_PULSE_USER_SET: True,
-                        CONF_DISCONNECT_AFTER_COMMAND: user_input.get(
-                            CONF_DISCONNECT_AFTER_COMMAND, DEFAULT_DISCONNECT_AFTER_COMMAND
+                        CONF_DISCONNECT_AFTER_COMMAND: self._disconnect_after_command_choice(
+                            user_input, bed_type, protocol_variant
                         ),
                         CONF_IDLE_DISCONNECT_SECONDS: user_input.get(
                             CONF_IDLE_DISCONNECT_SECONDS, DEFAULT_IDLE_DISCONNECT_SECONDS
@@ -2659,6 +2692,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             }
 
         # Determine smart defaults based on preselected bed type and variant
+        default_disconnect_after_command = disconnect_after_command_default_enabled(
+            preselected_bed_type, preselected_protocol_variant
+        )
+        self._rendered_disconnect_default = default_disconnect_after_command
         if preselected_bed_type:
             # Keeson with Ergomotion variant supports position feedback
             has_position_feedback = bed_type_has_position_feedback(
@@ -2692,7 +2729,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     CONF_MOTOR_PULSE_DELAY_MS, default=str(default_pulse_delay)
                 ): TextSelector(TextSelectorConfig()),
                 vol.Optional(
-                    CONF_DISCONNECT_AFTER_COMMAND, default=DEFAULT_DISCONNECT_AFTER_COMMAND
+                    CONF_DISCONNECT_AFTER_COMMAND, default=default_disconnect_after_command
                 ): bool,
                 vol.Optional(
                     CONF_IDLE_DISCONNECT_SECONDS, default=DEFAULT_IDLE_DISCONNECT_SECONDS
