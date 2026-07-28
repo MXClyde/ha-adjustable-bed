@@ -374,6 +374,7 @@ class BLEDiagnosticRunner:
                 _execute,
                 cancel_running=False,
                 skip_disconnect=True,
+                preemptible=False,
             )
         finally:
             # Serialized queries normally restart the idle timer. Diagnostics

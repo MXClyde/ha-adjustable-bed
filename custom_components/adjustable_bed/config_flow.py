@@ -696,20 +696,88 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         bed_type: str | None,
         protocol_variant: str | None,
         rendered_default: bool,
-    ) -> bool:
+    ) -> bool | None:
         """Return the "disconnect after each command" value to persist.
 
-        Preserve a value that differs from the rendered default as an explicit
-        user choice. Otherwise follow the selected protocol's default, since HA
-        submits the rendered checkbox value even when the user never touched it.
+        A submitted value that matches the rendered default is ambiguous when
+        the user also changed to a protocol with the opposite default. Return
+        None in that case so a second, bed-specific form can obtain an explicit
+        choice. This preserves both an untouched default and an explicit choice
+        that happens to equal the old default.
         """
         selected_default = disconnect_after_command_default_enabled(
             bed_type, protocol_variant
         )
         submitted = user_input.get(CONF_DISCONNECT_AFTER_COMMAND)
-        if submitted is None or bool(submitted) == rendered_default:
+        if self._disconnect_choice_confirmed:
+            return bool(submitted)
+        if submitted is None:
             return selected_default
+        if bool(submitted) == rendered_default and selected_default != rendered_default:
+            return None
         return bool(submitted)
+
+    def _disconnect_after_command_schema(self) -> vol.Schema:
+        """Build the explicit disconnect-choice confirmation schema."""
+        return vol.Schema(
+            {
+                vol.Required(
+                    CONF_DISCONNECT_AFTER_COMMAND,
+                    default=self._pending_disconnect_default,
+                ): bool,
+            }
+        )
+
+    def _request_disconnect_after_command_choice(
+        self,
+        user_input: dict[str, Any],
+        *,
+        resume_step: str,
+        bed_type: str | None,
+        protocol_variant: str | None,
+    ) -> ConfigFlowResult:
+        """Ask again after the selected protocol's default is known."""
+        self._pending_disconnect_input = dict(user_input)
+        self._pending_disconnect_resume_step = resume_step
+        self._pending_disconnect_default = disconnect_after_command_default_enabled(
+            bed_type, protocol_variant
+        )
+        return self.async_show_form(
+            step_id="disconnect_after_command",
+            data_schema=self._disconnect_after_command_schema(),
+        )
+
+    async def async_step_disconnect_after_command(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Collect an explicit connection-lifetime choice for the selected bed."""
+        assert self._pending_disconnect_input is not None
+        assert self._pending_disconnect_resume_step is not None
+
+        if user_input is None:
+            return self.async_show_form(
+                step_id="disconnect_after_command",
+                data_schema=self._disconnect_after_command_schema(),
+            )
+
+        resume_input = self._pending_disconnect_input
+        resume_step = self._pending_disconnect_resume_step
+        resume_input[CONF_DISCONNECT_AFTER_COMMAND] = user_input[
+            CONF_DISCONNECT_AFTER_COMMAND
+        ]
+        self._pending_disconnect_input = None
+        self._pending_disconnect_resume_step = None
+        self._disconnect_choice_confirmed = True
+        try:
+            if resume_step == "bluetooth_confirm":
+                return await self.async_step_bluetooth_confirm(resume_input)
+            if resume_step == "manual_config":
+                return await self.async_step_manual_config(resume_input)
+            if resume_step == "manual_entry":
+                return await self.async_step_manual_entry(resume_input)
+            raise RuntimeError(f"Unknown disconnect choice resume step: {resume_step}")
+        finally:
+            self._disconnect_choice_confirmed = False
 
     @staticmethod
     def _needs_malouf_step(bed_type: str | None, user_input: dict[str, Any]) -> bool:
@@ -770,6 +838,13 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         # Carries the finalized entry across the optional verify_connection step
         self._pending_entry: dict[str, Any] | None = None
         self._pending_title: str | None = None
+        # When a bed-type change makes the first form's checkbox ambiguous,
+        # retain its validated submission while a bed-specific follow-up asks
+        # for an explicit connection-lifetime choice.
+        self._pending_disconnect_input: dict[str, Any] | None = None
+        self._pending_disconnect_resume_step: str | None = None
+        self._pending_disconnect_default: bool = DEFAULT_DISCONNECT_AFTER_COMMAND
+        self._disconnect_choice_confirmed: bool = False
         # True once the verify_connection form has actually been rendered, so a
         # replayed submission from the previous form cannot be read as a
         # confirmation of a result the user never saw.
@@ -1497,6 +1572,19 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 motor_pulse_delay_ms,
             )
             if not errors:
+                disconnect_after_command = self._disconnect_after_command_choice(
+                    user_input,
+                    selected_bed_type,
+                    protocol_variant,
+                    default_disconnect_after_command,
+                )
+                if disconnect_after_command is None:
+                    return self._request_disconnect_after_command_choice(
+                        user_input,
+                        resume_step="bluetooth_confirm",
+                        bed_type=selected_bed_type,
+                        protocol_variant=protocol_variant,
+                    )
                 entry_data = {
                     CONF_ADDRESS: self._discovery_info.address.upper(),
                     CONF_BED_TYPE: selected_bed_type,
@@ -1513,12 +1601,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     # The user saw and submitted these, so a protocol
                     # migration must not treat them as generated defaults.
                     CONF_MOTOR_PULSE_USER_SET: True,
-                    CONF_DISCONNECT_AFTER_COMMAND: self._disconnect_after_command_choice(
-                        user_input,
-                        selected_bed_type,
-                        protocol_variant,
-                        default_disconnect_after_command,
-                    ),
+                    CONF_DISCONNECT_AFTER_COMMAND: disconnect_after_command,
                     CONF_IDLE_DISCONNECT_SECONDS: user_input.get(
                         CONF_IDLE_DISCONNECT_SECONDS, DEFAULT_IDLE_DISCONNECT_SECONDS
                     ),
@@ -2346,6 +2429,19 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 errors["base"] = "invalid_number"
 
             if not errors:
+                disconnect_after_command = self._disconnect_after_command_choice(
+                    user_input,
+                    bed_type,
+                    protocol_variant,
+                    default_disconnect_after_command,
+                )
+                if disconnect_after_command is None:
+                    return self._request_disconnect_after_command_choice(
+                        user_input,
+                        resume_step="manual_config",
+                        bed_type=bed_type,
+                        protocol_variant=protocol_variant,
+                    )
                 _LOGGER.info(
                     "Manual bed configuration: address=%s, type=%s, variant=%s, name=%s, motors=%s, massage=%s, disable_angle_sensing=%s, adapter=%s, pulse_count=%s, pulse_delay=%s",
                     address,
@@ -2376,12 +2472,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     # The user saw and submitted these, so a protocol
                     # migration must not treat them as generated defaults.
                     CONF_MOTOR_PULSE_USER_SET: True,
-                    CONF_DISCONNECT_AFTER_COMMAND: self._disconnect_after_command_choice(
-                        user_input,
-                        bed_type,
-                        protocol_variant,
-                        default_disconnect_after_command,
-                    ),
+                    CONF_DISCONNECT_AFTER_COMMAND: disconnect_after_command,
                     CONF_IDLE_DISCONNECT_SECONDS: user_input.get(
                         CONF_IDLE_DISCONNECT_SECONDS, DEFAULT_IDLE_DISCONNECT_SECONDS
                     ),
@@ -2587,6 +2678,19 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     errors["base"] = "invalid_number"
 
                 if not errors:
+                    disconnect_after_command = self._disconnect_after_command_choice(
+                        user_input,
+                        bed_type,
+                        protocol_variant,
+                        default_disconnect_after_command,
+                    )
+                    if disconnect_after_command is None:
+                        return self._request_disconnect_after_command_choice(
+                            user_input,
+                            resume_step="manual_entry",
+                            bed_type=bed_type,
+                            protocol_variant=protocol_variant,
+                        )
                     retrying_entry = self._configured_entries_by_address().get(address)
                     if (
                         retrying_entry is not None
@@ -2631,12 +2735,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                         # The user saw and submitted these, so a protocol
                         # migration must not treat them as generated defaults.
                         CONF_MOTOR_PULSE_USER_SET: True,
-                        CONF_DISCONNECT_AFTER_COMMAND: self._disconnect_after_command_choice(
-                            user_input,
-                            bed_type,
-                            protocol_variant,
-                            default_disconnect_after_command,
-                        ),
+                        CONF_DISCONNECT_AFTER_COMMAND: disconnect_after_command,
                         CONF_IDLE_DISCONNECT_SECONDS: user_input.get(
                             CONF_IDLE_DISCONNECT_SECONDS, DEFAULT_IDLE_DISCONNECT_SECONDS
                         ),
@@ -2738,13 +2837,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 ): vol.All(vol.Coerce(int), vol.Range(min=10, max=300)),
             }
         )
-        # The manual form picks the bed type in the same step, so its static
-        # schema cannot render the selected protocol's default reliably. Leave
-        # this field absent and derive the default after the user selects it.
-        if preselected_bed_type:
-            schema_dict[vol.Optional(
+        schema_dict[
+            vol.Optional(
                 CONF_DISCONNECT_AFTER_COMMAND, default=default_disconnect_after_command
-            )] = bool
+            )
+        ] = bool
         if preselected_bed_type in MALOUF_BED_TYPES:
             _add_malouf_schema_fields(schema_dict)
         if preselected_bed_type == BED_TYPE_OKIN_CB24:

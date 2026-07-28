@@ -5087,6 +5087,53 @@ class TestStopAfterCancel:
 
         assert cleanup_finished
 
+    async def test_cancelling_non_preemptible_query_cancels_operation_before_unlock(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ):
+        """Caller cancellation propagates through the directly awaited GATT task."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        operation_started = asyncio.Event()
+        cancellation_cleanup_started = asyncio.Event()
+        release_cancellation_cleanup = asyncio.Event()
+        next_command_started = asyncio.Event()
+
+        async def query(_controller):
+            operation_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_cleanup_started.set()
+                await release_cancellation_cleanup.wait()
+                raise
+
+        async def next_command(_controller):
+            next_command_started.set()
+
+        query_task = asyncio.create_task(
+            coordinator.async_execute_controller_query(query, preemptible=False)
+        )
+        await operation_started.wait()
+        query_task.cancel()
+        next_command_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(
+                next_command,
+                cancel_running=False,
+            )
+        )
+
+        await cancellation_cleanup_started.wait()
+        await asyncio.sleep(0)
+        assert not next_command_started.is_set()
+        release_cancellation_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await query_task
+        await next_command_task
+        assert next_command_started.is_set()
+
     async def test_execute_controller_command_skips_execution_if_cancelled_during_preparation(
         self,
         hass: HomeAssistant,

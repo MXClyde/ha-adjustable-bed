@@ -1423,8 +1423,8 @@ class TestBluetoothDiscoveryFlow:
         )
         assert marker.default() is True
 
-    def test_disconnect_choice_follows_new_bed_default_when_checkbox_untouched(self):
-        """HA's submitted rendered default follows a newly selected protocol."""
+    def test_ambiguous_disconnect_choice_is_confirmed_after_bed_type_change(self):
+        """A second form distinguishes the old default from an explicit choice."""
         from custom_components.adjustable_bed.config_flow import AdjustableBedConfigFlow
 
         flow = AdjustableBedConfigFlow()
@@ -1436,7 +1436,7 @@ class TestBluetoothDiscoveryFlow:
                 None,
                 True,
             )
-            is False
+            is None
         )
         assert (
             flow._disconnect_after_command_choice(
@@ -1445,8 +1445,31 @@ class TestBluetoothDiscoveryFlow:
                 VARIANT_AUTO,
                 False,
             )
+            is None
+        )
+
+        # Once the follow-up form has rendered the selected protocol's default,
+        # either old-default value is an unambiguous explicit choice.
+        flow._disconnect_choice_confirmed = True
+        assert (
+            flow._disconnect_after_command_choice(
+                {CONF_DISCONNECT_AFTER_COMMAND: True},
+                BED_TYPE_LEGGETT_GEN2,
+                None,
+                True,
+            )
             is True
         )
+        assert (
+            flow._disconnect_after_command_choice(
+                {CONF_DISCONNECT_AFTER_COMMAND: False},
+                BED_TYPE_LINAK,
+                VARIANT_AUTO,
+                False,
+            )
+            is False
+        )
+        flow._disconnect_choice_confirmed = False
 
         # A value differing from the rendered default remains an explicit choice.
         assert (
@@ -1458,7 +1481,7 @@ class TestBluetoothDiscoveryFlow:
             )
             is False
         )
-        # An absent field also follows the chosen bed type.
+        # An absent value from direct callers follows the chosen bed type.
         assert (
             flow._disconnect_after_command_choice(
                 {},
@@ -1468,6 +1491,50 @@ class TestBluetoothDiscoveryFlow:
             )
             is True
         )
+
+    async def test_manual_entry_without_preselected_type_confirms_ambiguous_choice(
+        self,
+        hass: HomeAssistant,
+        enable_custom_integrations,
+    ):
+        """Raw manual entry keeps the option and confirms it for the selected bed."""
+        flow = AdjustableBedConfigFlow()
+        flow.hass = hass
+        flow.context = {"source": SOURCE_USER}
+
+        result = await flow.async_step_manual_entry()
+        disconnect_marker = next(
+            marker
+            for marker in result["data_schema"].schema
+            if marker.schema == CONF_DISCONNECT_AFTER_COMMAND
+        )
+        assert disconnect_marker.default() is False
+
+        result = await flow.async_step_manual_entry(
+            {
+                CONF_ADDRESS: "11:22:33:44:55:66",
+                CONF_BED_TYPE: BED_TYPE_LINAK,
+                CONF_NAME: "Manual Bed",
+                CONF_MOTOR_COUNT: 2,
+                CONF_HAS_MASSAGE: False,
+                CONF_DISABLE_ANGLE_SENSING: True,
+                CONF_PREFERRED_ADAPTER: "auto",
+                CONF_DISCONNECT_AFTER_COMMAND: False,
+            }
+        )
+        assert result["step_id"] == "disconnect_after_command"
+        confirm_marker = next(iter(result["data_schema"].schema))
+        assert confirm_marker.default() is True
+
+        with patch.object(
+            AdjustableBedConfigFlow, "_verification_possible", return_value=False
+        ):
+            result = await flow.async_step_disconnect_after_command(
+                {CONF_DISCONNECT_AFTER_COMMAND: False}
+            )
+
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+        assert result["data"][CONF_DISCONNECT_AFTER_COMMAND] is False
 
     async def test_explicitly_unchecking_disconnect_after_command_is_kept(
         self,
@@ -2434,8 +2501,8 @@ class TestManualFlow:
                 user_input={CONF_ADDRESS: "manual"},
             )
 
-        # Now in manual_entry step, fill the form. No connectable scanner here,
-        # so the read-only verify step is skipped and the entry is created directly.
+        # The raw form starts with the conservative False default. Linak recommends
+        # True, so confirm the bed-specific value before the entry is created.
         with patch.object(AdjustableBedConfigFlow, "_verification_possible", return_value=False):
             result = await hass.config_entries.flow.async_configure(
                 result["flow_id"],
@@ -2449,14 +2516,18 @@ class TestManualFlow:
                     CONF_PREFERRED_ADAPTER: "auto",
                 },
             )
+            assert result["step_id"] == "disconnect_after_command"
+            result = await hass.config_entries.flow.async_configure(
+                result["flow_id"],
+                user_input={CONF_DISCONNECT_AFTER_COMMAND: True},
+            )
 
         assert result["type"] == FlowResultType.CREATE_ENTRY
         assert result["title"] == "Manual Bed"
         assert result["data"][CONF_ADDRESS] == "11:22:33:44:55:66"
         assert result["data"][CONF_BED_TYPE] == BED_TYPE_LINAK
         assert result["data"][CONF_MOTOR_COUNT] == 3
-        # The initial manual form has no static checkbox default because the
-        # selected bed type decides it after submission.
+        # The follow-up displayed Linak's recommendation and kept it enabled.
         assert result["data"][CONF_DISCONNECT_AFTER_COMMAND] is True
 
     async def test_manual_entry_malouf_collects_layout(
@@ -2497,8 +2568,14 @@ class TestManualFlow:
             },
         )
 
-        # Should route to the follow-up Malouf step, not create the entry yet.
+        # Confirm the selected protocol's connection default before collecting
+        # the protocol-specific layout.
         assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "disconnect_after_command"
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={CONF_DISCONNECT_AFTER_COMMAND: True},
+        )
         assert result["step_id"] == "manual_malouf"
 
         with patch.object(AdjustableBedConfigFlow, "_verification_possible", return_value=False):
@@ -2632,6 +2709,11 @@ class TestManualFlow:
                     CONF_DISABLE_ANGLE_SENSING: True,
                     CONF_PREFERRED_ADAPTER: "auto",
                 },
+            )
+            assert result["step_id"] == "disconnect_after_command"
+            result = await hass.config_entries.flow.async_configure(
+                result["flow_id"],
+                user_input={CONF_DISCONNECT_AFTER_COMMAND: True},
             )
 
         assert result["type"] == FlowResultType.CREATE_ENTRY
