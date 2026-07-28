@@ -4822,13 +4822,15 @@ class AdjustableBedCoordinator:
                 supports_direct_position_control = controller.supports_direct_position_control
 
                 # Cached values survive disconnects for display, but must not
-                # drive direction or tolerance decisions on a new BLE session.
-                # Attempt one read whenever this session has not reported the
-                # requested axis. Direct-position controllers can still operate
-                # if the read produces no fresh value.
+                # satisfy the target tolerance on a new BLE session. Attempt
+                # one read whenever this session has not reported the requested
+                # axis. Notification-only controllers may use retained data to
+                # choose the initial direction, and their first movement update
+                # then makes the feedback current.
+                current_angle_is_current = self._position_is_current(position_key)
                 current_angle = (
                     self._position_data.get(position_key)
-                    if self._position_is_current(position_key)
+                    if current_angle_is_current
                     else None
                 )
                 if current_angle is None:
@@ -4837,9 +4839,10 @@ class AdjustableBedCoordinator:
                         position_key,
                     )
                     await self._async_read_positions()
+                    current_angle_is_current = self._position_is_current(position_key)
                     current_angle = (
                         self._position_data.get(position_key)
-                        if self._position_is_current(position_key)
+                        if current_angle_is_current
                         else None
                     )
                     if current_angle is None and controller.may_seek_with_retained_position:
@@ -4865,7 +4868,8 @@ class AdjustableBedCoordinator:
 
                 # Check if already at target (within tolerance)
                 if (
-                    current_angle is not None
+                    current_angle_is_current
+                    and current_angle is not None
                     and abs(current_angle - target_angle) <= position_tolerance
                 ):
                     _LOGGER.debug(

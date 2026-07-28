@@ -101,7 +101,7 @@ L600 is not a protocol name**: confirmed L600 hardware includes both OKIN CB24
 
 **Disconnect After Command**
 - On by default: these beds accept a single BLE connection, so holding it locks your physical remote and the vendor app out until the idle timeout expires
-- Off by default only for beds whose protocol needs the link held open (Leggett & Platt Gen2 / LP Comfort Connect, Sleep Number BAM/MCR)
+- Off by default for beds whose protocol needs the link held open or whose controller must retain connection-scoped state between commands
 - Turn it off if you prefer faster response on rapid consecutive commands over handing the connection back right away
 - Changing it later only affects the bed whose options you edit; beds added before this became the default keep whatever they were set up with
 
