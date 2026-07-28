@@ -374,7 +374,7 @@ class BLEDiagnosticRunner:
                 _execute,
                 cancel_running=False,
                 skip_disconnect=True,
-                preemptible=False,
+                preemptible=True,
             )
         finally:
             # Serialized queries normally restart the idle timer. Diagnostics
@@ -900,10 +900,6 @@ class BLEDiagnosticRunner:
                 coordinator = self.coordinator
 
                 async def _unsubscribe(controller: BedController) -> None:
-                    _LOGGER.debug(
-                        "Clearing raw notification callback from coordinator"
-                    )
-                    coordinator.set_raw_notify_callback(None)
                     if (
                         self._diagnostic_notifications_started
                         and self._client
@@ -914,9 +910,18 @@ class BLEDiagnosticRunner:
                             "started for capture"
                         )
                         await controller.stop_notify()
-                    self._diagnostic_notifications_started = False
 
-                await self._async_execute_diagnostic_command(_unsubscribe)
+                try:
+                    await self._async_execute_diagnostic_command(_unsubscribe)
+                finally:
+                    # Authentication or reconnect preparation can fail before
+                    # the serialized cleanup callback runs. Never leave the
+                    # diagnostic callback attached to a live controller.
+                    _LOGGER.debug(
+                        "Clearing raw notification callback from coordinator"
+                    )
+                    coordinator.set_raw_notify_callback(None)
+                    self._diagnostic_notifications_started = False
             return
 
         if not self._client or not self._client.is_connected:

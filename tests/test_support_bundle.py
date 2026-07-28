@@ -189,6 +189,34 @@ class TestBleDiagnosticsRunner:
 
         coordinator.resume_position_hydration.assert_called_once_with()
 
+    async def test_notification_cleanup_always_clears_raw_callback(
+        self,
+        hass: HomeAssistant,
+    ):
+        """Failed serialized cleanup must not retain the diagnostic runner."""
+        coordinator = MagicMock()
+        runner = BLEDiagnosticRunner(
+            hass,
+            "AA:BB:CC:DD:EE:FF",
+            capture_duration=0,
+            coordinator=coordinator,
+        )
+        runner._using_coordinator_connection = True
+        runner._diagnostic_notifications_started = True
+
+        with (
+            patch.object(
+                runner,
+                "_async_execute_diagnostic_command",
+                new=AsyncMock(side_effect=RuntimeError("authentication failed")),
+            ),
+            pytest.raises(RuntimeError, match="authentication failed"),
+        ):
+            await runner._unsubscribe_from_notifications([])
+
+        coordinator.set_raw_notify_callback.assert_called_once_with(None)
+        assert runner._diagnostic_notifications_started is False
+
     async def test_run_diagnostics_enriches_detection_gatt_and_notifications(
         self,
         hass: HomeAssistant,
@@ -776,10 +804,10 @@ class TestBleDiagnosticsRunner:
         coordinator.async_pause_position_hydration.assert_awaited_once_with()
         coordinator.resume_position_hydration.assert_called_once_with()
         assert coordinator.async_execute_controller_query.await_count == 4
-        assert all(
-            call.kwargs["preemptible"] is False
+        assert [
+            call.kwargs["preemptible"]
             for call in coordinator.async_execute_controller_query.await_args_list
-        )
+        ] == [True, True, False, False]
         coordinator.async_execute_controller_command.assert_not_awaited()
         assert coordinator.pause_disconnect_timer.call_count == 5
         coordinator.resume_disconnect_timer.assert_called_once()
@@ -868,10 +896,10 @@ class TestBleDiagnosticsRunner:
         coordinator.async_pause_position_hydration.assert_awaited_once_with()
         coordinator.resume_position_hydration.assert_called_once_with()
         assert coordinator.async_execute_controller_query.await_count == 4
-        assert all(
-            call.kwargs["preemptible"] is False
+        assert [
+            call.kwargs["preemptible"]
             for call in coordinator.async_execute_controller_query.await_args_list
-        )
+        ] == [True, True, False, False]
         coordinator.async_execute_controller_command.assert_not_awaited()
         assert coordinator.pause_disconnect_timer.call_count == 5
         coordinator.resume_disconnect_timer.assert_called_once()

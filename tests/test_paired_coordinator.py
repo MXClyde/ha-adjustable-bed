@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -500,6 +501,7 @@ class SingleAddressInner:
         self._position_callbacks = set()
         self.cancelled_position_hydrations = 0
         self.position_hydration_events: list[str] = []
+        self.position_hydration_pause_count = 0
 
     @property
     def client(self):
@@ -546,6 +548,13 @@ class SingleAddressInner:
     async def _async_cancel_position_hydration(self):
         self.cancelled_position_hydrations += 1
         self.position_hydration_events.append("cancel")
+
+    async def async_pause_position_hydration(self):
+        self.position_hydration_pause_count += 1
+        await self._async_cancel_position_hydration()
+
+    def resume_position_hydration(self):
+        self.position_hydration_pause_count -= 1
 
 
 class TestSingleAddressCoordinator:
@@ -631,6 +640,33 @@ class TestSingleAddressCoordinator:
 
         assert first_task.cancelled()
         assert coordinator._single_inner.cancelled_position_hydrations == 2
+
+    async def test_sleep_number_diagnostics_pause_logical_hydration(self):
+        coordinator = self._coordinator(BED_TYPE_SLEEP_NUMBER, SleepNumberController)
+        hydrated = asyncio.Event()
+
+        async def hydrate():
+            hydrated.set()
+
+        for child in coordinator.children.values():
+            object.__setattr__(child, "async_read_initial_positions", hydrate)
+
+        await coordinator.async_pause_position_hydration()
+        coordinator._on_child_connection_change(True)
+        await asyncio.sleep(0)
+
+        assert not hydrated.is_set()
+        assert coordinator._single_position_hydration_task is None
+        assert coordinator._single_inner.position_hydration_pause_count == 1
+
+        coordinator.resume_position_hydration()
+        task = cast(
+            asyncio.Task[None], coordinator._single_position_hydration_task
+        )
+        await task
+
+        assert hydrated.is_set()
+        assert coordinator._single_inner.position_hydration_pause_count == 0
 
     async def test_sleep_number_reconnect_stops_hydration_after_swallowed_cancel(
         self,

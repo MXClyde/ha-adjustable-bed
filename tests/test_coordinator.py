@@ -898,9 +898,67 @@ class TestCoordinatorConnection:
 
         assert mock_read_positions.await_count == 2
         assert controller.prepare_for_position_read.await_count == 2
-        cancel_timer.assert_called_once_with()
-        reset_timer.assert_called_once_with()
+        assert cancel_timer.call_count >= 1
+        assert reset_timer.call_count >= 1
         mock_sleep.assert_awaited_once()
+
+    async def test_initial_position_read_is_preempted_while_waiting_for_command_lock(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+    ) -> None:
+        """A queued reconnect hydration must yield the lock to STOP."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._disable_angle_sensing = False
+        coordinator._client = MagicMock(is_connected=True)
+        controller = MagicMock(
+            position_number_specs=(SimpleNamespace(position_key="back"),)
+        )
+        controller.prepare_for_position_read = AsyncMock()
+        coordinator._controller = controller
+
+        await coordinator._command_lock.acquire()
+        hydration = asyncio.create_task(coordinator.async_read_initial_positions())
+        await asyncio.sleep(0)
+        coordinator.request_command_cancel()
+        coordinator._command_lock.release()
+
+        result = await asyncio.gather(hydration, return_exceptions=True)
+
+        assert isinstance(result[0], asyncio.CancelledError)
+        controller.prepare_for_position_read.assert_not_awaited()
+
+    async def test_initial_position_read_has_overall_retry_deadline(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+    ) -> None:
+        """Per-attempt retries must still release a silent single-client bed."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._disable_angle_sensing = False
+        coordinator._client = MagicMock(is_connected=True)
+        controller = MagicMock(
+            position_number_specs=(SimpleNamespace(position_key="back"),)
+        )
+        controller.prepare_for_position_read = AsyncMock()
+        coordinator._controller = controller
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.coordinator."
+                "_INITIAL_POSITION_READ_TOTAL_TIMEOUT",
+                0.01,
+            ),
+            patch.object(
+                coordinator,
+                "_async_read_positions",
+                new=AsyncMock(side_effect=asyncio.Event().wait),
+            ),
+        ):
+            await coordinator.async_read_initial_positions()
+
+        controller.prepare_for_position_read.assert_awaited_once_with()
+        assert coordinator._position_hydration_running is False
 
     async def test_initial_position_read_survives_a_failed_attempt(
         self,

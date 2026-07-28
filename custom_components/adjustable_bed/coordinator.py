@@ -194,6 +194,7 @@ _READABLE_LIGHT_STATE_TIMEOUT = 2.0
 _READABLE_LIGHT_STATE_RETRY_DELAY = 1.0
 _READABLE_LIGHT_STATE_MAX_RETRIES = 3
 _INITIAL_POSITION_READ_TIMEOUT = 10.0
+_INITIAL_POSITION_READ_TOTAL_TIMEOUT = 40.0
 _INITIAL_POSITION_READ_RETRY_DELAY = 3.0
 _INITIAL_POSITION_READ_MAX_ATTEMPTS = 6
 _PASSIVE_POSITION_RECONCILIATION_IDLE_MARGIN = 15.0
@@ -3327,9 +3328,8 @@ class AdjustableBedCoordinator:
         Uses the command lock to prevent concurrent GATT operations with
         commands that may start immediately after connection.
 
-        Each attempt is isolated: a bed that is slow to answer its first read
-        must not consume the whole retry budget, because nothing else reads
-        positions outside a movement command.
+        Each attempt has its own timeout, while an overall deadline keeps the
+        retry window from reserving a single-connection bed indefinitely.
         """
         if self._disable_angle_sensing:
             _LOGGER.debug("Skipping initial position read (angle sensing disabled)")
@@ -3360,66 +3360,97 @@ class AdjustableBedCoordinator:
             self._cancel_disconnect_timer()
             try:
                 _LOGGER.debug("Reading initial positions for %s", self._address)
-                for attempt in range(1, _INITIAL_POSITION_READ_MAX_ATTEMPTS + 1):
-                    try:
-                        async with asyncio.timeout(_INITIAL_POSITION_READ_TIMEOUT):
-                            async with self._command_lock:
-                                controller = self._controller
-                                if (
-                                    controller is None
-                                    or self._client is None
-                                    or not self._client.is_connected
+                try:
+                    async with asyncio.timeout(_INITIAL_POSITION_READ_TOTAL_TIMEOUT):
+                        for attempt in range(
+                            1, _INITIAL_POSITION_READ_MAX_ATTEMPTS + 1
+                        ):
+
+                            async def _read_initial_positions(
+                                controller: BedController,
+                            ) -> None:
+                                # This task may have queued behind the command
+                                # that established the connection. Recheck after
+                                # taking the lock so a completed notification or
+                                # a diagnostic pause makes the queued read a no-op.
+                                if self._position_hydration_pause_count or all(
+                                    self._position_is_current(axis)
+                                    for axis in expected_axes
                                 ):
-                                    # A later connect re-schedules this, so give
-                                    # the link back instead of burning the retry
-                                    # budget.
                                     return
                                 await controller.prepare_for_position_read()
                                 await self._async_read_positions()
-                    except TimeoutError:
-                        _LOGGER.debug(
-                            "Initial position read attempt %d/%d for %s timed out",
-                            attempt,
-                            _INITIAL_POSITION_READ_MAX_ATTEMPTS,
-                            self._address,
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as err:
-                        _LOGGER.debug(
-                            "Initial position read attempt %d/%d for %s failed: %s",
-                            attempt,
-                            _INITIAL_POSITION_READ_MAX_ATTEMPTS,
-                            self._address,
-                            err,
-                        )
 
-                    # Checked even after a failed attempt: a partial read (or a
-                    # notification that landed meanwhile) may already be enough.
-                    received_axes = {
-                        axis for axis in expected_axes if self._position_is_current(axis)
-                    }
-                    if received_axes >= expected_axes:
-                        _LOGGER.info(
-                            "Initial positions read for %s: %s",
-                            self._address,
-                            {k: f"{v}°" for k, v in self._position_data.items()},
-                        )
-                        return
+                            try:
+                                async with asyncio.timeout(
+                                    _INITIAL_POSITION_READ_TIMEOUT
+                                ):
+                                    await self.async_execute_controller_query(
+                                        _read_initial_positions,
+                                        skip_disconnect=True,
+                                        preemptible=True,
+                                    )
+                            except TimeoutError:
+                                _LOGGER.debug(
+                                    "Initial position read attempt %d/%d for %s timed out",
+                                    attempt,
+                                    _INITIAL_POSITION_READ_MAX_ATTEMPTS,
+                                    self._address,
+                                )
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as err:
+                                _LOGGER.debug(
+                                    "Initial position read attempt %d/%d for %s failed: %s",
+                                    attempt,
+                                    _INITIAL_POSITION_READ_MAX_ATTEMPTS,
+                                    self._address,
+                                    err,
+                                )
+                            finally:
+                                # Serialized queries restart the idle timer.
+                                # Hydration owns the link through its bounded
+                                # retry window, including the backoff sleeps.
+                                self._cancel_disconnect_timer()
 
-                    if attempt >= _INITIAL_POSITION_READ_MAX_ATTEMPTS:
-                        break
+                            # Checked even after a failed attempt: a partial read
+                            # (or a notification that landed meanwhile) may
+                            # already be enough.
+                            received_axes = {
+                                axis
+                                for axis in expected_axes
+                                if self._position_is_current(axis)
+                            }
+                            if received_axes >= expected_axes:
+                                _LOGGER.info(
+                                    "Initial positions read for %s: %s",
+                                    self._address,
+                                    {
+                                        k: f"{v}°"
+                                        for k, v in self._position_data.items()
+                                    },
+                                )
+                                return
 
+                            if attempt >= _INITIAL_POSITION_READ_MAX_ATTEMPTS:
+                                break
+
+                            _LOGGER.debug(
+                                "Initial position read for %s missing axes %s after "
+                                "attempt %d/%d; retrying in %.1fs",
+                                self._address,
+                                sorted(expected_axes - received_axes),
+                                attempt,
+                                _INITIAL_POSITION_READ_MAX_ATTEMPTS,
+                                _INITIAL_POSITION_READ_RETRY_DELAY,
+                            )
+                            await asyncio.sleep(_INITIAL_POSITION_READ_RETRY_DELAY)
+                except TimeoutError:
                     _LOGGER.debug(
-                        "Initial position read for %s missing axes %s after attempt %d/%d; "
-                        "retrying in %.1fs",
+                        "Initial position read retry window for %s timed out after %.1fs",
                         self._address,
-                        sorted(expected_axes - received_axes),
-                        attempt,
-                        _INITIAL_POSITION_READ_MAX_ATTEMPTS,
-                        _INITIAL_POSITION_READ_RETRY_DELAY,
+                        _INITIAL_POSITION_READ_TOTAL_TIMEOUT,
                     )
-                    await asyncio.sleep(_INITIAL_POSITION_READ_RETRY_DELAY)
 
                 if self._position_data:
                     _LOGGER.info(

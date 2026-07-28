@@ -813,6 +813,7 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
         self._single_inner = inner
         self._single_native_both = entry.data.get(CONF_BED_TYPE) != BED_TYPE_SLEEP_NUMBER
         self._single_position_hydration_task: asyncio.Task[None] | None = None
+        self._single_position_hydration_pause_count = 0
         children = {
             SIDE_LEFT: SingleAddressSideCoordinator(inner, SIDE_LEFT),
             SIDE_RIGHT: SingleAddressSideCoordinator(inner, SIDE_RIGHT),
@@ -899,6 +900,12 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
         super()._on_child_connection_change(connected)
         if not connected or self._single_inner.bed_type != BED_TYPE_SLEEP_NUMBER:
             return
+        self._schedule_single_position_hydration()
+
+    def _schedule_single_position_hydration(self) -> None:
+        """Refresh logical sides unless diagnostics currently own the BLE link."""
+        if self._single_position_hydration_pause_count:
+            return
         previous_task = self._single_position_hydration_task
         if previous_task is not None and not previous_task.done():
             previous_task.cancel()
@@ -946,6 +953,34 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
             if self._single_position_hydration_task is current_task:
                 self._single_position_hydration_task = None
 
+    async def _async_cancel_single_position_hydration(self) -> None:
+        """Cancel and await logical-side hydration."""
+        task = self._single_position_hydration_task
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._single_position_hydration_task = None
+
+    async def async_pause_position_hydration(self) -> None:
+        """Pause physical and logical hydration during diagnostics."""
+        self._single_position_hydration_pause_count += 1
+        await self._single_inner.async_pause_position_hydration()
+        await self._async_cancel_single_position_hydration()
+
+    def resume_position_hydration(self) -> None:
+        """Resume physical and logical hydration after diagnostics."""
+        if self._single_position_hydration_pause_count == 0:
+            return
+        self._single_position_hydration_pause_count -= 1
+        self._single_inner.resume_position_hydration()
+        if (
+            self._single_position_hydration_pause_count == 0
+            and self._single_inner.is_connected
+            and self._single_inner.bed_type == BED_TYPE_SLEEP_NUMBER
+        ):
+            self._schedule_single_position_hydration()
+
     async def async_disconnect(self, reason: str = "intentional") -> None:
         await self._single_inner.async_disconnect(reason)
 
@@ -970,12 +1005,7 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
         self._single_inner.begin_internal_bond_update(bond_established)
 
     async def async_shutdown(self) -> None:
-        task = self._single_position_hydration_task
-        if task is not None and not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        self._single_position_hydration_task = None
+        await self._async_cancel_single_position_hydration()
         for unsub in self._child_unsubs:
             unsub()
         self._child_unsubs.clear()
