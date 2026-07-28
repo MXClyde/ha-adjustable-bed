@@ -146,7 +146,6 @@ from .const import (
     OCTO_VARIANT_STAR2,
     OFFLINE_CAPABILITY_SAFE_BED_TYPES,
     OKIMAT_SERVICE_UUID,
-    OKIN_CST_POSITION_AXES,
     OKIN_FOOT_MAX_ANGLE,
     OKIN_HEAD_MAX_ANGLE,
     POSITION_MODE_ACCURACY,
@@ -395,6 +394,7 @@ class AdjustableBedCoordinator:
         self._passive_position_reconciliation_task: asyncio.Task[None] | None = None
         self._position_hydration_task: asyncio.Task[None] | None = None
         self._position_hydration_running = False
+        self._position_hydration_paused = False
 
         # Connection state callbacks
         self._connection_state_callbacks: set[Callable[[bool], None]] = set()
@@ -3339,79 +3339,97 @@ class AdjustableBedCoordinator:
             return
 
         self._position_hydration_running = True
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            # Setup and reconnect paths can both request the initial read. Keep
+            # whichever task actually claimed the operation discoverable so
+            # diagnostics and shutdown can cancel that exact task.
+            self._position_hydration_task = current_task
         try:
-            _LOGGER.debug("Reading initial positions for %s", self._address)
-            for attempt in range(1, _INITIAL_POSITION_READ_MAX_ATTEMPTS + 1):
+            # Own the command lock and idle timer for the whole retry window.
+            # Otherwise a timer that fires during a retry sleep can disconnect
+            # the bed as soon as the next attempt releases the lock.
+            async with self._command_lock:
+                self._cancel_disconnect_timer()
                 try:
-                    async with asyncio.timeout(_INITIAL_POSITION_READ_TIMEOUT):
-                        # Use command lock to prevent concurrent GATT operations
-                        async with self._command_lock:
-                            controller = self._controller
-                            if (
-                                controller is None
-                                or self._client is None
-                                or not self._client.is_connected
-                            ):
-                                # A later connect re-schedules this, so give the
-                                # link back instead of burning the retry budget.
-                                return
-                            await controller.prepare_for_position_read()
-                            await self._async_read_positions()
-                except TimeoutError:
-                    _LOGGER.debug(
-                        "Initial position read attempt %d/%d for %s timed out",
-                        attempt,
-                        _INITIAL_POSITION_READ_MAX_ATTEMPTS,
-                        self._address,
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as err:
-                    _LOGGER.debug(
-                        "Initial position read attempt %d/%d for %s failed: %s",
-                        attempt,
-                        _INITIAL_POSITION_READ_MAX_ATTEMPTS,
-                        self._address,
-                        err,
-                    )
+                    _LOGGER.debug("Reading initial positions for %s", self._address)
+                    for attempt in range(1, _INITIAL_POSITION_READ_MAX_ATTEMPTS + 1):
+                        try:
+                            async with asyncio.timeout(_INITIAL_POSITION_READ_TIMEOUT):
+                                controller = self._controller
+                                if (
+                                    controller is None
+                                    or self._client is None
+                                    or not self._client.is_connected
+                                ):
+                                    # A later connect re-schedules this, so give
+                                    # the link back instead of burning the retry
+                                    # budget.
+                                    return
+                                await controller.prepare_for_position_read()
+                                await self._async_read_positions()
+                        except TimeoutError:
+                            _LOGGER.debug(
+                                "Initial position read attempt %d/%d for %s timed out",
+                                attempt,
+                                _INITIAL_POSITION_READ_MAX_ATTEMPTS,
+                                self._address,
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as err:
+                            _LOGGER.debug(
+                                "Initial position read attempt %d/%d for %s failed: %s",
+                                attempt,
+                                _INITIAL_POSITION_READ_MAX_ATTEMPTS,
+                                self._address,
+                                err,
+                            )
 
-                # Checked even after a failed attempt: a partial read (or a
-                # notification that landed meanwhile) may already be enough.
-                received_axes = expected_axes & self._position_data.keys()
-                if received_axes >= expected_axes:
-                    _LOGGER.info(
-                        "Initial positions read for %s: %s",
-                        self._address,
-                        {k: f"{v}°" for k, v in self._position_data.items()},
-                    )
-                    return
+                        # Checked even after a failed attempt: a partial read (or a
+                        # notification that landed meanwhile) may already be enough.
+                        received_axes = expected_axes & self._position_data.keys()
+                        if received_axes >= expected_axes:
+                            _LOGGER.info(
+                                "Initial positions read for %s: %s",
+                                self._address,
+                                {k: f"{v}°" for k, v in self._position_data.items()},
+                            )
+                            return
 
-                if attempt >= _INITIAL_POSITION_READ_MAX_ATTEMPTS:
-                    break
+                        if attempt >= _INITIAL_POSITION_READ_MAX_ATTEMPTS:
+                            break
 
-                _LOGGER.debug(
-                    "Initial position read for %s missing axes %s after attempt %d/%d; retrying in %.1fs",
-                    self._address,
-                    sorted(expected_axes - received_axes),
-                    attempt,
-                    _INITIAL_POSITION_READ_MAX_ATTEMPTS,
-                    _INITIAL_POSITION_READ_RETRY_DELAY,
-                )
-                await asyncio.sleep(_INITIAL_POSITION_READ_RETRY_DELAY)
+                        _LOGGER.debug(
+                            "Initial position read for %s missing axes %s after attempt %d/%d; "
+                            "retrying in %.1fs",
+                            self._address,
+                            sorted(expected_axes - received_axes),
+                            attempt,
+                            _INITIAL_POSITION_READ_MAX_ATTEMPTS,
+                            _INITIAL_POSITION_READ_RETRY_DELAY,
+                        )
+                        await asyncio.sleep(_INITIAL_POSITION_READ_RETRY_DELAY)
 
-            if self._position_data:
-                _LOGGER.info(
-                    "Initial position read for %s remained partial: %s",
-                    self._address,
-                    {k: f"{v}°" for k, v in self._position_data.items()},
-                )
-            else:
-                _LOGGER.debug(
-                    "Initial position read for %s produced no data - retrying on the next connect",
-                    self._address,
-                )
+                    if self._position_data:
+                        _LOGGER.info(
+                            "Initial position read for %s remained partial: %s",
+                            self._address,
+                            {k: f"{v}°" for k, v in self._position_data.items()},
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "Initial position read for %s produced no data - retrying on the "
+                            "next connect",
+                            self._address,
+                        )
+                finally:
+                    if self._client is not None and self._client.is_connected:
+                        self._reset_disconnect_timer()
         finally:
             self._position_hydration_running = False
+            if self._position_hydration_task is current_task:
+                self._position_hydration_task = None
 
     def _schedule_position_hydration(self) -> None:
         """Fill in still-unknown position axes in the background after a connect.
@@ -3422,7 +3440,7 @@ class AdjustableBedCoordinator:
         read on every connect closes that gap, and costs nothing once every axis
         has reported, since hydrated axes are kept across disconnects.
         """
-        if self._disable_angle_sensing:
+        if self._disable_angle_sensing or self._position_hydration_paused:
             return
 
         expected_axes = self._expected_initial_position_axes()
@@ -3441,17 +3459,30 @@ class AdjustableBedCoordinator:
 
     def _expected_initial_position_axes(self) -> set[str]:
         """Return the logical position axes that startup hydration should populate."""
-        if self._motor_count <= 0:
+        controller = self._controller
+        if controller is None:
             return set()
-        if self._bed_type == BED_TYPE_OKIN_CST:
-            return set(OKIN_CST_POSITION_AXES)
+        return {spec.position_key for spec in controller.position_number_specs}
 
-        expected_axes = {"back", "legs"}
-        if self._motor_count > 2:
-            expected_axes.add("head")
-        if self._motor_count > 3:
-            expected_axes.add("feet")
-        return expected_axes
+    async def _async_cancel_position_hydration(self) -> None:
+        """Cancel and await the active position hydration task."""
+        task = self._position_hydration_task
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._position_hydration_task = None
+
+    async def async_pause_position_hydration(self) -> None:
+        """Suppress background position reads during external BLE diagnostics."""
+        self._position_hydration_paused = True
+        await self._async_cancel_position_hydration()
+
+    def resume_position_hydration(self) -> None:
+        """Resume position hydration after an external BLE diagnostic operation."""
+        self._position_hydration_paused = False
+        if self._client is not None and self._client.is_connected:
+            self._schedule_position_hydration()
 
     def _resolve_passive_position_reconciliation_interval(
         self, requested_interval_s: float | None
@@ -3554,6 +3585,7 @@ class AdjustableBedCoordinator:
 
     async def async_shutdown(self) -> None:
         """Stop background tasks and disconnect the coordinator."""
+        await self._async_cancel_position_hydration()
         self._cancel_passive_position_reconciliation_task()
         await self.async_disconnect()
 

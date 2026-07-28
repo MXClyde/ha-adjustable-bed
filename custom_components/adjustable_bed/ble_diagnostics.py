@@ -240,6 +240,8 @@ class BLEDiagnosticRunner:
                 await stack.enter_async_context(
                     async_get_connect_lock(self.hass, self.address)
                 )
+            else:
+                await self.coordinator.async_pause_position_hydration()
             try:
                 await self._connect()
 
@@ -274,7 +276,11 @@ class BLEDiagnosticRunner:
                 _LOGGER.exception(error_msg)
                 self._errors.append(error_msg)
             finally:
-                await self._disconnect()
+                try:
+                    await self._disconnect()
+                finally:
+                    if self.coordinator is not None:
+                        self.coordinator.resume_position_hydration()
 
         end_time = datetime.now(UTC)
         best_snapshot = self._best_snapshot()

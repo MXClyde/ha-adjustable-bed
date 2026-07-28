@@ -34,6 +34,7 @@ from custom_components.adjustable_bed.const import (
     BED_TYPE_OKIN_CST,
     BED_TYPE_OKIN_RF_ECO_BT,
     BED_TYPE_RICHMAT,
+    BED_TYPE_SLEEP_NUMBER,
     BED_TYPE_SLEEP_NUMBER_MCR,
     BED_TYPE_SLEEPYS_BOX25,
     CONF_BED_TYPE,
@@ -826,6 +827,10 @@ class TestCoordinatorConnection:
 
         controller = MagicMock()
         controller.prepare_for_position_read = AsyncMock()
+        controller.position_number_specs = (
+            SimpleNamespace(position_key="back"),
+            SimpleNamespace(position_key="legs"),
+        )
         coordinator._controller = controller
 
         async def _read_positions() -> None:
@@ -855,6 +860,10 @@ class TestCoordinatorConnection:
 
         controller = MagicMock()
         controller.prepare_for_position_read = AsyncMock()
+        controller.position_number_specs = (
+            SimpleNamespace(position_key="back"),
+            SimpleNamespace(position_key="legs"),
+        )
         coordinator._controller = controller
 
         read_count = 0
@@ -872,6 +881,8 @@ class TestCoordinatorConnection:
                 "_async_read_positions",
                 new=AsyncMock(side_effect=_read_positions),
             ) as mock_read_positions,
+            patch.object(coordinator, "_cancel_disconnect_timer") as cancel_timer,
+            patch.object(coordinator, "_reset_disconnect_timer") as reset_timer,
             patch(
                 "custom_components.adjustable_bed.coordinator.asyncio.sleep",
                 new=AsyncMock(),
@@ -881,6 +892,8 @@ class TestCoordinatorConnection:
 
         assert mock_read_positions.await_count == 2
         assert controller.prepare_for_position_read.await_count == 2
+        cancel_timer.assert_called_once_with()
+        reset_timer.assert_called_once_with()
         mock_sleep.assert_awaited_once()
 
     async def test_initial_position_read_survives_a_failed_attempt(
@@ -896,6 +909,10 @@ class TestCoordinatorConnection:
 
         controller = MagicMock()
         controller.prepare_for_position_read = AsyncMock()
+        controller.position_number_specs = (
+            SimpleNamespace(position_key="back"),
+            SimpleNamespace(position_key="legs"),
+        )
         coordinator._controller = controller
 
         read_count = 0
@@ -935,6 +952,12 @@ class TestCoordinatorConnection:
         mock_config_entry.add_to_hass(hass)
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         coordinator._disable_angle_sensing = False
+        coordinator._controller = make_controller_mock(
+            position_number_specs=(
+                SimpleNamespace(position_key="back"),
+                SimpleNamespace(position_key="legs"),
+            )
+        )
 
         with patch.object(
             coordinator, "async_read_initial_positions", new=AsyncMock()
@@ -982,6 +1005,39 @@ class TestCoordinatorConnection:
                 unique_id=TEST_ADDRESS,
                 entry_id="cst_expected_axes",
             ),
+        )
+        coordinator._controller = make_controller_mock(
+            position_number_specs=(
+                SimpleNamespace(position_key="back"),
+                SimpleNamespace(position_key="legs"),
+            )
+        )
+
+        assert coordinator._expected_initial_position_axes() == {"back", "legs"}
+
+    async def test_expected_position_axes_follow_live_controller_specs(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+    ) -> None:
+        """Configured motors do not add axes the live controller cannot report."""
+        mock_config_entry_data[CONF_BED_TYPE] = BED_TYPE_SLEEP_NUMBER
+        mock_config_entry_data[CONF_MOTOR_COUNT] = 4
+        coordinator = AdjustableBedCoordinator(
+            hass,
+            MockConfigEntry(
+                domain=DOMAIN,
+                title=TEST_NAME,
+                data=mock_config_entry_data,
+                unique_id=TEST_ADDRESS,
+                entry_id="reportable_position_axes",
+            ),
+        )
+        coordinator._controller = make_controller_mock(
+            position_number_specs=(
+                SimpleNamespace(position_key="back"),
+                SimpleNamespace(position_key="legs"),
+            )
         )
 
         assert coordinator._expected_initial_position_axes() == {"back", "legs"}
@@ -1110,6 +1166,37 @@ class TestCoordinatorConnection:
 
         task.cancel.assert_called_once_with()
         assert coordinator._passive_position_reconciliation_task is None
+        mock_disconnect.assert_awaited_once_with()
+
+    async def test_async_shutdown_awaits_position_hydration_before_disconnect(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+    ) -> None:
+        """Shutdown must stop an in-flight GATT hydration before disconnecting."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        hydration_started = asyncio.Event()
+
+        async def _hydrate() -> None:
+            hydration_started.set()
+            await asyncio.Event().wait()
+
+        task = hass.async_create_task(_hydrate())
+        coordinator._position_hydration_task = task
+        await hydration_started.wait()
+
+        async def _disconnect() -> None:
+            assert task.done()
+
+        with patch.object(
+            coordinator,
+            "async_disconnect",
+            new=AsyncMock(side_effect=_disconnect),
+        ) as mock_disconnect:
+            await coordinator.async_shutdown()
+
+        assert task.cancelled()
+        assert coordinator._position_hydration_task is None
         mock_disconnect.assert_awaited_once_with()
 
 

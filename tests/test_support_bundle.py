@@ -670,6 +670,8 @@ class TestBleDiagnosticsRunner:
         client2 = _build_diagnostic_client(_FakeServices([service2]))
 
         coordinator = MagicMock()
+        coordinator.async_pause_position_hydration = AsyncMock()
+        coordinator.resume_position_hydration = MagicMock()
         coordinator.client = client1
         coordinator.is_connected = True
         coordinator.connection_source = "proxy_1"
@@ -732,6 +734,8 @@ class TestBleDiagnosticsRunner:
         assert chars[1]["read_error"] == "BleakError"
         assert chars[2]["read_result"]["hex"] == "02"
         assert any("reconnecting" in error for error in report.errors)
+        coordinator.async_pause_position_hydration.assert_awaited_once_with()
+        coordinator.resume_position_hydration.assert_called_once_with()
         coordinator.pause_disconnect_timer.assert_called_once()
         coordinator.resume_disconnect_timer.assert_called_once()
         coordinator.set_raw_notify_callback.assert_called_with(None)
@@ -750,6 +754,8 @@ class TestBleDiagnosticsRunner:
         )
         client = _build_diagnostic_client(_FakeServices([]))
         coordinator = MagicMock()
+        coordinator.async_pause_position_hydration = AsyncMock()
+        coordinator.resume_position_hydration = MagicMock()
         coordinator.client = None
         coordinator.is_connected = False
         coordinator.connection_source = None
@@ -798,6 +804,8 @@ class TestBleDiagnosticsRunner:
         select_adapter.assert_not_called()
         assert report.device["connection_path"] == "coordinator_connected_for_diagnostics"
         assert report.device["actual_source"] == "proxy_1"
+        coordinator.async_pause_position_hydration.assert_awaited_once_with()
+        coordinator.resume_position_hydration.assert_called_once_with()
         coordinator.pause_disconnect_timer.assert_called_once()
         coordinator.resume_disconnect_timer.assert_called_once()
         coordinator.async_start_notify_for_diagnostics.assert_not_called()
@@ -817,6 +825,8 @@ class TestBleDiagnosticsRunner:
         )
         client = _build_diagnostic_client(_FakeServices([]))
         coordinator = MagicMock()
+        coordinator.async_pause_position_hydration = AsyncMock()
+        coordinator.resume_position_hydration = MagicMock()
         coordinator.client = None
         coordinator.is_connected = False
         coordinator.entry.data = {CONF_PREFERRED_ADAPTER: "proxy_1"}
@@ -873,6 +883,8 @@ class TestBleDiagnosticsRunner:
             == "configured_coordinator"
         )
         assert fallback_attempt["result"] == "connected"
+        coordinator.async_pause_position_hydration.assert_awaited_once_with()
+        coordinator.resume_position_hydration.assert_called_once_with()
         assert (
             fallback_attempt["diagnostic_connection_path"]
             == "standalone_after_coordinator_failure"

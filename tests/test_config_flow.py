@@ -1366,34 +1366,22 @@ class TestBluetoothDiscoveryFlow:
         )
         assert marker.default() is True
 
-    def test_untouched_disconnect_default_follows_the_chosen_bed_type(self):
-        """Picking another bed type must not persist the previous type's default.
-
-        The checkbox is rendered from the bed type the step defaulted to, so a
-        submitted value that still equals it was never touched and has to be
-        recomputed for the bed the user actually chose.
-        """
+    def test_submitted_disconnect_choice_is_preserved_across_bed_type_changes(self):
+        """A submitted boolean remains authoritative when the bed type changes."""
         from custom_components.adjustable_bed.config_flow import AdjustableBedConfigFlow
 
         flow = AdjustableBedConfigFlow()
-        # Rendered pre-checked for the detected Linak bed.
-        flow._rendered_disconnect_default = True
 
-        # Untouched, but the user switched to a bed that holds its link open.
+        # True matched the prior Linak default, but remains an explicit choice
+        # after switching to a Gen2 bed whose default is False.
         assert (
             flow._disconnect_after_command_choice(
                 {CONF_DISCONNECT_AFTER_COMMAND: True}, BED_TYPE_LEGGETT_GEN2, None
             )
-            is False
-        )
-        # Untouched and the bed type is unchanged: the rendered default stands.
-        assert (
-            flow._disconnect_after_command_choice(
-                {CONF_DISCONNECT_AFTER_COMMAND: True}, BED_TYPE_LINAK, VARIANT_AUTO
-            )
             is True
         )
-        # Explicitly unchecked: the user's choice wins over the bed type default.
+        # False matched the prior Gen2 default, but remains an explicit choice
+        # after switching to a Linak bed whose default is True.
         assert (
             flow._disconnect_after_command_choice(
                 {CONF_DISCONNECT_AFTER_COMMAND: False}, BED_TYPE_LINAK, VARIANT_AUTO
