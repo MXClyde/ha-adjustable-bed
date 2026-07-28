@@ -1332,6 +1332,7 @@ class TestBluetoothDiscoveryFlow:
             BED_TYPE_LEGGETT_GEN2,
             BED_TYPE_LEGGETT_PLATT,
             BED_TYPE_LEGGETT_WILINKE,
+            BED_TYPE_LIMOSS,
             BED_TYPE_LINAK,
             BED_TYPE_OKIN_CB24,
             BED_TYPE_OKIN_CST,
@@ -1343,6 +1344,7 @@ class TestBluetoothDiscoveryFlow:
             BED_TYPE_SLEEP_NUMBER_MCR,
             BED_TYPE_SLEEPSTAR,
             BED_TYPE_SLEEPYS_BOX25,
+            BED_TYPE_SUTA,
             BED_TYPE_SVANE,
             BED_TYPE_VIBRADORM,
             KEESON_VARIANT_SINO,
@@ -1353,6 +1355,7 @@ class TestBluetoothDiscoveryFlow:
         )
 
         assert disconnect_after_command_default_enabled(BED_TYPE_LINAK, VARIANT_AUTO) is True
+        assert disconnect_after_command_default_enabled(BED_TYPE_ERGOMOTION, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_LEGGETT_GEN2, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_SLEEP_NUMBER_MCR, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_JENSEN, None) is False
@@ -1365,8 +1368,9 @@ class TestBluetoothDiscoveryFlow:
         )
         assert (
             disconnect_after_command_default_enabled(BED_TYPE_KEESON, KEESON_VARIANT_ERGOMOTION)
-            is True
+            is False
         )
+        assert disconnect_after_command_default_enabled(BED_TYPE_LIMOSS, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_OKIN_CB24, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_OKIN_CST, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_OKIMAT, None) is False
@@ -1377,6 +1381,7 @@ class TestBluetoothDiscoveryFlow:
         assert disconnect_after_command_default_enabled(BED_TYPE_SLEEP_NUMBER, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_SLEEPSTAR, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_SLEEPYS_BOX25, None) is False
+        assert disconnect_after_command_default_enabled(BED_TYPE_SUTA, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_SVANE, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_VIBRADORM, None) is False
         # An umbrella type resolves through its explicit variant.
@@ -1414,55 +1419,31 @@ class TestBluetoothDiscoveryFlow:
         )
         assert marker.default() is True
 
-    def test_disconnect_choice_follows_bed_type_changes(self):
-        """An unchanged rendered default follows the newly selected bed type."""
+    def test_submitted_disconnect_choice_is_preserved_across_bed_type_changes(self):
+        """A submitted boolean remains authoritative when the bed type changes."""
         from custom_components.adjustable_bed.config_flow import AdjustableBedConfigFlow
 
         flow = AdjustableBedConfigFlow()
 
-        # Values matching what the form rendered follow the newly selected
-        # protocol's default.
         assert (
             flow._disconnect_after_command_choice(
                 {CONF_DISCONNECT_AFTER_COMMAND: True},
                 BED_TYPE_LEGGETT_GEN2,
                 None,
-                rendered_default=True,
-            )
-            is False
-        )
-        assert (
-            flow._disconnect_after_command_choice(
-                {CONF_DISCONNECT_AFTER_COMMAND: False},
-                BED_TYPE_LINAK,
-                VARIANT_AUTO,
-                rendered_default=False,
             )
             is True
         )
-
-        # Values different from the rendered default remain explicit choices.
         assert (
             flow._disconnect_after_command_choice(
                 {CONF_DISCONNECT_AFTER_COMMAND: False},
                 BED_TYPE_LINAK,
                 VARIANT_AUTO,
-                rendered_default=True,
             )
             is False
         )
 
-        # An absent field also follows the chosen bed type.
+        # An absent field follows the chosen bed type.
         assert flow._disconnect_after_command_choice({}, BED_TYPE_LINAK, VARIANT_AUTO) is True
-        assert (
-            flow._disconnect_after_command_choice(
-                {},
-                BED_TYPE_LINAK,
-                VARIANT_AUTO,
-                rendered_default=False,
-            )
-            is True
-        )
 
     async def test_explicitly_unchecking_disconnect_after_command_is_kept(
         self,

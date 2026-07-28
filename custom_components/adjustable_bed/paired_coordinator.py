@@ -785,7 +785,9 @@ class SingleAddressSideCoordinator:
             await bound.prepare_for_position_read()
             await bound.read_positions(self._single_inner.motor_count)
 
-        await self._single_inner.async_execute_controller_query(read)
+        await self._single_inner.async_execute_controller_query(
+            read, skip_disconnect=True
+        )
         self._sync_position_state()
 
     async def async_stop_command(self, **_kwargs: Any) -> None:
@@ -810,6 +812,7 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
     ) -> None:
         self._single_inner = inner
         self._single_native_both = entry.data.get(CONF_BED_TYPE) != BED_TYPE_SLEEP_NUMBER
+        self._single_position_hydration_task: asyncio.Task[None] | None = None
         children = {
             SIDE_LEFT: SingleAddressSideCoordinator(inner, SIDE_LEFT),
             SIDE_RIGHT: SingleAddressSideCoordinator(inner, SIDE_RIGHT),
@@ -892,6 +895,45 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
     async def async_connect(self) -> bool:
         return await self._single_inner.async_connect()
 
+    def _on_child_connection_change(self, connected: bool) -> None:
+        super()._on_child_connection_change(connected)
+        if not connected or self._single_inner.bed_type != BED_TYPE_SLEEP_NUMBER:
+            return
+        task = self._single_position_hydration_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._single_position_hydration_task = self.entry.async_create_background_task(
+            self.hass,
+            self._async_hydrate_logical_positions(),
+            name=f"adjustable_bed_single_address_position_hydration_{self.entry.entry_id}",
+        )
+
+    async def _async_hydrate_logical_positions(self) -> None:
+        """Refresh each logical side without mixing same-named position axes."""
+        current_task = asyncio.current_task()
+        try:
+            # The inner coordinator schedules an unbound read during connect.
+            # Replace it with side-bound reads for protocols whose two logical
+            # sides report the same axis names.
+            await self._single_inner._async_cancel_position_hydration()
+            results = await asyncio.gather(
+                *(
+                    child.async_read_initial_positions()
+                    for child in self._children.values()
+                ),
+                return_exceptions=True,
+            )
+            for side, result in zip(self._children, results, strict=True):
+                if isinstance(result, BaseException):
+                    _LOGGER.debug(
+                        "Single-address position hydration failed for %s side: %s",
+                        side,
+                        result,
+                    )
+        finally:
+            if self._single_position_hydration_task is current_task:
+                self._single_position_hydration_task = None
+
     async def async_disconnect(self, reason: str = "intentional") -> None:
         await self._single_inner.async_disconnect(reason)
 
@@ -916,6 +958,12 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
         self._single_inner.begin_internal_bond_update(bond_established)
 
     async def async_shutdown(self) -> None:
+        task = self._single_position_hydration_task
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._single_position_hydration_task = None
         for unsub in self._child_unsubs:
             unsub()
         self._child_unsubs.clear()

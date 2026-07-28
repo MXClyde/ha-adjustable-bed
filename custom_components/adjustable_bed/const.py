@@ -2267,10 +2267,12 @@ BEDS_WITH_DISCONNECT_AFTER_COMMAND_DEFAULT_DISABLED: Final = (
     BEDS_REQUIRING_PERSISTENT_CONNECTION
     | frozenset(
         {
+            BED_TYPE_ERGOMOTION,
             BED_TYPE_JENSEN,
             BED_TYPE_JIECANG,
             BED_TYPE_KAIDI,
             BED_TYPE_LEGGETT_WILINKE,
+            BED_TYPE_LIMOSS,
             BED_TYPE_OKIMAT,
             BED_TYPE_OKIN_CB24,
             BED_TYPE_OKIN_CST,
@@ -2281,6 +2283,7 @@ BEDS_WITH_DISCONNECT_AFTER_COMMAND_DEFAULT_DISABLED: Final = (
             BED_TYPE_SLEEP_NUMBER,
             BED_TYPE_SLEEPSTAR,
             BED_TYPE_SLEEPYS_BOX25,
+            BED_TYPE_SUTA,
             BED_TYPE_SVANE,
             BED_TYPE_VIBRADORM,
         }
@@ -2311,6 +2314,7 @@ def disconnect_after_command_default_enabled(
         None,
         "",
         VARIANT_AUTO,
+        KEESON_VARIANT_ERGOMOTION,
         KEESON_VARIANT_SINO,
         "ore",
     }:

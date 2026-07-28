@@ -25,6 +25,7 @@ from .const import (
     BED_TYPE_KAIDI,
     BED_TYPE_OCTO,
     BED_TYPE_RICHMAT,
+    BED_TYPE_SLEEP_NUMBER,
     BED_TYPE_VIBRADORM,
     BEDTECH_MANUFACTURER_ID,
     BEDTECH_SERVICE_UUID,
@@ -935,12 +936,13 @@ async def _async_setup_single_address_paired_entry(
     hass.data[DOMAIN][entry.entry_id] = coordinator
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     await hass.config_entries.async_forward_entry_setups(entry, PAIRED_PLATFORMS)
-    for side, child in coordinator.children.items():
-        entry.async_create_background_task(
-            hass,
-            child.async_read_initial_positions(),
-            name=f"adjustable_bed_single_address_initial_read_{side}",
-        )
+    if inner.bed_type != BED_TYPE_SLEEP_NUMBER:
+        for side, child in coordinator.children.items():
+            entry.async_create_background_task(
+                hass,
+                child.async_read_initial_positions(),
+                name=f"adjustable_bed_single_address_initial_read_{side}",
+            )
     _LOGGER.info("Single-address paired bed setup complete for %s", entry.title)
     return True
 
