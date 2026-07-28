@@ -5045,7 +5045,7 @@ class TestStopAfterCancel:
         # Counter should NOT have incremented
         assert coordinator._cancel_counter == initial_counter
 
-    async def test_non_preemptible_controller_command_finishes_before_new_command(
+    async def test_non_preemptible_controller_query_finishes_before_new_command(
         self,
         hass: HomeAssistant,
         mock_config_entry,
@@ -5065,7 +5065,7 @@ class TestStopAfterCancel:
             cleanup_finished = True
 
         cleanup_task = asyncio.create_task(
-            coordinator.async_execute_controller_command(
+            coordinator.async_execute_controller_query(
                 cleanup,
                 cancel_running=False,
                 preemptible=False,

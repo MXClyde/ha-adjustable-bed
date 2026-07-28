@@ -775,8 +775,8 @@ class TestBleDiagnosticsRunner:
         assert any("reconnecting" in error for error in report.errors)
         coordinator.async_pause_position_hydration.assert_awaited_once_with()
         coordinator.resume_position_hydration.assert_called_once_with()
-        assert coordinator.async_execute_controller_query.await_count == 2
-        assert coordinator.async_execute_controller_command.await_count == 2
+        assert coordinator.async_execute_controller_query.await_count == 4
+        coordinator.async_execute_controller_command.assert_not_awaited()
         assert coordinator.pause_disconnect_timer.call_count == 5
         coordinator.resume_disconnect_timer.assert_called_once()
         coordinator.set_raw_notify_callback.assert_called_with(None)
@@ -863,8 +863,8 @@ class TestBleDiagnosticsRunner:
         assert report.device["actual_source"] == "proxy_1"
         coordinator.async_pause_position_hydration.assert_awaited_once_with()
         coordinator.resume_position_hydration.assert_called_once_with()
-        assert coordinator.async_execute_controller_query.await_count == 2
-        assert coordinator.async_execute_controller_command.await_count == 2
+        assert coordinator.async_execute_controller_query.await_count == 4
+        coordinator.async_execute_controller_command.assert_not_awaited()
         assert coordinator.pause_disconnect_timer.call_count == 5
         coordinator.resume_disconnect_timer.assert_called_once()
         if requires_notification_channel:

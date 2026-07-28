@@ -390,7 +390,7 @@ class BLEDiagnosticRunner:
             raise RuntimeError("Diagnostic command requires a coordinator connection")
 
         try:
-            await coordinator.async_execute_controller_command(
+            await coordinator.async_execute_controller_query(
                 command,
                 cancel_running=False,
                 skip_disconnect=True,

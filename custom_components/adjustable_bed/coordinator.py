@@ -4295,7 +4295,6 @@ class AdjustableBedCoordinator:
         command_fn: Callable[[BedController], Coroutine[Any, Any, None]],
         cancel_running: bool = True,
         skip_disconnect: bool = False,
-        preemptible: bool = True,
     ) -> None:
         """Execute a controller command with proper serialization."""
         await self._async_execute_controller_operation(
@@ -4303,7 +4302,7 @@ class AdjustableBedCoordinator:
             cancel_running=cancel_running,
             skip_disconnect=skip_disconnect,
             raise_on_lock_cancel=False,
-            preemptible=preemptible,
+            preemptible=True,
             enable_position_polling=True,
             read_positions_after_operation=True,
             operation_name="command",
@@ -4314,6 +4313,7 @@ class AdjustableBedCoordinator:
         query_fn: Callable[[BedController], Coroutine[Any, Any, T]],
         cancel_running: bool = False,
         skip_disconnect: bool = False,
+        preemptible: bool = True,
     ) -> T:
         """Execute a controller query and return its result."""
         result = await self._async_execute_controller_operation(
@@ -4321,7 +4321,7 @@ class AdjustableBedCoordinator:
             cancel_running=cancel_running,
             skip_disconnect=skip_disconnect,
             raise_on_lock_cancel=True,
-            preemptible=True,
+            preemptible=preemptible,
             enable_position_polling=False,
             read_positions_after_operation=False,
             operation_name="query",
