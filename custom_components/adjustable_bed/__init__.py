@@ -890,11 +890,7 @@ async def _async_setup_paired_entry(hass: HomeAssistant, entry: ConfigEntry) -> 
     # per-side covers don't sit at "unknown" until the first movement.
     for child in coordinator.children.values():
         if child.is_connected:
-            entry.async_create_background_task(
-                hass,
-                child.async_read_initial_positions(),
-                name=f"adjustable_bed_paired_initial_read_{child.address}",
-            )
+            child._schedule_position_hydration()
 
     _LOGGER.info("Paired bed setup complete for %s", entry.title)
     return True

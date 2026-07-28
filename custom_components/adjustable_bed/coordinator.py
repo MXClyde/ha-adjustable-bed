@@ -154,6 +154,7 @@ from .const import (
     REVERIE_BACK_MAX_ANGLE,
     RICHMAT_REMOTE_AUTO,
     VARIANT_AUTO,
+    bed_type_has_position_feedback,
     connection_gated_by_bond,
     get_richmat_features,
     get_richmat_motor_count,
@@ -3470,6 +3471,8 @@ class AdjustableBedCoordinator:
 
     def _expected_initial_position_axes(self) -> set[str]:
         """Return the logical position axes that startup hydration should populate."""
+        if not bed_type_has_position_feedback(self._bed_type, self._protocol_variant):
+            return set()
         controller = self._controller
         if controller is None:
             return set()

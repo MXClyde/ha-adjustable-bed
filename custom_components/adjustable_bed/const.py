@@ -2260,7 +2260,7 @@ BEDS_REQUIRING_PERSISTENT_CONNECTION: Final = frozenset(
     }
 )
 
-# These controllers track massage or light state in the connection-scoped
+# These controllers track user-selected state in the connection-scoped
 # controller. They can reconnect on demand, but a new entry must retain the
 # controller by default so consecutive controls keep their intended state.
 BEDS_WITH_DISCONNECT_AFTER_COMMAND_DEFAULT_DISABLED: Final = (
@@ -2277,6 +2277,7 @@ BEDS_WITH_DISCONNECT_AFTER_COMMAND_DEFAULT_DISABLED: Final = (
             BED_TYPE_OKIN_UUID,
             BED_TYPE_REVERIE,
             BED_TYPE_REVERIE_NIGHTSTAND,
+            BED_TYPE_SLEEP_NUMBER,
             BED_TYPE_SLEEPSTAR,
             BED_TYPE_SLEEPYS_BOX25,
             BED_TYPE_VIBRADORM,

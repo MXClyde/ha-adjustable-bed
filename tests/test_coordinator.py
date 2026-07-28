@@ -20,6 +20,7 @@ from custom_components.adjustable_bed.bluetooth_transport import (
 from custom_components.adjustable_bed.const import (
     BED_MOTOR_PULSE_DEFAULTS,
     BED_TYPE_BEDTECH,
+    BED_TYPE_KAIDI,
     BED_TYPE_KEESON,
     BED_TYPE_LEGGETT_GEN2,
     BED_TYPE_LEGGETT_OKIN,
@@ -1007,6 +1008,35 @@ class TestCoordinatorConnection:
         mock_config_entry.add_to_hass(hass)
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         coordinator._disable_angle_sensing = True
+
+        coordinator._schedule_position_hydration()
+
+        assert coordinator._position_hydration_task is None
+
+    async def test_position_hydration_skipped_without_position_feedback(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+    ) -> None:
+        """Write-only position sliders must not trigger feedback hydration."""
+        mock_config_entry_data[CONF_BED_TYPE] = BED_TYPE_KAIDI
+        coordinator = AdjustableBedCoordinator(
+            hass,
+            MockConfigEntry(
+                domain=DOMAIN,
+                title=TEST_NAME,
+                data=mock_config_entry_data,
+                unique_id=TEST_ADDRESS,
+                entry_id="write_only_position_hydration",
+            ),
+        )
+        coordinator._disable_angle_sensing = False
+        coordinator._controller = make_controller_mock(
+            position_number_specs=(
+                SimpleNamespace(position_key="back"),
+                SimpleNamespace(position_key="legs"),
+            )
+        )
 
         coordinator._schedule_position_hydration()
 
