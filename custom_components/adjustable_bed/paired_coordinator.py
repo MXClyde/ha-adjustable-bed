@@ -595,6 +595,23 @@ class PairedBedCoordinator:
             return_exceptions=True,
         )
 
+    def consume_internal_entry_update(self, entry: ConfigEntry) -> bool:
+        """Let the side that changed bond state claim the parent entry update.
+
+        A separate-address pair persists a child's runtime bond markers by
+        updating the one real parent entry. The update listener therefore sees
+        this wrapper, not the child that armed the internal-update marker.
+        Forwarding the check prevents a successful verification or confirmed
+        removal from unnecessarily reloading and disconnecting both sides.
+        """
+        # Do not short-circuit: two children may arm their markers before the
+        # parent listener runs, and both must be consumed by that one pass.
+        consumed = False
+        for child in self._children.values():
+            if child.consume_internal_entry_update(entry):
+                consumed = True
+        return consumed
+
     # --------------------------------------------------- connection-state relay
     def _wire_child_connection_callbacks(self) -> None:
         for child in self._children.values():

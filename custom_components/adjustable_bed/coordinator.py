@@ -121,6 +121,7 @@ from .const import (
     CONF_PREFERRED_ADAPTER,
     CONF_PROTOCOL_VARIANT,
     CONF_RICHMAT_REMOTE,
+    CONF_SIDE,
     CONNECTION_PROFILES,
     DEFAULT_BACK_MAX_ANGLE,
     DEFAULT_CONNECTION_PROFILE,
@@ -1136,7 +1137,13 @@ class AdjustableBedCoordinator:
         bond value, would then be mistaken for this write and silently skip the
         reload it needs.
         """
-        if self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id) is not self:
+        loaded = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
+        owns_loaded_child = False
+        if isinstance(self.entry, ChildEntryView) and loaded is not None:
+            child_for_side = getattr(loaded, "child_for_side", None)
+            side = self.entry.data.get(CONF_SIDE)
+            owns_loaded_child = callable(child_for_side) and child_for_side(side) is self
+        if loaded is not self and not owns_loaded_child:
             self._pending_internal_bond_marker = None
             return
         self._pending_internal_bond_marker = bond_established
@@ -1151,7 +1158,8 @@ class AdjustableBedCoordinator:
         if pending is None:
             return False
         self._pending_internal_bond_marker = None
-        return bool(entry.data.get(CONF_BLE_BOND_ESTABLISHED, False)) is pending
+        current_data = self.entry.data if isinstance(self.entry, ChildEntryView) else entry.data
+        return bool(current_data.get(CONF_BLE_BOND_ESTABLISHED, False)) is pending
 
     def _mark_ble_bond_established(self) -> None:
         """Record that future connections should skip `pair=True`."""
@@ -1188,10 +1196,11 @@ class AdjustableBedCoordinator:
         data.pop(CONF_BLE_BOND_ESTABLISHED, None)
         data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
         data.pop(CONF_BLE_BOND_CONTEXT, None)
+        data.pop(CONF_BLE_BOND_ATTEMPTED_SOURCE, None)
         if data == dict(self.entry.data):
             return
         self._begin_internal_entry_update(False)
-        self.hass.config_entries.async_update_entry(self.entry, data=data)
+        self._async_persist_config(data)
 
     def _log_bond_marker_unreliable(self) -> None:
         """Log the latch transition. The write itself is batched by the caller."""
