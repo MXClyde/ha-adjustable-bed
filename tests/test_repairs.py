@@ -41,10 +41,17 @@ from custom_components.adjustable_bed.const import (
     CONF_BED_TYPE,
     CONF_BLE_BOND_ESTABLISHED,
     CONF_BLE_BOND_MARKER_UNRELIABLE,
+    CONF_PAIR_CHILDREN,
     CONF_PAIR_ID,
     CONF_PAIR_MEMBER_ADDRESSES,
+    CONF_PAIR_MODE,
+    CONF_SIDE,
     DOMAIN,
+    PAIR_MODE_SEPARATE_ADDRESS,
+    SIDE_LEFT,
+    SIDE_RIGHT,
 )
+from custom_components.adjustable_bed.pairing import get_child
 from custom_components.adjustable_bed.pairing_candidates import (
     CONF_PAIR_SELECTION,
     decode_pair_selection,
@@ -1296,18 +1303,10 @@ async def test_a_standalone_bed_with_host_evidence_is_offered_recovery(
     assert result["step_id"] == "stale_bond_confirm"
 
 
-async def test_a_combined_pair_is_never_offered_stale_bond_recovery(
+async def test_an_unresolved_combined_pair_is_not_offered_stale_bond_recovery(
     hass: HomeAssistant,
 ) -> None:
-    """A pair keeps each side's address and bond state on a child descriptor.
-
-    Recovery writes its markers at entry level and drives the sequence through
-    the entry's coordinator, and a combined pair has neither: the parent
-    coordinator exposes no per-side transport, and no child ever reads a
-    top-level bond marker. Offering the destructive branch here would remove a
-    real host bond and then report success for state nothing consumes, so the
-    guided pairing branch is used instead.
-    """
+    """Malformed legacy pair data still cannot authorize a destructive action."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         title=TEST_NAME,
@@ -1336,6 +1335,156 @@ async def test_a_combined_pair_is_never_offered_stale_bond_recovery(
     assert result["step_id"] == "confirm"
     # The host's bond store is never even consulted for a pair.
     read_bonds.assert_not_awaited()
+
+
+async def test_a_combined_side_is_offered_stale_bond_recovery(
+    hass: HomeAssistant,
+) -> None:
+    """The issue address resolves the child data and exact host bond it owns."""
+    other_address = "AA:BB:CC:DD:EE:01"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_OKIMAT,
+            CONF_PAIR_ID: "pair_abc123",
+            CONF_PAIR_MODE: PAIR_MODE_SEPARATE_ADDRESS,
+            CONF_PAIR_MEMBER_ADDRESSES: [TEST_ADDRESS, other_address],
+            CONF_PAIR_CHILDREN: [
+                {
+                    CONF_SIDE: SIDE_LEFT,
+                    CONF_ADDRESS: TEST_ADDRESS,
+                    CONF_NAME: "Left",
+                    CONF_BED_TYPE: BED_TYPE_OKIMAT,
+                    CONF_BLE_BOND_ESTABLISHED: True,
+                },
+                {
+                    CONF_SIDE: SIDE_RIGHT,
+                    CONF_ADDRESS: other_address,
+                    CONF_NAME: "Right",
+                    CONF_BED_TYPE: BED_TYPE_OKIMAT,
+                },
+            ],
+        },
+        unique_id="pair_abc123",
+        entry_id="repair_combined_side_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(
+        TEST_ADDRESS,
+        "Left",
+        entry.entry_id,
+        issue_data=_stale_bond_issue_data(),
+    )
+    flow.hass = hass
+
+    with patch(
+        "custom_components.adjustable_bed.bond_recovery.async_read_local_bonds",
+        AsyncMock(return_value=_host_bond_inventory()),
+    ):
+        result = await flow.async_step_init()
+
+    assert result["step_id"] == "stale_bond_confirm"
+    assert flow._target_side() == SIDE_LEFT
+
+    left_coordinator = MagicMock()
+    right_coordinator = MagicMock()
+    parent = MagicMock()
+    parent.child_for_side.side_effect = {
+        SIDE_LEFT: left_coordinator,
+        SIDE_RIGHT: right_coordinator,
+    }.get
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = parent
+    try:
+        assert flow._target_coordinator() is left_coordinator
+    finally:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+
+
+async def test_combined_recovery_persists_only_the_repaired_child(
+    hass: HomeAssistant,
+) -> None:
+    """New ownership and removals stay on the side that owns the issue address."""
+    other_address = "AA:BB:CC:DD:EE:01"
+    stale_context = {
+        "version": 1,
+        "transport": "local",
+        "source": "11:22:33:44:55:66",
+        "adapter": "hci0",
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_OKIMAT,
+            CONF_PAIR_ID: "pair_abc123",
+            CONF_PAIR_MODE: PAIR_MODE_SEPARATE_ADDRESS,
+            CONF_PAIR_MEMBER_ADDRESSES: [TEST_ADDRESS, other_address],
+            CONF_PAIR_CHILDREN: [
+                {
+                    CONF_SIDE: SIDE_LEFT,
+                    CONF_ADDRESS: TEST_ADDRESS,
+                    CONF_BED_TYPE: BED_TYPE_OKIMAT,
+                    CONF_BLE_BOND_ESTABLISHED: True,
+                    CONF_BLE_BOND_CONTEXT: stale_context,
+                    CONF_BLE_BOND_MARKER_UNRELIABLE: True,
+                },
+                {
+                    CONF_SIDE: SIDE_RIGHT,
+                    CONF_ADDRESS: other_address,
+                    CONF_BED_TYPE: BED_TYPE_OKIMAT,
+                    CONF_BLE_BOND_ESTABLISHED: True,
+                    CONF_BLE_BOND_CONTEXT: {"transport": "proxy"},
+                },
+            ],
+        },
+        unique_id="pair_abc123",
+        entry_id="repair_combined_persistence_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, "Left", entry.entry_id)
+    flow.hass = hass
+    right_before_persistence = dict(get_child(entry.data, SIDE_RIGHT) or {})
+    evidence = BondEvidence(
+        status=BondVerificationStatus.VERIFIED,
+        owner=BondOwner(
+            transport=TransportClass.LOCAL,
+            source="11:22:33:44:55:66",
+            adapter="hci0",
+        ),
+        operation="repair",
+        observed_at="2026-07-28T00:00:00+00:00",
+    )
+
+    with patch.object(
+        hass.config_entries,
+        "async_reload",
+        new_callable=AsyncMock,
+    ) as reload_entry:
+        await flow._async_persist_recovered_bond(
+            OperationResult(
+                outcome=OperationOutcome.SUCCESS,
+                payload=evidence,
+            )
+        )
+    reload_entry.assert_awaited_once_with(entry.entry_id)
+
+    left = get_child(entry.data, SIDE_LEFT)
+    assert left is not None
+    assert left[CONF_BLE_BOND_ESTABLISHED] is True
+    assert left[CONF_BLE_BOND_CONTEXT]["source"] == "11:22:33:44:55:66"
+    assert CONF_BLE_BOND_MARKER_UNRELIABLE not in left
+    assert get_child(entry.data, SIDE_RIGHT) == right_before_persistence
+
+    await flow._async_clear_removed_bond()
+
+    left = get_child(entry.data, SIDE_LEFT)
+    assert left is not None
+    assert CONF_BLE_BOND_ESTABLISHED not in left
+    assert CONF_BLE_BOND_CONTEXT not in left
+    assert get_child(entry.data, SIDE_RIGHT) == right_before_persistence
 
 
 async def test_a_proxy_pairing_failure_keeps_the_guided_pairing_retry(
