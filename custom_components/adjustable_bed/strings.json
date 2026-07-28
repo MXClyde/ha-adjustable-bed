@@ -2019,11 +2019,11 @@
       "fix_flow": {
         "step": {
           "init": {
-            "title": "Are these two sides of one bed?",
-            "description": "Home Assistant found {count} standalone beds: {names}.\n\nIf two entries control the independent sides of one physical bed, combine them into Left and Right. If they are separate beds, choose that and this suggestion will not come back.",
+            "title": "Could any two be sides of one bed?",
+            "description": "Home Assistant found {count} standalone beds: {names}.\n\nIf any two entries control the independent sides of one physical bed, choose them as Left and Right. If none share a physical bed, mark the displayed beds as separate and this suggestion will not return for that same set.",
             "menu_options": {
-              "pair_beds": "They are two sides of one bed",
-              "separate_beds": "They are separate beds"
+              "pair_beds": "Choose two sides to combine",
+              "separate_beds": "All are separate beds"
             }
           },
           "pair_beds": {
@@ -2049,7 +2049,8 @@
           "not_enough_beds": "Fewer than two active standalone beds remain, so this suggestion no longer applies.",
           "already_configured": "These beds already belong to a paired Adjustable Bed entry.",
           "pairing_flow_failed": "The Dual Bed setup flow could not be started. Reload Repairs and try again.",
-          "beds_are_separate": "Noted, these are separate beds. The suggestion is gone and will not return for this pair. Adding another bed later is a new question, so it may be suggested again then."
+          "beds_changed": "The active standalone beds changed while this repair was open, so nothing was dismissed. Open the repair again to review the current set.",
+          "beds_are_separate": "Noted, the displayed beds are separate. The suggestion is gone and will not return for this same set. If the active standalone bed set changes, it may be suggested again."
         }
       }
     },

@@ -51,7 +51,7 @@ from .bond_verification import (
     bond_owner_from_entry,
     build_bond_context,
 )
-from .combine_suggestion import async_dismiss, async_is_dismissed
+from .combine_suggestion import async_dismiss, async_is_dismissed, normalize_addresses
 from .const import (
     ADAPTER_AUTO,
     CONF_BED_TYPE,
@@ -150,10 +150,14 @@ class CombineBedsRepairFlow(RepairsFlow):
     def __init__(self) -> None:
         """Track the delegated config flow across validation retries."""
         self._pairing_flow_id: str | None = None
+        self._candidate_addresses: frozenset[str] | None = None
 
-    def _description_placeholders(self) -> dict[str, str]:
-        """Describe the currently active candidates without exposing addresses."""
-        candidates = active_pairing_candidates(self.hass)
+    def _description_placeholders(
+        self, candidates: list[ConfigEntry] | None = None
+    ) -> dict[str, str]:
+        """Describe active candidates without exposing addresses."""
+        if candidates is None:
+            candidates = active_pairing_candidates(self.hass)
         return {
             "count": str(len(candidates)),
             "names": ", ".join(entry.title for entry in candidates),
@@ -176,19 +180,32 @@ class CombineBedsRepairFlow(RepairsFlow):
         """
         # RepairsFlowManager passes its internal {"issue_id": ...} payload to
         # the init step. It is flow metadata, not a submitted side assignment.
+        candidates = active_pairing_candidates(self.hass)
+        self._candidate_addresses = normalize_addresses(
+            entry.data[CONF_ADDRESS] for entry in candidates
+        )
         return self.async_show_menu(
             step_id="init",
             menu_options=["pair_beds", "separate_beds"],
+            description_placeholders=self._description_placeholders(candidates),
         )
 
     async def async_step_separate_beds(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Record that these beds are separate and stop suggesting them."""
-        addresses = [
-            entry.data[CONF_ADDRESS] for entry in active_pairing_candidates(self.hass)
-        ]
-        await async_dismiss(self.hass, addresses)
+        current_addresses = normalize_addresses(
+            entry.data[CONF_ADDRESS]
+            for entry in active_pairing_candidates(self.hass)
+        )
+        if (
+            self._candidate_addresses is None
+            or current_addresses != self._candidate_addresses
+        ):
+            async_refresh_combine_beds_issue(self.hass)
+            return self.async_abort(reason="beds_changed")
+
+        await async_dismiss(self.hass, self._candidate_addresses)
         async_refresh_combine_beds_issue(self.hass)
         return self.async_abort(reason="beds_are_separate")
 
