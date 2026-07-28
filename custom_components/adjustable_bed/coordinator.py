@@ -178,7 +178,7 @@ from .detection import (
     refine_qrrm_protocol_from_device_info,
 )
 from .diagnostic_payloads import new_connection_attempt_details
-from .pairing import octo_snapshot_from_descriptor
+from .pairing import inheritable_child_fields, octo_snapshot_from_descriptor
 from .unsupported import (
     create_pairing_required_issue,
     delete_pairing_required_issue,
@@ -249,12 +249,15 @@ class ChildEntryView:
         # silently shadowed for settings the coordinator reads from `.data`.
         # Per-side identity (address/side/bond) isn't in options, so it's kept.
         if self._parent.options:
-            return {**self._child_data, **self._parent.options}
+            return {
+                **self._child_data,
+                **inheritable_child_fields(self._parent.options),
+            }
         return self._child_data
 
     @property
     def options(self) -> Mapping[str, Any]:
-        return self._parent.options
+        return inheritable_child_fields(self._parent.options)
 
     def persist_data(self, new_data: Mapping[str, Any]) -> None:
         """Update this side's config in place and route it to the parent."""
@@ -1073,7 +1076,12 @@ class AdjustableBedCoordinator:
             # rather than the shared entry (issue #329).
             self._async_persist_config(data)
 
-    def begin_internal_bond_update(self, bond_established: bool) -> None:
+    def begin_internal_bond_update(
+        self,
+        bond_established: bool,
+        *,
+        marker_unreliable: bool | None = None,
+    ) -> None:
         """Claim the caller's next entry write as one of our own bond updates.
 
         A repair for a bed that grants one connection per pairing window runs on
@@ -1084,6 +1092,10 @@ class AdjustableBedCoordinator:
         tag does not land must still persist, and merely reload.
         """
         self._ble_bond_established = bond_established
+        if marker_unreliable is not None:
+            self._ble_bond_marker_unreliable = marker_unreliable
+            if not marker_unreliable:
+                self._latched_pairing_successes = 0
         self._begin_internal_entry_update(bond_established)
 
     def _record_bond_provenance(self) -> None:

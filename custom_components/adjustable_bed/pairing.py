@@ -84,6 +84,9 @@ class ChildDescriptor(TypedDict, total=False):
     capabilities: dict[str, Any]
     # Set once a BLE bond is established, so future connects skip pairing.
     ble_bond_established: bool
+    ble_bond_marker_unreliable: bool
+    ble_bond_context: dict[str, Any]
+    ble_bond_attempted_source: str
     # Provenance, used to revert an opt-in conversion (unpair) losslessly.
     absorbed_entry_id: str
     origin_unique_id: str
@@ -194,6 +197,15 @@ CHILD_INHERITANCE_EXCLUDED_KEYS: Final = frozenset(
 )
 
 
+def inheritable_child_fields(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Return fields that may flow from a paired parent into a child view."""
+    return {
+        key: value
+        for key, value in data.items()
+        if key not in CHILD_INHERITANCE_EXCLUDED_KEYS
+    }
+
+
 def effective_child_data(
     entry_data: Mapping[str, Any],
     side: str,
@@ -209,12 +221,9 @@ def effective_child_data(
     descriptor = get_child(entry_data, side)
     if descriptor is None:
         raise ValueError(f"Paired entry has no child for side {side!r}")
-    shared = {
-        key: value
-        for key, value in entry_data.items()
-        if key not in CHILD_INHERITANCE_EXCLUDED_KEYS
-    }
-    return {**shared, **descriptor, **dict(options or {})}
+    shared = inheritable_child_fields(entry_data)
+    overrides = inheritable_child_fields(options or {})
+    return {**shared, **descriptor, **overrides}
 
 
 def pair_member_addresses(entry_data: Mapping[str, Any]) -> list[str]:

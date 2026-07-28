@@ -5092,21 +5092,28 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
     ) -> ConfigFlowResult:
         """Choose one unambiguous child address from a combined bed."""
         choices: dict[str, str] = {}
+        address_sides: dict[str, list[str]] = {}
         for side in PAIR_SIDES:
             child = get_child(self.config_entry.data, side)
             if child is None:
                 continue
-            address = child.get(CONF_ADDRESS, "")
+            raw_address = child.get(CONF_ADDRESS)
+            address = raw_address.upper() if isinstance(raw_address, str) else ""
+            address_sides.setdefault(address, []).append(side)
             name = child.get(CONF_NAME) or side.title()
             choices[side] = f"{side.title()}: {name} ({address})"
 
-        if not choices:
+        if not choices or any(len(sides) > 1 for sides in address_sides.values()):
             return self._async_abort_bond_removal(
                 "ambiguous",
                 self.config_entry.title,
                 str(self.config_entry.data.get(CONF_ADDRESS, "")),
                 BondOwner(),
             )
+
+        if len(choices) == 1:
+            self._bond_removal_side = next(iter(choices))
+            return await self.async_step_remove_bond()
 
         if user_input is not None:
             submitted_side = user_input.get("side")
@@ -5316,8 +5323,9 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
             parent = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
             child_for_side = getattr(parent, "child_for_side", None)
             child = child_for_side(side) if callable(child_for_side) else None
-            if child is not None:
-                child.apply_confirmed_bond_removal()
+            apply_removal = getattr(child, "apply_confirmed_bond_removal", None)
+            if callable(apply_removal):
+                apply_removal()
                 return
             data = with_updated_child(
                 self.config_entry.data,

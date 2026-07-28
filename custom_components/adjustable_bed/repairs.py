@@ -62,6 +62,7 @@ from .const import (
     CONF_SIDE,
     DEVICE_INFO_CHARS,
     DOMAIN,
+    PAIR_SIDES,
     RUNTIME_BOND_KEYS,
     grants_one_connection_per_pairing_window,
 )
@@ -268,13 +269,23 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
         if entry is None or not is_paired(entry.data) or entry.data.get(CONF_ADDRESS):
             return None
         address = self._address.upper()
-        matches = [
-            child.get(CONF_SIDE)
-            for child in iter_children(entry.data)
-            if isinstance(child.get(CONF_ADDRESS), str)
-            and child[CONF_ADDRESS].upper() == address
+        children = iter_children(entry.data)
+        matches = []
+        for child in children:
+            child_address = child.get(CONF_ADDRESS)
+            if isinstance(child_address, str) and child_address.upper() == address:
+                matches.append(child)
+        if len(matches) != 1:
+            return None
+        side = matches[0].get(CONF_SIDE)
+        if side not in PAIR_SIDES:
+            return None
+        side_matches = [
+            child
+            for child in children
+            if child.get(CONF_SIDE) == side
         ]
-        return matches[0] if len(matches) == 1 and isinstance(matches[0], str) else None
+        return side if len(side_matches) == 1 else None
 
     def _target_data(self) -> dict[str, Any]:
         """Return the standalone-equivalent data for the repair's one BLE link."""
@@ -345,7 +356,18 @@ class PairingRequiredRepairFlow(BluetoothOperationMixin, RepairsFlow):
         coordinator = self._target_coordinator()
         claim = getattr(coordinator, "begin_internal_bond_update", None)
         if claim_internal_update and callable(claim):
-            claim(bool(target_data.get(CONF_BLE_BOND_ESTABLISHED, False)))
+            claim(
+                bool(target_data.get(CONF_BLE_BOND_ESTABLISHED, False)),
+                marker_unreliable=bool(
+                    target_data.get(CONF_BLE_BOND_MARKER_UNRELIABLE, False)
+                ),
+            )
+        if side is not None:
+            child_entry = getattr(coordinator, "entry", None)
+            persist_child_data = getattr(child_entry, "persist_data", None)
+            if callable(persist_child_data):
+                persist_child_data(target_data)
+                return True
         self.hass.config_entries.async_update_entry(entry, data=new_entry_data)
         return True
 

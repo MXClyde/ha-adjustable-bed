@@ -41,6 +41,35 @@ def test_parent_option_edits_win_over_descriptor():
     }
 
 
+def test_parent_options_cannot_override_child_routing_or_bond_state():
+    parent = SimpleNamespace(
+        entry_id="parent-id",
+        options={
+            "pair_mode": "invalid",
+            "ble_bond_established": True,
+            "motor_pulse_count": 15,
+        },
+        version=4,
+    )
+    view = ChildEntryView(
+        parent,
+        {
+            "address": "AA:BB",
+            "side": "left",
+            "ble_bond_established": False,
+        },
+        lambda _d: None,
+    )
+
+    assert view.data == {
+        "address": "AA:BB",
+        "side": "left",
+        "ble_bond_established": False,
+        "motor_pulse_count": 15,
+    }
+    assert view.options == {"motor_pulse_count": 15}
+
+
 def test_persist_updates_view_in_place_and_routes_to_callback():
     parent = SimpleNamespace(entry_id="parent-id", options={})
     routed: list[dict] = []

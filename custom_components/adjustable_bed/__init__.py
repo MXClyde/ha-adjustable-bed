@@ -61,7 +61,6 @@ from .coordinator import AdjustableBedCoordinator, ChildEntryView
 from .kaidi_metadata import add_kaidi_entry_metadata, resolve_kaidi_advertisement
 from .paired_coordinator import PairedBedCoordinator, SingleAddressPairedCoordinator
 from .pairing import (
-    CHILD_INHERITANCE_EXCLUDED_KEYS,
     KEY_ABSORBED_ENTRY_ID,
     KEY_ORIGIN_SOURCE,
     KEY_ORIGIN_TITLE,
@@ -69,6 +68,7 @@ from .pairing import (
     KEY_SINGLE_ADDRESS_ORIGIN_ENTITY_UNIQUE_IDS,
     effective_child_data,
     get_child,
+    inheritable_child_fields,
     is_paired,
     iter_children,
     single_data_from_child,
@@ -357,11 +357,7 @@ async def _async_setup_offline_diagnostic_entry(
 
 def _shared_child_fields(parent_data: Mapping[str, Any]) -> dict[str, Any]:
     """Parent-level config inherited by every child (each descriptor overrides)."""
-    return {
-        key: value
-        for key, value in parent_data.items()
-        if key not in CHILD_INHERITANCE_EXCLUDED_KEYS
-    }
+    return inheritable_child_fields(parent_data)
 
 
 def _make_child_persist_cb(
@@ -380,7 +376,7 @@ def _make_child_persist_cb(
         # Parent options now flow into the child view's `.data`; never write
         # those option-managed keys back into the per-side descriptor (they'd
         # become a stale per-side override that shadows future option edits).
-        option_keys = set(entry.options)
+        option_keys = set(inheritable_child_fields(entry.options))
         delta = {
             key: value
             for key, value in new_child_data.items()

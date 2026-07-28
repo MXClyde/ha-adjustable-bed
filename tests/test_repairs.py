@@ -1182,11 +1182,19 @@ async def test_a_successful_repair_does_not_reload_a_one_connection_bed(
     )
     entry.add_to_hass(hass)
 
-    claimed: list[bool] = []
+    claimed: list[tuple[bool, bool | None]] = []
     coordinator = MagicMock()
     coordinator.async_pair_now = AsyncMock(return_value=True)
     coordinator.last_bond_evidence = None
-    coordinator.begin_internal_bond_update = claimed.append
+
+    def claim_update(
+        established: bool,
+        *,
+        marker_unreliable: bool | None = None,
+    ) -> None:
+        claimed.append((established, marker_unreliable))
+
+    coordinator.begin_internal_bond_update = claim_update
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
     flow = PairingRequiredRepairFlow(TEST_ADDRESS, TEST_NAME, entry.entry_id)
@@ -1200,7 +1208,7 @@ async def test_a_successful_repair_does_not_reload_a_one_connection_bed(
     # claim it so the update listener leaves the entry loaded.
     assert CONF_BLE_BOND_CONTEXT not in entry.data
     assert entry.data[CONF_BLE_BOND_ESTABLISHED] is True
-    assert claimed == [True]
+    assert claimed == [(True, False)]
 
 
 async def test_an_unproven_coordinator_repair_drops_the_old_provenance(
@@ -1389,6 +1397,70 @@ async def test_an_ambiguous_combined_address_is_not_offered_stale_bond_recovery(
     read_bonds.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "children",
+    [
+        [
+            {
+                CONF_SIDE: "middle",
+                CONF_ADDRESS: TEST_ADDRESS,
+                CONF_BED_TYPE: BED_TYPE_OKIMAT,
+            }
+        ],
+        [
+            {
+                CONF_SIDE: SIDE_LEFT,
+                CONF_ADDRESS: TEST_ADDRESS,
+                CONF_BED_TYPE: BED_TYPE_OKIMAT,
+            },
+            {
+                CONF_SIDE: SIDE_LEFT,
+                CONF_ADDRESS: "AA:BB:CC:DD:EE:01",
+                CONF_BED_TYPE: BED_TYPE_OKIMAT,
+            },
+        ],
+    ],
+)
+async def test_malformed_combined_side_is_not_offered_stale_bond_recovery(
+    hass: HomeAssistant,
+    children: list[dict[str, object]],
+) -> None:
+    """A target must identify one valid and unique side descriptor."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_OKIMAT,
+            CONF_PAIR_ID: "pair_malformed_side",
+            CONF_PAIR_MODE: PAIR_MODE_SEPARATE_ADDRESS,
+            CONF_PAIR_MEMBER_ADDRESSES: [TEST_ADDRESS],
+            CONF_PAIR_CHILDREN: children,
+        },
+        unique_id="pair_malformed_side",
+        entry_id="repair_malformed_side_entry",
+    )
+    entry.add_to_hass(hass)
+    flow = PairingRequiredRepairFlow(
+        TEST_ADDRESS,
+        TEST_NAME,
+        entry.entry_id,
+        issue_data=_stale_bond_issue_data(),
+    )
+    flow.hass = hass
+
+    read_bonds = AsyncMock(return_value=_host_bond_inventory())
+    with patch(
+        "custom_components.adjustable_bed.bond_recovery.async_read_local_bonds",
+        read_bonds,
+    ):
+        result = await flow.async_step_init()
+
+    assert flow._target_side() is None
+    assert result["step_id"] == "confirm"
+    read_bonds.assert_not_awaited()
+
+
 async def test_a_combined_side_is_offered_stale_bond_recovery(
     hass: HomeAssistant,
 ) -> None:
@@ -1537,6 +1609,69 @@ async def test_combined_recovery_persists_only_the_repaired_child(
     assert CONF_BLE_BOND_ESTABLISHED not in left
     assert CONF_BLE_BOND_CONTEXT not in left
     assert get_child(entry.data, SIDE_RIGHT) == right_before_persistence
+
+
+async def test_loaded_combined_repair_updates_the_child_view_and_runtime(
+    hass: HomeAssistant,
+) -> None:
+    """Claimed repair writes stay synchronized with the loaded child."""
+    from custom_components.adjustable_bed import _build_paired_children
+    from custom_components.adjustable_bed.paired_coordinator import (
+        PairedBedCoordinator,
+    )
+
+    other_address = "AA:BB:CC:DD:EE:01"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=TEST_NAME,
+        data={
+            CONF_NAME: TEST_NAME,
+            CONF_BED_TYPE: BED_TYPE_OKIMAT,
+            CONF_PAIR_ID: "pair_loaded_repair",
+            CONF_PAIR_MODE: PAIR_MODE_SEPARATE_ADDRESS,
+            CONF_PAIR_MEMBER_ADDRESSES: [TEST_ADDRESS, other_address],
+            CONF_PAIR_CHILDREN: [
+                {
+                    CONF_SIDE: SIDE_LEFT,
+                    CONF_ADDRESS: TEST_ADDRESS,
+                    CONF_BED_TYPE: BED_TYPE_OKIMAT,
+                    CONF_BLE_BOND_MARKER_UNRELIABLE: True,
+                },
+                {
+                    CONF_SIDE: SIDE_RIGHT,
+                    CONF_ADDRESS: other_address,
+                    CONF_BED_TYPE: BED_TYPE_OKIMAT,
+                },
+            ],
+        },
+        unique_id="pair_loaded_repair",
+        entry_id="repair_loaded_child_entry",
+    )
+    entry.add_to_hass(hass)
+    children = _build_paired_children(hass, entry)
+    coordinator = PairedBedCoordinator(hass, entry, children)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    flow = PairingRequiredRepairFlow(TEST_ADDRESS, "Left", entry.entry_id)
+    flow.hass = hass
+    target_data = flow._target_data()
+    target_data[CONF_BLE_BOND_ESTABLISHED] = True
+    target_data.pop(CONF_BLE_BOND_MARKER_UNRELIABLE, None)
+
+    try:
+        assert flow._persist_target_bond_data(
+            target_data,
+            claim_internal_update=True,
+        )
+        assert children[SIDE_LEFT].entry.data[CONF_BLE_BOND_ESTABLISHED] is True
+        assert (
+            CONF_BLE_BOND_MARKER_UNRELIABLE
+            not in children[SIDE_LEFT].entry.data
+        )
+        assert children[SIDE_LEFT]._ble_bond_established is True
+        assert children[SIDE_LEFT]._ble_bond_marker_unreliable is False
+        assert coordinator.consume_internal_entry_update(entry) is True
+    finally:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
 
 
 async def test_a_proxy_pairing_failure_keeps_the_guided_pairing_retry(
