@@ -94,7 +94,7 @@ def async_refresh_combine_beds_issue(hass: HomeAssistant) -> None:
     addresses = [entry.data[CONF_ADDRESS] for entry in candidates]
     if async_is_dismissed(hass, addresses):
         # The user has said these are separate beds. Asking again about the
-        # same set would make the answer meaningless.
+        # same beds or a remaining subset would make the answer meaningless.
         async_delete_issue(hass, DOMAIN, COMBINE_BEDS_ISSUE_ID)
         return
 
@@ -181,6 +181,10 @@ class CombineBedsRepairFlow(RepairsFlow):
         # RepairsFlowManager passes its internal {"issue_id": ...} payload to
         # the init step. It is flow metadata, not a submitted side assignment.
         candidates = active_pairing_candidates(self.hass)
+        if len(candidates) < 2:
+            async_refresh_combine_beds_issue(self.hass)
+            return self.async_abort(reason="not_enough_beds")
+
         self._candidate_addresses = normalize_addresses(
             entry.data[CONF_ADDRESS] for entry in candidates
         )

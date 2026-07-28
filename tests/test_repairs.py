@@ -221,6 +221,22 @@ async def test_combine_repair_flow_shows_active_bed_picker(
     )
 
 
+async def test_combine_repair_flow_aborts_when_issue_is_stale(
+    hass: HomeAssistant,
+) -> None:
+    """A stale issue cannot offer choices for fewer than two active beds."""
+    _bed_entry(hass, address="AA:BB:CC:DD:EE:01", name="Only bed")
+    async_refresh_combine_beds_issue(hass)
+    flow = CombineBedsRepairFlow()
+    flow.hass = hass
+
+    result = await flow.async_step_init({"issue_id": COMBINE_BEDS_ISSUE_ID})
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "not_enough_beds"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, COMBINE_BEDS_ISSUE_ID) is None
+
+
 async def test_combine_repair_opens_through_repairs_manager(
     hass: HomeAssistant,
     enable_custom_integrations,
@@ -1603,7 +1619,7 @@ async def test_combine_repair_does_not_dismiss_candidates_that_changed(
 async def test_a_new_bed_makes_the_combine_question_worth_asking_again(
     hass: HomeAssistant,
 ) -> None:
-    """Dismissal is recorded against that exact set, not as "never ask"."""
+    """Dismissal covers subsets, while a genuinely new bed asks again."""
     from homeassistant.helpers.issue_registry import async_get as async_get_issue_registry
 
     from custom_components.adjustable_bed.combine_suggestion import (
@@ -1649,6 +1665,31 @@ async def test_a_new_bed_makes_the_combine_question_worth_asking_again(
     third.mock_state(hass, ConfigEntryState.NOT_LOADED)
     async_refresh_combine_beds_issue(hass)
     assert registry.async_get_issue(DOMAIN, "combine_two_beds") is None
+
+
+async def test_dismissed_group_covers_a_remaining_subset(
+    hass: HomeAssistant,
+) -> None:
+    """Removing one dismissed separate bed does not recreate the suggestion."""
+    from custom_components.adjustable_bed.combine_suggestion import (
+        async_dismiss,
+        async_load_dismissal,
+    )
+    from custom_components.adjustable_bed.repairs import async_refresh_combine_beds_issue
+
+    entries = [
+        _bed_entry(hass, address=f"BB:BB:BB:BB:BB:0{idx}", name=f"Bed {idx}")
+        for idx in range(1, 4)
+    ]
+    await async_load_dismissal(hass)
+    await async_dismiss(hass, [entry.data[CONF_ADDRESS] for entry in entries])
+
+    entries[-1].mock_state(hass, ConfigEntryState.NOT_LOADED)
+    async_refresh_combine_beds_issue(hass)
+
+    assert (
+        ir.async_get(hass).async_get_issue(DOMAIN, COMBINE_BEDS_ISSUE_ID) is None
+    )
 
 
 async def test_combine_dismissal_storage_migrates_single_address_set(

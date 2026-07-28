@@ -5,10 +5,9 @@ Ignore action for those: a fixable issue opens its fix flow, so the only way out
 of the dialog is to close it, which leaves the issue sitting in Repairs. For
 someone who genuinely owns two beds that is a permanent, unanswerable warning.
 
-Each dismissal is recorded against the exact set of addresses that was
-suggested, not as a global "never ask" flag. Beds the user has called separate
-stay separate, while adding another bed is a different question and gets asked
-again.
+Each dismissal is recorded against the set of addresses that was suggested,
+not as a global "never ask" flag. Those beds and any remaining subset stay
+separate, while adding another bed is a different question and gets asked again.
 """
 
 from __future__ import annotations
@@ -131,8 +130,11 @@ async def async_load_dismissal(hass: HomeAssistant) -> None:
 
 
 def async_is_dismissed(hass: HomeAssistant, addresses: Iterable[str]) -> bool:
-    """Return True when the user already called exactly these beds separate."""
-    return normalize_addresses(addresses) in _async_get_state(hass).dismissed
+    """Return True when the user already called all these beds separate."""
+    candidates = normalize_addresses(addresses)
+    return bool(candidates) and any(
+        candidates <= dismissed for dismissed in _async_get_state(hass).dismissed
+    )
 
 
 async def async_dismiss(hass: HomeAssistant, addresses: Iterable[str]) -> None:
