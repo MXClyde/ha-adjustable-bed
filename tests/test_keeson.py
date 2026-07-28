@@ -29,6 +29,7 @@ from custom_components.adjustable_bed.const import (
     KEESON_BASE_WRITE_CHAR_UUID,
     KEESON_JSON_WRITE_CHAR_UUID,
     KEESON_KSBT_CHAR_UUID,
+    KEESON_VARIANT_ERGOMOTION,
     KEESON_VARIANT_JSON,
     KEESON_VARIANT_KSBT04C,
     KEESON_VARIANT_PURPLE,
@@ -70,6 +71,21 @@ def mock_keeson_config_entry(
 
 class TestKeesonController:
     """Test Keeson controller."""
+
+    async def test_only_ergomotion_may_seek_with_retained_position(
+        self,
+        hass: HomeAssistant,
+        mock_keeson_config_entry,
+    ) -> None:
+        """Only the notification-only Ergomotion variant needs this fallback."""
+        coordinator = AdjustableBedCoordinator(hass, mock_keeson_config_entry)
+
+        assert not KeesonController(
+            coordinator, variant=KEESON_VARIANT_JSON
+        ).may_seek_with_retained_position
+        assert KeesonController(
+            coordinator, variant=KEESON_VARIANT_ERGOMOTION
+        ).may_seek_with_retained_position
 
     async def test_control_characteristic_uuid_base(
         self,

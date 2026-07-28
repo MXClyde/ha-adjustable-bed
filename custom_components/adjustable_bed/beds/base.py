@@ -421,6 +421,18 @@ class BedController(ABC):
         """
         return None
 
+    @property
+    def may_seek_with_retained_position(self) -> bool:
+        """Return whether a seek may begin from prior-session position data.
+
+        Most feedback controllers can actively refresh an axis after reconnect,
+        so the coordinator must not use a retained value to choose a direction.
+        Notification-only controllers that cannot request a fresh value may
+        opt in: their next movement notification then corrects the feedback
+        loop without leaving their position slider unusable after reconnect.
+        """
+        return False
+
     def log_discovered_services(self, level: int = logging.DEBUG) -> None:
         """Log all discovered GATT services and characteristics.
 

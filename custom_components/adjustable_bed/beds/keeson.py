@@ -676,6 +676,11 @@ class KeesonController(BedController):
         )
 
     @property
+    def may_seek_with_retained_position(self) -> bool:
+        """Allow Ergomotion seeks when feedback only arrives by notification."""
+        return self._variant == KEESON_VARIANT_ERGOMOTION
+
+    @property
     def motor_control_specs(self) -> tuple[MotorControlSpec, ...]:
         """Return the Keeson motor layout used by entities and timed move."""
         translation_overrides = self.motor_translation_keys or {}

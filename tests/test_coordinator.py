@@ -1295,6 +1295,54 @@ class TestCoordinatorPositionSeek:
         controller.set_motor_position.assert_awaited_once_with("back", 50)
         assert coordinator._position_data_generation["back"] == 2
 
+    async def test_notification_only_seek_uses_retained_position_after_reconnect(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+    ) -> None:
+        """Notification-only feedback must not make a reconnect seek fail closed."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._client = MagicMock()
+        coordinator._client.is_connected = True
+        coordinator._position_connection_generation = 2
+        coordinator._position_data["back"] = 30.0
+        coordinator._position_data_generation["back"] = 1
+
+        controller = make_controller_mock(may_seek_with_retained_position=True)
+        coordinator._controller = controller
+        move_up = AsyncMock()
+        move_stop = AsyncMock()
+        read_count = 0
+
+        async def _read_positions() -> None:
+            nonlocal read_count
+            read_count += 1
+            if read_count == 2:
+                coordinator._handle_position_update("back", 50.0)
+
+        with (
+            patch.object(
+                coordinator,
+                "_async_read_positions",
+                new=AsyncMock(side_effect=_read_positions),
+            ) as read_positions,
+            patch(
+                "custom_components.adjustable_bed.coordinator.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            await coordinator.async_seek_position(
+                "back",
+                50.0,
+                lambda c: move_up(c),
+                AsyncMock(),
+                lambda c: move_stop(c),
+            )
+
+        assert read_positions.await_count == 2
+        move_up.assert_awaited_once_with(controller)
+        move_stop.assert_awaited_once_with(controller)
+
     async def test_seek_stops_on_first_target_crossing_for_single_direction_controllers(
         self,
         hass: HomeAssistant,

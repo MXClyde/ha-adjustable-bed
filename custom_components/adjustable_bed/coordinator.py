@@ -4842,6 +4842,13 @@ class AdjustableBedCoordinator:
                         if self._position_is_current(position_key)
                         else None
                     )
+                    if current_angle is None and controller.may_seek_with_retained_position:
+                        current_angle = self._position_data.get(position_key)
+                        if current_angle is not None:
+                            _LOGGER.debug(
+                                "Using retained position data for notification-only %s seek",
+                                position_key,
+                            )
                     if current_angle is None and not supports_direct_position_control:
                         raise NotConnectedError(
                             f"Cannot seek {position_key}: no position data available"
