@@ -870,10 +870,14 @@ class TestCoordinatorConnection:
 
         async def _read_positions() -> None:
             nonlocal read_count
+            assert coordinator._command_lock.locked()
             read_count += 1
             coordinator._position_data["legs"] = 9.6
             if read_count >= 2:
                 coordinator._position_data["back"] = 0.0
+
+        async def _retry_sleep(_delay: float) -> None:
+            assert not coordinator._command_lock.locked()
 
         with (
             patch.object(
@@ -885,7 +889,7 @@ class TestCoordinatorConnection:
             patch.object(coordinator, "_reset_disconnect_timer") as reset_timer,
             patch(
                 "custom_components.adjustable_bed.coordinator.asyncio.sleep",
-                new=AsyncMock(),
+                new=AsyncMock(side_effect=_retry_sleep),
             ) as mock_sleep,
         ):
             await coordinator.async_read_initial_positions()
@@ -987,6 +991,36 @@ class TestCoordinatorConnection:
         coordinator._schedule_position_hydration()
 
         assert coordinator._position_hydration_task is None
+
+    async def test_position_hydration_stays_paused_until_all_diagnostics_finish(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+    ) -> None:
+        """Overlapping diagnostics must not resume hydration after the first exit."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._client = MagicMock()
+        coordinator._client.is_connected = True
+
+        with (
+            patch.object(
+                coordinator,
+                "_async_cancel_position_hydration",
+                new_callable=AsyncMock,
+            ) as cancel_hydration,
+            patch.object(coordinator, "_schedule_position_hydration") as schedule_hydration,
+        ):
+            await coordinator.async_pause_position_hydration()
+            await coordinator.async_pause_position_hydration()
+
+            coordinator.resume_position_hydration()
+            schedule_hydration.assert_not_called()
+
+            coordinator.resume_position_hydration()
+
+        assert cancel_hydration.await_count == 2
+        schedule_hydration.assert_called_once_with()
+        assert coordinator._position_hydration_pause_count == 0
 
     async def test_cst_initial_position_axes_ignore_unreported_extra_motors(
         self,
@@ -5018,6 +5052,61 @@ class TestStopAfterCancel:
 
         await task
         coordinator.async_disconnect.assert_not_awaited()
+
+    async def test_disconnect_after_command_reads_positions_before_disconnect(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+    ) -> None:
+        """Speed-mode reads must finish while the command's BLE link still exists."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title=mock_config_entry.title,
+            data={
+                **mock_config_entry.data,
+                CONF_DISABLE_ANGLE_SENSING: False,
+                CONF_DISCONNECT_AFTER_COMMAND: True,
+            },
+            unique_id=mock_config_entry.unique_id,
+            entry_id="disconnect_after_position_read_test",
+        )
+        entry.add_to_hass(hass)
+        coordinator = AdjustableBedCoordinator(hass, entry)
+        coordinator._client = MagicMock()
+        coordinator._client.is_connected = True
+        coordinator._controller = make_controller_mock(
+            allow_position_polling_during_commands=False
+        )
+        events: list[str] = []
+
+        async def _command(_controller) -> None:
+            events.append("command")
+
+        async def _read_positions() -> None:
+            events.append("read")
+
+        async def _disconnect() -> None:
+            events.append("disconnect")
+
+        with (
+            patch.object(
+                coordinator,
+                "_async_read_positions",
+                new=AsyncMock(side_effect=_read_positions),
+            ),
+            patch.object(
+                coordinator,
+                "async_disconnect",
+                new=AsyncMock(side_effect=_disconnect),
+            ),
+        ):
+            await coordinator.async_execute_controller_command(
+                _command,
+                cancel_running=False,
+            )
+
+        assert events == ["command", "read", "disconnect"]
+        assert coordinator._background_read_task is None
 
     async def test_preempted_command_skips_disconnect_until_replacement_finishes(
         self,

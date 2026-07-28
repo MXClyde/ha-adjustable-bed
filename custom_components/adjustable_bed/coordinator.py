@@ -394,7 +394,7 @@ class AdjustableBedCoordinator:
         self._passive_position_reconciliation_task: asyncio.Task[None] | None = None
         self._position_hydration_task: asyncio.Task[None] | None = None
         self._position_hydration_running = False
-        self._position_hydration_paused = False
+        self._position_hydration_pause_count = 0
 
         # Connection state callbacks
         self._connection_state_callbacks: set[Callable[[bool], None]] = set()
@@ -3346,16 +3346,16 @@ class AdjustableBedCoordinator:
             # diagnostics and shutdown can cancel that exact task.
             self._position_hydration_task = current_task
         try:
-            # Own the command lock and idle timer for the whole retry window.
-            # Otherwise a timer that fires during a retry sleep can disconnect
-            # the bed as soon as the next attempt releases the lock.
-            async with self._command_lock:
-                self._cancel_disconnect_timer()
-                try:
-                    _LOGGER.debug("Reading initial positions for %s", self._address)
-                    for attempt in range(1, _INITIAL_POSITION_READ_MAX_ATTEMPTS + 1):
-                        try:
-                            async with asyncio.timeout(_INITIAL_POSITION_READ_TIMEOUT):
+            # Keep the link alive for the retry window, but only own the command
+            # lock during a GATT attempt so user commands and STOP can run during
+            # the backoff sleeps.
+            self._cancel_disconnect_timer()
+            try:
+                _LOGGER.debug("Reading initial positions for %s", self._address)
+                for attempt in range(1, _INITIAL_POSITION_READ_MAX_ATTEMPTS + 1):
+                    try:
+                        async with asyncio.timeout(_INITIAL_POSITION_READ_TIMEOUT):
+                            async with self._command_lock:
                                 controller = self._controller
                                 if (
                                     controller is None
@@ -3368,64 +3368,64 @@ class AdjustableBedCoordinator:
                                     return
                                 await controller.prepare_for_position_read()
                                 await self._async_read_positions()
-                        except TimeoutError:
-                            _LOGGER.debug(
-                                "Initial position read attempt %d/%d for %s timed out",
-                                attempt,
-                                _INITIAL_POSITION_READ_MAX_ATTEMPTS,
-                                self._address,
-                            )
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception as err:
-                            _LOGGER.debug(
-                                "Initial position read attempt %d/%d for %s failed: %s",
-                                attempt,
-                                _INITIAL_POSITION_READ_MAX_ATTEMPTS,
-                                self._address,
-                                err,
-                            )
-
-                        # Checked even after a failed attempt: a partial read (or a
-                        # notification that landed meanwhile) may already be enough.
-                        received_axes = expected_axes & self._position_data.keys()
-                        if received_axes >= expected_axes:
-                            _LOGGER.info(
-                                "Initial positions read for %s: %s",
-                                self._address,
-                                {k: f"{v}°" for k, v in self._position_data.items()},
-                            )
-                            return
-
-                        if attempt >= _INITIAL_POSITION_READ_MAX_ATTEMPTS:
-                            break
-
+                    except TimeoutError:
                         _LOGGER.debug(
-                            "Initial position read for %s missing axes %s after attempt %d/%d; "
-                            "retrying in %.1fs",
-                            self._address,
-                            sorted(expected_axes - received_axes),
+                            "Initial position read attempt %d/%d for %s timed out",
                             attempt,
                             _INITIAL_POSITION_READ_MAX_ATTEMPTS,
-                            _INITIAL_POSITION_READ_RETRY_DELAY,
+                            self._address,
                         )
-                        await asyncio.sleep(_INITIAL_POSITION_READ_RETRY_DELAY)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as err:
+                        _LOGGER.debug(
+                            "Initial position read attempt %d/%d for %s failed: %s",
+                            attempt,
+                            _INITIAL_POSITION_READ_MAX_ATTEMPTS,
+                            self._address,
+                            err,
+                        )
 
-                    if self._position_data:
+                    # Checked even after a failed attempt: a partial read (or a
+                    # notification that landed meanwhile) may already be enough.
+                    received_axes = expected_axes & self._position_data.keys()
+                    if received_axes >= expected_axes:
                         _LOGGER.info(
-                            "Initial position read for %s remained partial: %s",
+                            "Initial positions read for %s: %s",
                             self._address,
                             {k: f"{v}°" for k, v in self._position_data.items()},
                         )
-                    else:
-                        _LOGGER.debug(
-                            "Initial position read for %s produced no data - retrying on the "
-                            "next connect",
-                            self._address,
-                        )
-                finally:
-                    if self._client is not None and self._client.is_connected:
-                        self._reset_disconnect_timer()
+                        return
+
+                    if attempt >= _INITIAL_POSITION_READ_MAX_ATTEMPTS:
+                        break
+
+                    _LOGGER.debug(
+                        "Initial position read for %s missing axes %s after attempt %d/%d; "
+                        "retrying in %.1fs",
+                        self._address,
+                        sorted(expected_axes - received_axes),
+                        attempt,
+                        _INITIAL_POSITION_READ_MAX_ATTEMPTS,
+                        _INITIAL_POSITION_READ_RETRY_DELAY,
+                    )
+                    await asyncio.sleep(_INITIAL_POSITION_READ_RETRY_DELAY)
+
+                if self._position_data:
+                    _LOGGER.info(
+                        "Initial position read for %s remained partial: %s",
+                        self._address,
+                        {k: f"{v}°" for k, v in self._position_data.items()},
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Initial position read for %s produced no data - retrying on the "
+                        "next connect",
+                        self._address,
+                    )
+            finally:
+                if self._client is not None and self._client.is_connected:
+                    self._reset_disconnect_timer()
         finally:
             self._position_hydration_running = False
             if self._position_hydration_task is current_task:
@@ -3440,7 +3440,7 @@ class AdjustableBedCoordinator:
         read on every connect closes that gap, and costs nothing once every axis
         has reported, since hydrated axes are kept across disconnects.
         """
-        if self._disable_angle_sensing or self._position_hydration_paused:
+        if self._disable_angle_sensing or self._position_hydration_pause_count:
             return
 
         expected_axes = self._expected_initial_position_axes()
@@ -3475,12 +3475,16 @@ class AdjustableBedCoordinator:
 
     async def async_pause_position_hydration(self) -> None:
         """Suppress background position reads during external BLE diagnostics."""
-        self._position_hydration_paused = True
+        self._position_hydration_pause_count += 1
         await self._async_cancel_position_hydration()
 
     def resume_position_hydration(self) -> None:
         """Resume position hydration after an external BLE diagnostic operation."""
-        self._position_hydration_paused = False
+        if self._position_hydration_pause_count == 0:
+            return
+        self._position_hydration_pause_count -= 1
+        if self._position_hydration_pause_count:
+            return
         if self._client is not None and self._client.is_connected:
             self._schedule_position_hydration()
 
@@ -4198,7 +4202,13 @@ class AdjustableBedCoordinator:
                     and not self._disable_angle_sensing
                     and not self._cancel_command.is_set()
                 ):
-                    if self._position_mode == POSITION_MODE_ACCURACY:
+                    if (
+                        self._position_mode == POSITION_MODE_ACCURACY
+                        or (
+                            self._disconnect_after_operation_enabled()
+                            and not skip_disconnect
+                        )
+                    ):
                         await self._async_read_positions()
                     else:
                         # Tracked + deduplicated: tie the read to the entry

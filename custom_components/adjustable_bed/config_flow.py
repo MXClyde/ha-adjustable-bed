@@ -698,13 +698,14 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
     ) -> bool:
         """Return the "disconnect after each command" value to persist.
 
-        A boolean submission cannot distinguish an untouched checkbox from an
-        explicit choice that happens to equal its rendered default. Preserve
-        every submitted value; only use the selected bed's default when the
-        field is absent.
+        The checkbox is rendered from the bed type the step defaulted to, but the
+        user can pick a different type from the dropdown in the same submit. A
+        submitted value that still equals what was rendered was never touched, so
+        recompute it for the bed type actually chosen rather than storing a
+        default meant for a different bed.
         """
         submitted = user_input.get(CONF_DISCONNECT_AFTER_COMMAND)
-        if submitted is None:
+        if submitted is None or submitted == self._rendered_disconnect_default:
             return disconnect_after_command_default_enabled(bed_type, protocol_variant)
         return bool(submitted)
 
@@ -763,6 +764,11 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         self._disambiguation_types: list[str] | None = None
         self._disambiguated_bed_type: str | None = None
         self._show_full_bed_type_list: bool = False
+        # The "disconnect after each command" default the last form rendered. The
+        # checkbox is built from the bed type the step defaulted to, so this is
+        # what tells a submitted value apart from an untouched default when the
+        # user picks a different bed type in the same submit.
+        self._rendered_disconnect_default: bool | None = None
         self._retrying_devices: dict[str, tuple[ConfigEntry, BluetoothServiceInfoBleak | None]] = {}
         # Carries the finalized entry across the optional verify_connection step
         self._pending_entry: dict[str, Any] | None = None
@@ -1565,6 +1571,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         default_disconnect_after_command = disconnect_after_command_default_enabled(
             bed_type, VARIANT_AUTO
         )
+        self._rendered_disconnect_default = default_disconnect_after_command
 
         # Get bed-type-specific motor pulse defaults
         pulse_defaults = (
@@ -2457,6 +2464,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         default_disconnect_after_command = disconnect_after_command_default_enabled(
             defaults_bed_type, preselected_protocol_variant
         )
+        self._rendered_disconnect_default = default_disconnect_after_command
         if defaults_bed_type:
             # Keeson with Ergomotion variant supports position feedback
             has_position_feedback = bed_type_has_position_feedback(
@@ -2687,6 +2695,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         default_disconnect_after_command = disconnect_after_command_default_enabled(
             preselected_bed_type, preselected_protocol_variant
         )
+        self._rendered_disconnect_default = default_disconnect_after_command
         if preselected_bed_type:
             # Keeson with Ergomotion variant supports position feedback
             has_position_feedback = bed_type_has_position_feedback(

@@ -1366,28 +1366,37 @@ class TestBluetoothDiscoveryFlow:
         )
         assert marker.default() is True
 
-    def test_submitted_disconnect_choice_is_preserved_across_bed_type_changes(self):
-        """A submitted boolean remains authoritative when the bed type changes."""
+    def test_untouched_disconnect_default_follows_bed_type_changes(self):
+        """An untouched rendered default is recomputed for the selected bed."""
         from custom_components.adjustable_bed.config_flow import AdjustableBedConfigFlow
 
         flow = AdjustableBedConfigFlow()
 
-        # True matched the prior Linak default, but remains an explicit choice
-        # after switching to a Gen2 bed whose default is False.
+        flow._rendered_disconnect_default = True
         assert (
             flow._disconnect_after_command_choice(
                 {CONF_DISCONNECT_AFTER_COMMAND: True}, BED_TYPE_LEGGETT_GEN2, None
             )
+            is False
+        )
+
+        flow._rendered_disconnect_default = False
+        assert (
+            flow._disconnect_after_command_choice(
+                {CONF_DISCONNECT_AFTER_COMMAND: False}, BED_TYPE_LINAK, VARIANT_AUTO
+            )
             is True
         )
-        # False matched the prior Gen2 default, but remains an explicit choice
-        # after switching to a Linak bed whose default is True.
+
+        # A value that differs from the rendered default is an explicit choice.
+        flow._rendered_disconnect_default = True
         assert (
             flow._disconnect_after_command_choice(
                 {CONF_DISCONNECT_AFTER_COMMAND: False}, BED_TYPE_LINAK, VARIANT_AUTO
             )
             is False
         )
+
         # Field absent from the submission: fall back to the chosen bed type.
         assert flow._disconnect_after_command_choice({}, BED_TYPE_LINAK, VARIANT_AUTO) is True
 
@@ -2369,6 +2378,7 @@ class TestManualFlow:
         assert result["data"][CONF_ADDRESS] == "11:22:33:44:55:66"
         assert result["data"][CONF_BED_TYPE] == BED_TYPE_LINAK
         assert result["data"][CONF_MOTOR_COUNT] == 3
+        assert result["data"][CONF_DISCONNECT_AFTER_COMMAND] is True
 
     async def test_manual_entry_malouf_collects_layout(
         self, hass: HomeAssistant, enable_custom_integrations
