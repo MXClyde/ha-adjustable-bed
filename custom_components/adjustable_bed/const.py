@@ -2260,6 +2260,13 @@ BEDS_REQUIRING_PERSISTENT_CONNECTION: Final = frozenset(
     }
 )
 
+# Jensen tracks massage and light state inside the connection-scoped controller.
+# It can reconnect on demand, but a new entry must retain the controller by
+# default so consecutive controls keep their intended toggle and intensity state.
+BEDS_WITH_DISCONNECT_AFTER_COMMAND_DEFAULT_DISABLED: Final = (
+    BEDS_REQUIRING_PERSISTENT_CONNECTION | frozenset({BED_TYPE_JENSEN})
+)
+
 
 def disconnect_after_command_default_enabled(
     bed_type: str | None, protocol_variant: str | None = None
@@ -2282,7 +2289,7 @@ def disconnect_after_command_default_enabled(
     if not bed_type:
         return DEFAULT_DISCONNECT_AFTER_COMMAND
     resolved = resolve_explicit_bed_type(bed_type, protocol_variant)
-    return resolved not in BEDS_REQUIRING_PERSISTENT_CONNECTION
+    return resolved not in BEDS_WITH_DISCONNECT_AFTER_COMMAND_DEFAULT_DISABLED
 
 
 # Connection profiles

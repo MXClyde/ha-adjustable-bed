@@ -1325,6 +1325,7 @@ class TestBluetoothDiscoveryFlow:
     def test_disconnect_after_command_default_per_bed_type(self):
         """Beds that must hold the link open keep the option off; others get it on."""
         from custom_components.adjustable_bed.const import (
+            BED_TYPE_JENSEN,
             BED_TYPE_LEGGETT_GEN2,
             BED_TYPE_LEGGETT_PLATT,
             BED_TYPE_LINAK,
@@ -1337,6 +1338,7 @@ class TestBluetoothDiscoveryFlow:
         assert disconnect_after_command_default_enabled(BED_TYPE_LINAK, VARIANT_AUTO) is True
         assert disconnect_after_command_default_enabled(BED_TYPE_LEGGETT_GEN2, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_SLEEP_NUMBER_MCR, None) is False
+        assert disconnect_after_command_default_enabled(BED_TYPE_JENSEN, None) is False
         # An umbrella type resolves through its explicit variant.
         assert (
             disconnect_after_command_default_enabled(BED_TYPE_LEGGETT_PLATT, LEGGETT_VARIANT_GEN2)
