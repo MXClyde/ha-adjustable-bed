@@ -320,11 +320,10 @@ async def _async_finish_entry_setup(
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     if schedule_initial_position_read:
-        entry.async_create_background_task(
-            hass,
-            coordinator.async_read_initial_positions(),
-            name=f"adjustable_bed_initial_position_read_{entry.entry_id}",
-        )
+        # The successful connect also requests hydration. Route both paths
+        # through the coordinator's session-aware deduplication so platform
+        # forwarding cannot race a second full read onto the same BLE link.
+        coordinator._schedule_position_hydration()
 
     _LOGGER.info("Adjustable Bed integration setup complete for %s", entry.title)
     return True

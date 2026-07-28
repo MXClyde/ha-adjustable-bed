@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
@@ -872,6 +873,36 @@ class TestJensenFeatureDetection:
 
 class TestJensenPositionParsing:
     """Test Jensen position notification parsing."""
+
+    async def test_read_positions_waits_for_notification_response(self):
+        """The query is incomplete until its asynchronous position frame arrives."""
+        controller = JensenController(MagicMock())
+        controller._notify_callback = MagicMock()
+        controller._write_gatt_with_retry = AsyncMock()
+
+        read_task = asyncio.create_task(controller.read_positions())
+        await asyncio.sleep(0)
+
+        controller._write_gatt_with_retry.assert_awaited_once()
+        assert not read_task.done()
+
+        controller._handle_notification(
+            MagicMock(),
+            bytearray(
+                [
+                    0x10,
+                    0x00,
+                    HEAD_POS_FLAT >> 8,
+                    HEAD_POS_FLAT & 0xFF,
+                    FOOT_POS_FLAT >> 8,
+                    FOOT_POS_FLAT & 0xFF,
+                ]
+            ),
+        )
+        await read_task
+
+        assert controller._position_received is None
+        assert controller._notify_callback.call_count == 2
 
     def test_raw_to_percentage_head_flat(self):
         """Test head position at flat returns 0%."""

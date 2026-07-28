@@ -142,6 +142,7 @@ class JensenController(BedController):
         # Config query state (used by query_config and _handle_notification)
         self._config_received: asyncio.Event | None = None
         self._config_data: bytes | None = None
+        self._position_received: asyncio.Event | None = None
         # Note: Light and massage state is tracked locally. It may become out of sync
         # if the bed is controlled via remote or the app, or after HA restarts.
         # The Jensen protocol does not support querying actual state.
@@ -449,6 +450,8 @@ class JensenController(BedController):
                 # Map to standard motor names (back and legs)
                 self._notify_callback("back", head_pct)
                 self._notify_callback("legs", foot_pct)
+            if self._position_received is not None:
+                self._position_received.set()
 
         elif cmd_type == 0x0A:
             # Config response - signal query_config if waiting
@@ -509,7 +512,7 @@ class JensenController(BedController):
             # Jensen beds can ignore the first flat preset after reconnect unless they
             # see a 0x10 command first. Always send one READ_POSITION warm-up even when
             # angle sensing is disabled; with callback=None we still avoid state updates.
-            await self.read_positions()
+            await self._send_position_query()
 
         except BleakError as err:
             _LOGGER.warning("Failed to start Jensen notifications: %s", err)
@@ -528,19 +531,11 @@ class JensenController(BedController):
         except BleakError:
             pass
 
-    async def read_positions(self, motor_count: int = 2) -> None:  # noqa: ARG002
-        """Read current position via READ_POSITION command.
-
-        Sends the position query command. The response will be delivered
-        via the notification handler.
-
-        Args:
-            motor_count: Unused for Jensen (always reads both head and foot).
-        """
-        del motor_count  # Unused - Jensen always reads both motors
+    async def _send_position_query(self) -> bool:
+        """Send READ_POSITION and report whether the write succeeded."""
         if self.client is None or not self.client.is_connected:
             _LOGGER.debug("Cannot read positions: not connected")
-            return
+            return False
 
         try:
             await self._write_gatt_with_retry(
@@ -549,8 +544,30 @@ class JensenController(BedController):
                 response=self._write_with_response,
             )
             _LOGGER.debug("Sent READ_POSITION command to Jensen bed")
+            return True
         except BleakError as err:
             _LOGGER.warning("Failed to send READ_POSITION command: %s", err)
+            return False
+
+    async def read_positions(self, motor_count: int = 2) -> None:  # noqa: ARG002
+        """Read current position via its asynchronous notification response.
+
+        Args:
+            motor_count: Unused for Jensen (always reads both head and foot).
+        """
+        del motor_count  # Unused - Jensen always reads both motors
+        position_received = asyncio.Event()
+        self._position_received = position_received
+        try:
+            if not await self._send_position_query():
+                return
+            # The GATT write only acknowledges the query. Keep notifications
+            # alive until the position response arrives; the coordinator owns
+            # the surrounding read timeout.
+            await position_received.wait()
+        finally:
+            if self._position_received is position_received:
+                self._position_received = None
 
     async def _move_with_stop(self, command: bytes) -> None:
         """Execute a movement command and always send STOP at the end."""

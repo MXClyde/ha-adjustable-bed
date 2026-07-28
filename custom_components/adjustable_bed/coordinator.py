@@ -383,6 +383,8 @@ class AdjustableBedCoordinator:
 
         # Position data from notifications
         self._position_data: dict[str, float] = {}
+        self._position_data_generation: dict[str, int] = {}
+        self._position_connection_generation = 0
         self._position_callbacks: set[Callable[[dict[str, float]], None]] = set()
         self._controller_state: dict[str, Any] = {}
         self._controller_state_callbacks: set[Callable[[dict[str, Any]], None]] = set()
@@ -2888,6 +2890,11 @@ class AdjustableBedCoordinator:
                 )
                 self._controller_state_refresh_retry_count = 0
                 self._controller_state_refresh_completed = False
+                # Position values retained across disconnects are last-known
+                # state only. Give this controller session its own generation so
+                # reconnect hydration and seeks can distinguish fresh feedback
+                # from cached values.
+                self._position_connection_generation += 1
                 # Remember the resolved persistence so reconnect/idle decisions are
                 # correct even after _on_disconnect clears the controller.
                 self._persistent_connection_resolved = (
@@ -3388,7 +3395,9 @@ class AdjustableBedCoordinator:
 
                     # Checked even after a failed attempt: a partial read (or a
                     # notification that landed meanwhile) may already be enough.
-                    received_axes = expected_axes & self._position_data.keys()
+                    received_axes = {
+                        axis for axis in expected_axes if self._position_is_current(axis)
+                    }
                     if received_axes >= expected_axes:
                         _LOGGER.info(
                             "Initial positions read for %s: %s",
@@ -3432,19 +3441,21 @@ class AdjustableBedCoordinator:
                 self._position_hydration_task = None
 
     def _schedule_position_hydration(self) -> None:
-        """Fill in still-unknown position axes in the background after a connect.
+        """Refresh position axes in the background after a connect.
 
         Entry setup schedules the first read, but a bed that was busy, asleep or
         unreachable then would otherwise sit at "unknown" until the user moved
-        it: outside a movement command nothing reads positions. Repeating the
-        read on every connect closes that gap, and costs nothing once every axis
-        has reported, since hydrated axes are kept across disconnects.
+        it: outside a movement command nothing reads positions. Every new BLE
+        session also refreshes last-known values in case another controller
+        moved the bed while Home Assistant had released the link.
         """
         if self._disable_angle_sensing or self._position_hydration_pause_count:
             return
 
         expected_axes = self._expected_initial_position_axes()
-        if not expected_axes or expected_axes <= self._position_data.keys():
+        if not expected_axes or all(
+            self._position_is_current(axis) for axis in expected_axes
+        ):
             return
 
         task = self._position_hydration_task
@@ -3463,6 +3474,19 @@ class AdjustableBedCoordinator:
         if controller is None:
             return set()
         return {spec.position_key for spec in controller.position_number_specs}
+
+    def _position_is_current(self, position: str) -> bool:
+        """Return whether a cached position was observed on the active BLE session."""
+        if position not in self._position_data:
+            return False
+        # Unit tests and capability-only coordinators can operate without ever
+        # establishing a BLE generation. Production connections start at one.
+        if self._position_connection_generation == 0:
+            return True
+        return (
+            self._position_data_generation.get(position)
+            == self._position_connection_generation
+        )
 
     async def _async_cancel_position_hydration(self) -> None:
         """Cancel and await the active position hydration task."""
@@ -4427,6 +4451,7 @@ class AdjustableBedCoordinator:
         """Handle a position update from the bed."""
         _LOGGER.debug("Position update: %s = %.1f°", position, angle)
         self._position_data[position] = angle
+        self._position_data_generation[position] = self._position_connection_generation
         # Track notification timing for diagnostics (issue #168)
         self._last_notify_received = datetime.now(UTC)
         # Copy to safely iterate while callbacks might unregister themselves
@@ -4796,17 +4821,28 @@ class AdjustableBedCoordinator:
 
                 supports_direct_position_control = controller.supports_direct_position_control
 
-                # Get current position, attempting a read if not available.
-                # Direct-position controllers can operate without a current reading.
-                current_angle = self._position_data.get(position_key)
-                if current_angle is None and not supports_direct_position_control:
+                # Cached values survive disconnects for display, but must not
+                # drive direction or tolerance decisions on a new BLE session.
+                # Attempt one read whenever this session has not reported the
+                # requested axis. Direct-position controllers can still operate
+                # if the read produces no fresh value.
+                current_angle = (
+                    self._position_data.get(position_key)
+                    if self._position_is_current(position_key)
+                    else None
+                )
+                if current_angle is None:
                     _LOGGER.debug(
-                        "No position data for %s, attempting one-shot read",
+                        "No current-session position data for %s, attempting one-shot read",
                         position_key,
                     )
                     await self._async_read_positions()
-                    current_angle = self._position_data.get(position_key)
-                    if current_angle is None:
+                    current_angle = (
+                        self._position_data.get(position_key)
+                        if self._position_is_current(position_key)
+                        else None
+                    )
+                    if current_angle is None and not supports_direct_position_control:
                         raise NotConnectedError(
                             f"Cannot seek {position_key}: no position data available"
                         )

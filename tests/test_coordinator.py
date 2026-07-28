@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
@@ -947,15 +947,16 @@ class TestCoordinatorConnection:
         assert mock_read_positions.await_count == 3
         assert coordinator.position_data == {"back": 12.0, "legs": 4.0}
 
-    async def test_position_hydration_scheduled_only_while_axes_are_missing(
+    async def test_position_hydration_runs_once_per_connection(
         self,
         hass: HomeAssistant,
         mock_config_entry,
     ) -> None:
-        """A connect re-reads unknown axes, and stays quiet once they are known."""
+        """Each BLE session refreshes axes once without duplicate startup reads."""
         mock_config_entry.add_to_hass(hass)
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         coordinator._disable_angle_sensing = False
+        coordinator._position_connection_generation = 1
         coordinator._controller = make_controller_mock(
             position_number_specs=(
                 SimpleNamespace(position_key="back"),
@@ -963,20 +964,38 @@ class TestCoordinatorConnection:
             )
         )
 
+        async def _read_positions() -> None:
+            coordinator._handle_position_update("back", 10.0)
+            coordinator._handle_position_update("legs", 5.0)
+
         with patch.object(
-            coordinator, "async_read_initial_positions", new=AsyncMock()
+            coordinator,
+            "async_read_initial_positions",
+            new=AsyncMock(side_effect=_read_positions),
         ) as mock_read:
             coordinator._schedule_position_hydration()
             assert coordinator._position_hydration_task is not None
             await coordinator._position_hydration_task
             mock_read.assert_awaited_once()
 
-            # Every expected axis has reported: nothing left to hydrate.
-            coordinator._position_data.update({"back": 10.0, "legs": 5.0})
+            # Platform setup asks again after forwarding, but the same session
+            # has already hydrated and must not issue a second read.
             coordinator._position_hydration_task = None
             coordinator._schedule_position_hydration()
             assert coordinator._position_hydration_task is None
             assert mock_read.await_count == 1
+
+            # Retained values are stale after reconnect, so the next BLE session
+            # must refresh them even though both keys remain populated.
+            coordinator._position_connection_generation = 2
+            coordinator._schedule_position_hydration()
+            reconnect_hydration = cast(
+                asyncio.Task[None] | None,
+                coordinator._position_hydration_task,
+            )
+            assert reconnect_hydration is not None
+            await reconnect_hydration
+            assert mock_read.await_count == 2
 
     async def test_position_hydration_skipped_when_angle_sensing_disabled(
         self,
@@ -1236,6 +1255,45 @@ class TestCoordinatorConnection:
 
 class TestCoordinatorPositionSeek:
     """Test coordinator position seeking behavior."""
+
+    async def test_seek_refreshes_stale_position_after_reconnect(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+    ) -> None:
+        """A last-known target match must not suppress a command on a new BLE session."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._client = MagicMock()
+        coordinator._client.is_connected = True
+        coordinator._position_connection_generation = 2
+        coordinator._position_data["back"] = 50.0
+        coordinator._position_data_generation["back"] = 1
+
+        controller = make_controller_mock()
+        controller.supports_direct_position_control = True
+        controller.angle_to_native_position.return_value = 50
+        controller.set_motor_position = AsyncMock()
+        coordinator._controller = controller
+
+        async def _refresh_position() -> None:
+            coordinator._handle_position_update("back", 20.0)
+
+        with patch.object(
+            coordinator,
+            "_async_read_positions",
+            new=AsyncMock(side_effect=_refresh_position),
+        ) as read_positions:
+            await coordinator.async_seek_position(
+                "back",
+                50.0,
+                AsyncMock(),
+                AsyncMock(),
+                AsyncMock(),
+            )
+
+        read_positions.assert_awaited_once_with()
+        controller.set_motor_position.assert_awaited_once_with("back", 50)
+        assert coordinator._position_data_generation["back"] == 2
 
     async def test_seek_stops_on_first_target_crossing_for_single_direction_controllers(
         self,
