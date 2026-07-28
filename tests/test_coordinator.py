@@ -928,12 +928,12 @@ class TestCoordinatorConnection:
         assert isinstance(result[0], asyncio.CancelledError)
         controller.prepare_for_position_read.assert_not_awaited()
 
-    async def test_initial_position_read_skips_query_after_command_refresh(
+    async def test_queued_position_read_does_not_reconnect_after_command_refresh(
         self,
         hass: HomeAssistant,
         mock_config_entry,
     ) -> None:
-        """Fresh command feedback must not reconnect a disconnected bed."""
+        """Fresh command feedback must cancel hydration queued behind that command."""
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         coordinator._disable_angle_sensing = False
         coordinator._position_connection_generation = 1
@@ -943,17 +943,24 @@ class TestCoordinatorConnection:
                 SimpleNamespace(position_key="legs"),
             )
         )
-        coordinator._handle_position_update("back", 12.0)
-        coordinator._handle_position_update("legs", 4.0)
 
+        await coordinator._command_lock.acquire()
         with patch.object(
             coordinator,
-            "async_execute_controller_query",
+            "async_ensure_connected",
             new_callable=AsyncMock,
-        ) as execute_query:
-            await coordinator.async_read_initial_positions()
+        ) as ensure_connected:
+            try:
+                hydration = asyncio.create_task(coordinator.async_read_initial_positions())
+                await asyncio.sleep(0)
 
-        execute_query.assert_not_awaited()
+                coordinator._handle_position_update("back", 12.0)
+                coordinator._handle_position_update("legs", 4.0)
+            finally:
+                coordinator._command_lock.release()
+            await hydration
+
+        ensure_connected.assert_not_awaited()
 
     async def test_initial_position_read_has_overall_retry_deadline(
         self,

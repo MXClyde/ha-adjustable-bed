@@ -3376,17 +3376,21 @@ class AdjustableBedCoordinator:
                             ):
                                 return
 
+                            def _initial_position_read_needed() -> bool:
+                                return (
+                                    not self._position_hydration_pause_count
+                                    and not all(
+                                        self._position_is_current(axis)
+                                        for axis in expected_axes
+                                    )
+                                )
+
                             async def _read_initial_positions(
                                 controller: BedController,
                             ) -> None:
-                                # This task may have queued behind the command
-                                # that established the connection. Recheck after
-                                # taking the lock so a completed notification or
-                                # a diagnostic pause makes the queued read a no-op.
-                                if self._position_hydration_pause_count or all(
-                                    self._position_is_current(axis)
-                                    for axis in expected_axes
-                                ):
+                                # Connection preparation can produce notifications,
+                                # so recheck after it as well as before reconnecting.
+                                if not _initial_position_read_needed():
                                     return
                                 await controller.prepare_for_position_read()
                                 await self._async_read_positions()
@@ -3399,6 +3403,7 @@ class AdjustableBedCoordinator:
                                         _read_initial_positions,
                                         skip_disconnect=True,
                                         preemptible=True,
+                                        run_if=_initial_position_read_needed,
                                     )
                             except TimeoutError:
                                 _LOGGER.debug(
@@ -4220,6 +4225,7 @@ class AdjustableBedCoordinator:
         enable_position_polling: bool,
         read_positions_after_operation: bool,
         operation_name: str,
+        run_if: Callable[[], bool] | None = None,
     ) -> T | None:
         """Execute a controller operation with shared locking and connection handling."""
         if cancel_running:
@@ -4240,6 +4246,12 @@ class AdjustableBedCoordinator:
                 return None
 
             try:
+                if run_if is not None and not run_if():
+                    _LOGGER.debug(
+                        "Skipping controller %s: operation is no longer needed",
+                        operation_name,
+                    )
+                    return None
                 controller = await self._async_prepare_controller_operation(operation_name)
                 if preemptible and (
                     self._cancel_counter > entry_cancel_count
@@ -4355,6 +4367,7 @@ class AdjustableBedCoordinator:
         cancel_running: bool = False,
         skip_disconnect: bool = False,
         preemptible: bool = True,
+        run_if: Callable[[], bool] | None = None,
     ) -> T:
         """Execute a controller query and return its result."""
         result = await self._async_execute_controller_operation(
@@ -4366,6 +4379,7 @@ class AdjustableBedCoordinator:
             enable_position_polling=False,
             read_positions_after_operation=False,
             operation_name="query",
+            run_if=run_if,
         )
         return cast(T, result)
 
