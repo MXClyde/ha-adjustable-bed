@@ -701,15 +701,18 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         """Return the "disconnect after each command" value to persist.
 
         A boolean submission cannot distinguish an untouched checkbox from an
-        explicit choice that happens to equal its rendered default. Preserve
-        every submitted value. If the field is absent, preserve the default the
-        form rendered rather than recomputing it from a newly selected bed type.
+        explicit choice that happens to equal its rendered default. A value
+        different from the rendered default is an explicit choice; otherwise
+        follow the default for the protocol selected in the submitted form.
         """
+        selected_default = disconnect_after_command_default_enabled(
+            bed_type, protocol_variant
+        )
         submitted = user_input.get(CONF_DISCONNECT_AFTER_COMMAND)
         if submitted is None:
-            if rendered_default is not None:
-                return rendered_default
-            return disconnect_after_command_default_enabled(bed_type, protocol_variant)
+            return selected_default
+        if rendered_default is not None and submitted == rendered_default:
+            return selected_default
         return bool(submitted)
 
     @staticmethod
