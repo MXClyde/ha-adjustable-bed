@@ -51,6 +51,7 @@ from .bond_verification import (
     bond_owner_from_entry,
     build_bond_context,
 )
+from .combine_suggestion import async_dismiss, async_is_dismissed
 from .const import (
     ADAPTER_AUTO,
     CONF_BED_TYPE,
@@ -87,6 +88,13 @@ def async_refresh_combine_beds_issue(hass: HomeAssistant) -> None:
     """Create or clear the Dual Bed suggestion from current entry state."""
     candidates = active_pairing_candidates(hass)
     if len(candidates) < 2:
+        async_delete_issue(hass, DOMAIN, COMBINE_BEDS_ISSUE_ID)
+        return
+
+    addresses = [entry.data[CONF_ADDRESS] for entry in candidates]
+    if async_is_dismissed(hass, addresses):
+        # The user has said these are separate beds. Asking again about the
+        # same set would make the answer meaningless.
         async_delete_issue(hass, DOMAIN, COMBINE_BEDS_ISSUE_ID)
         return
 
@@ -160,10 +168,29 @@ class CombineBedsRepairFlow(RepairsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Open the pairing selection directly from Repairs."""
+        """Ask which of the two answers applies before showing any form.
+
+        A fixable Repairs issue gets no Ignore action from Home Assistant, so
+        without this the only exit for someone who owns two separate beds is to
+        close the dialog, leaving the suggestion in Repairs forever.
+        """
         # RepairsFlowManager passes its internal {"issue_id": ...} payload to
         # the init step. It is flow metadata, not a submitted side assignment.
-        return await self.async_step_pair_beds()
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["pair_beds", "separate_beds"],
+        )
+
+    async def async_step_separate_beds(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Record that these beds are separate and stop suggesting them."""
+        addresses = [
+            entry.data[CONF_ADDRESS] for entry in active_pairing_candidates(self.hass)
+        ]
+        await async_dismiss(self.hass, addresses)
+        async_refresh_combine_beds_issue(self.hass)
+        return self.async_abort(reason="beds_are_separate")
 
     async def async_step_pair_beds(
         self, user_input: dict[str, Any] | None = None

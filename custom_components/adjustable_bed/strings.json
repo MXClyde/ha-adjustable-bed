@@ -2018,9 +2018,17 @@
       "title": "Combine two beds into one (Dual Bed)",
       "fix_flow": {
         "step": {
+          "init": {
+            "title": "Are these two sides of one bed?",
+            "description": "Home Assistant found {count} standalone beds: {names}.\n\nIf two entries control the independent sides of one physical bed, combine them into Left and Right. If they are separate beds, choose that and this suggestion will not come back.",
+            "menu_options": {
+              "pair_beds": "They are two sides of one bed",
+              "separate_beds": "They are separate beds"
+            }
+          },
           "pair_beds": {
             "title": "Combine two beds",
-            "description": "Home Assistant found {count} active standalone beds: {names}. If two entries control the independent sides of one physical bed, choose which is Left and Right. Their entity IDs, history, names, areas, and dashboard references are preserved. If these are separate beds, close and dismiss this suggestion.",
+            "description": "Combine two existing beds into one paired device with Left, Right and combined controls. The two original beds are removed; their entity history follows. Pairing is for sides that move independently: if a sync cable already keeps both sides together, keep a single bed instead.",
             "data": {
               "pair_selection": "Left and Right sides",
               "name": "Name for the combined bed"
@@ -2040,7 +2048,8 @@
         "abort": {
           "not_enough_beds": "Fewer than two active standalone beds remain, so this suggestion no longer applies.",
           "already_configured": "These beds already belong to a paired Adjustable Bed entry.",
-          "pairing_flow_failed": "The Dual Bed setup flow could not be started. Reload Repairs and try again."
+          "pairing_flow_failed": "The Dual Bed setup flow could not be started. Reload Repairs and try again.",
+          "beds_are_separate": "Noted, these are separate beds. The suggestion is gone and will not return for this pair. Adding another bed later is a new question, so it may be suggested again then."
         }
       }
     },
