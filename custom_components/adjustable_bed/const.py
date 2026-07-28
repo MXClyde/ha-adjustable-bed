@@ -2274,12 +2274,14 @@ BEDS_WITH_DISCONNECT_AFTER_COMMAND_DEFAULT_DISABLED: Final = (
             BED_TYPE_OKIMAT,
             BED_TYPE_OKIN_CB24,
             BED_TYPE_OKIN_CST,
+            BED_TYPE_OKIN_ORE,
             BED_TYPE_OKIN_UUID,
             BED_TYPE_REVERIE,
             BED_TYPE_REVERIE_NIGHTSTAND,
             BED_TYPE_SLEEP_NUMBER,
             BED_TYPE_SLEEPSTAR,
             BED_TYPE_SLEEPYS_BOX25,
+            BED_TYPE_SVANE,
             BED_TYPE_VIBRADORM,
         }
     )
