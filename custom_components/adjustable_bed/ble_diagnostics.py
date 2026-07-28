@@ -394,6 +394,7 @@ class BLEDiagnosticRunner:
                 command,
                 cancel_running=False,
                 skip_disconnect=True,
+                preemptible=False,
             )
         finally:
             coordinator.pause_disconnect_timer()

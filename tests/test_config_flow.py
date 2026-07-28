@@ -1325,6 +1325,7 @@ class TestBluetoothDiscoveryFlow:
     def test_disconnect_after_command_default_per_bed_type(self):
         """Beds that must hold the link open keep the option off; others get it on."""
         from custom_components.adjustable_bed.const import (
+            BED_TYPE_COMFORT_MOTION,
             BED_TYPE_JENSEN,
             BED_TYPE_JIECANG,
             BED_TYPE_KAIDI,
@@ -1359,6 +1360,7 @@ class TestBluetoothDiscoveryFlow:
         assert disconnect_after_command_default_enabled(BED_TYPE_ERGOMOTION, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_LEGGETT_GEN2, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_SLEEP_NUMBER_MCR, None) is False
+        assert disconnect_after_command_default_enabled(BED_TYPE_COMFORT_MOTION, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_JENSEN, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_JIECANG, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_KAIDI, None) is False
@@ -1421,8 +1423,8 @@ class TestBluetoothDiscoveryFlow:
         )
         assert marker.default() is True
 
-    def test_submitted_disconnect_choice_is_preserved_across_bed_type_changes(self):
-        """A submitted boolean remains authoritative when the bed type changes."""
+    def test_disconnect_choice_follows_new_bed_default_when_checkbox_untouched(self):
+        """HA's submitted rendered default follows a newly selected protocol."""
         from custom_components.adjustable_bed.config_flow import AdjustableBedConfigFlow
 
         flow = AdjustableBedConfigFlow()
@@ -1432,20 +1434,40 @@ class TestBluetoothDiscoveryFlow:
                 {CONF_DISCONNECT_AFTER_COMMAND: True},
                 BED_TYPE_LEGGETT_GEN2,
                 None,
+                True,
             )
-            is True
+            is False
         )
         assert (
             flow._disconnect_after_command_choice(
                 {CONF_DISCONNECT_AFTER_COMMAND: False},
                 BED_TYPE_LINAK,
                 VARIANT_AUTO,
+                False,
+            )
+            is True
+        )
+
+        # A value differing from the rendered default remains an explicit choice.
+        assert (
+            flow._disconnect_after_command_choice(
+                {CONF_DISCONNECT_AFTER_COMMAND: False},
+                BED_TYPE_LINAK,
+                VARIANT_AUTO,
+                True,
             )
             is False
         )
-
-        # An absent field follows the chosen bed type.
-        assert flow._disconnect_after_command_choice({}, BED_TYPE_LINAK, VARIANT_AUTO) is True
+        # An absent field also follows the chosen bed type.
+        assert (
+            flow._disconnect_after_command_choice(
+                {},
+                BED_TYPE_LINAK,
+                VARIANT_AUTO,
+                False,
+            )
+            is True
+        )
 
     async def test_explicitly_unchecking_disconnect_after_command_is_kept(
         self,

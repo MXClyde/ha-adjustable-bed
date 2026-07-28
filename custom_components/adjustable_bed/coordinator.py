@@ -3496,8 +3496,12 @@ class AdjustableBedCoordinator:
         task = self._position_hydration_task
         if task is not None and not task.done():
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await task
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
         self._position_hydration_task = None
 
     async def async_pause_position_hydration(self) -> None:
@@ -4171,6 +4175,7 @@ class AdjustableBedCoordinator:
         cancel_running: bool,
         skip_disconnect: bool,
         raise_on_lock_cancel: bool,
+        preemptible: bool,
         enable_position_polling: bool,
         read_positions_after_operation: bool,
         operation_name: str,
@@ -4185,7 +4190,7 @@ class AdjustableBedCoordinator:
         async with self._command_lock:
             self._cancel_disconnect_timer()
 
-            if self._cancel_counter > entry_cancel_count:
+            if preemptible and self._cancel_counter > entry_cancel_count:
                 _LOGGER.debug("Controller %s cancelled while waiting for lock", operation_name)
                 if self._client is not None and self._client.is_connected:
                     self._reset_disconnect_timer()
@@ -4195,7 +4200,10 @@ class AdjustableBedCoordinator:
 
             try:
                 controller = await self._async_prepare_controller_operation(operation_name)
-                if self._cancel_counter > entry_cancel_count or self._cancel_command.is_set():
+                if preemptible and (
+                    self._cancel_counter > entry_cancel_count
+                    or self._cancel_command.is_set()
+                ):
                     _LOGGER.debug("Controller %s cancelled during preparation", operation_name)
                     if raise_on_lock_cancel:
                         raise asyncio.CancelledError
@@ -4217,11 +4225,14 @@ class AdjustableBedCoordinator:
 
                 try:
                     operation_task = asyncio.create_task(operation_fn(controller))
-                    result = await self._async_wait_for_controller_operation(
-                        operation_task,
-                        operation_name=operation_name,
-                        raise_on_cancel=raise_on_lock_cancel,
-                    )
+                    if preemptible:
+                        result = await self._async_wait_for_controller_operation(
+                            operation_task,
+                            operation_name=operation_name,
+                            raise_on_cancel=raise_on_lock_cancel,
+                        )
+                    else:
+                        result = await operation_task
                 finally:
                     self._last_command_end = datetime.now(UTC)
                     self._active_operation_name = None
@@ -4284,6 +4295,7 @@ class AdjustableBedCoordinator:
         command_fn: Callable[[BedController], Coroutine[Any, Any, None]],
         cancel_running: bool = True,
         skip_disconnect: bool = False,
+        preemptible: bool = True,
     ) -> None:
         """Execute a controller command with proper serialization."""
         await self._async_execute_controller_operation(
@@ -4291,6 +4303,7 @@ class AdjustableBedCoordinator:
             cancel_running=cancel_running,
             skip_disconnect=skip_disconnect,
             raise_on_lock_cancel=False,
+            preemptible=preemptible,
             enable_position_polling=True,
             read_positions_after_operation=True,
             operation_name="command",
@@ -4308,6 +4321,7 @@ class AdjustableBedCoordinator:
             cancel_running=cancel_running,
             skip_disconnect=skip_disconnect,
             raise_on_lock_cancel=True,
+            preemptible=True,
             enable_position_polling=False,
             read_positions_after_operation=False,
             operation_name="query",

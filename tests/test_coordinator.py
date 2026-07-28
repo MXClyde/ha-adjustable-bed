@@ -5045,6 +5045,48 @@ class TestStopAfterCancel:
         # Counter should NOT have incremented
         assert coordinator._cancel_counter == initial_counter
 
+    async def test_non_preemptible_controller_command_finishes_before_new_command(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ):
+        """Diagnostic state cleanup must not be dropped by a newer command."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        cleanup_finished = False
+
+        async def cleanup(_controller):
+            nonlocal cleanup_finished
+            cleanup_started.set()
+            await release_cleanup.wait()
+            cleanup_finished = True
+
+        cleanup_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(
+                cleanup,
+                cancel_running=False,
+                preemptible=False,
+            )
+        )
+        await cleanup_started.wait()
+
+        next_command = asyncio.create_task(
+            coordinator.async_execute_controller_command(
+                lambda _controller: asyncio.sleep(0)
+            )
+        )
+        await asyncio.sleep(0)
+        assert not cleanup_task.done()
+
+        release_cleanup.set()
+        await cleanup_task
+        await next_command
+
+        assert cleanup_finished
+
     async def test_execute_controller_command_skips_execution_if_cancelled_during_preparation(
         self,
         hass: HomeAssistant,

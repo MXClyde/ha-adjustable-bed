@@ -632,6 +632,51 @@ class TestSingleAddressCoordinator:
         assert first_task.cancelled()
         assert coordinator._single_inner.cancelled_position_hydrations == 2
 
+    async def test_sleep_number_reconnect_stops_hydration_after_swallowed_cancel(
+        self,
+    ):
+        coordinator = self._coordinator(BED_TYPE_SLEEP_NUMBER, SleepNumberController)
+        cancel_started = asyncio.Event()
+        cancel_calls = 0
+        hydration_calls = 0
+
+        async def cancel_inner_hydration():
+            nonlocal cancel_calls
+            cancel_calls += 1
+            if cancel_calls != 1:
+                return
+            cancel_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # Model an inner cancellation helper consuming the parent
+                # hydration task's cancellation while awaiting its own task.
+                return
+
+        async def hydrate():
+            nonlocal hydration_calls
+            hydration_calls += 1
+
+        coordinator._single_inner._async_cancel_position_hydration = (
+            cancel_inner_hydration
+        )
+        for child in coordinator.children.values():
+            object.__setattr__(child, "async_read_initial_positions", hydrate)
+
+        coordinator._on_child_connection_change(True)
+        first_task = coordinator._single_position_hydration_task
+        assert first_task is not None
+        await cancel_started.wait()
+
+        coordinator._on_child_connection_change(True)
+        second_task = coordinator._single_position_hydration_task
+        assert second_task is not None
+        await asyncio.gather(first_task, return_exceptions=True)
+        await second_task
+
+        assert first_task.cancelled()
+        assert hydration_calls == 2
+
     async def test_bond_actions_reach_the_coordinator_that_owns_the_link(self):
         """This surface keeps the entry's address, so it is offered bond removal.
 

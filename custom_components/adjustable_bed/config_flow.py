@@ -695,17 +695,19 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         user_input: dict[str, Any],
         bed_type: str | None,
         protocol_variant: str | None,
+        rendered_default: bool,
     ) -> bool:
         """Return the "disconnect after each command" value to persist.
 
-        A submitted boolean is an explicit user choice, including when it
-        happens to equal the default rendered before the protocol changed.
+        Preserve a value that differs from the rendered default as an explicit
+        user choice. Otherwise follow the selected protocol's default, since HA
+        submits the rendered checkbox value even when the user never touched it.
         """
         selected_default = disconnect_after_command_default_enabled(
             bed_type, protocol_variant
         )
         submitted = user_input.get(CONF_DISCONNECT_AFTER_COMMAND)
-        if submitted is None:
+        if submitted is None or bool(submitted) == rendered_default:
             return selected_default
         return bool(submitted)
 
@@ -1515,6 +1517,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                         user_input,
                         selected_bed_type,
                         protocol_variant,
+                        default_disconnect_after_command,
                     ),
                     CONF_IDLE_DISCONNECT_SECONDS: user_input.get(
                         CONF_IDLE_DISCONNECT_SECONDS, DEFAULT_IDLE_DISCONNECT_SECONDS
@@ -2377,6 +2380,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                         user_input,
                         bed_type,
                         protocol_variant,
+                        default_disconnect_after_command,
                     ),
                     CONF_IDLE_DISCONNECT_SECONDS: user_input.get(
                         CONF_IDLE_DISCONNECT_SECONDS, DEFAULT_IDLE_DISCONNECT_SECONDS
@@ -2631,6 +2635,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                             user_input,
                             bed_type,
                             protocol_variant,
+                            default_disconnect_after_command,
                         ),
                         CONF_IDLE_DISCONNECT_SECONDS: user_input.get(
                             CONF_IDLE_DISCONNECT_SECONDS, DEFAULT_IDLE_DISCONNECT_SECONDS

@@ -899,23 +899,35 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
         super()._on_child_connection_change(connected)
         if not connected or self._single_inner.bed_type != BED_TYPE_SLEEP_NUMBER:
             return
-        task = self._single_position_hydration_task
-        if task is not None and not task.done():
-            task.cancel()
+        previous_task = self._single_position_hydration_task
+        if previous_task is not None and not previous_task.done():
+            previous_task.cancel()
+        else:
+            previous_task = None
         self._single_position_hydration_task = self.entry.async_create_background_task(
             self.hass,
-            self._async_hydrate_logical_positions(),
+            self._async_hydrate_logical_positions(previous_task),
             name=f"adjustable_bed_single_address_position_hydration_{self.entry.entry_id}",
         )
 
-    async def _async_hydrate_logical_positions(self) -> None:
+    async def _async_hydrate_logical_positions(
+        self, previous_task: asyncio.Task[None] | None = None
+    ) -> None:
         """Refresh each logical side without mixing same-named position axes."""
         current_task = asyncio.current_task()
         try:
+            if previous_task is not None:
+                try:
+                    await previous_task
+                except asyncio.CancelledError:
+                    if current_task is not None and current_task.cancelling():
+                        raise
             # The inner coordinator schedules an unbound read during connect.
             # Replace it with side-bound reads for protocols whose two logical
             # sides report the same axis names.
             await self._single_inner._async_cancel_position_hydration()
+            if current_task is not None and current_task.cancelling():
+                raise asyncio.CancelledError
             results = await asyncio.gather(
                 *(
                     child.async_read_initial_positions()
