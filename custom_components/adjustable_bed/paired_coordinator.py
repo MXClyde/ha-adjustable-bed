@@ -632,11 +632,15 @@ class SingleAddressSideCoordinator:
         object.__setattr__(self, "_single_side", side)
         object.__setattr__(self, "_single_position_data", {})
         object.__setattr__(self, "_single_position_callbacks", set())
-        object.__setattr__(
-            self,
-            "_single_unregister_position_callback",
-            inner.register_position_callback(lambda _positions: self._sync_position_state()),
-        )
+        # CB24 reports one shared set of axes, so reconnect hydration can relay
+        # it to both views. Sleep Number uses the same axis keys per side, where
+        # relaying an unbound response would overwrite the other side's state.
+        if inner.bed_type != BED_TYPE_SLEEP_NUMBER:
+            object.__setattr__(
+                self,
+                "_single_unregister_position_callback",
+                inner.register_position_callback(lambda _positions: self._sync_position_state()),
+            )
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_single_"):

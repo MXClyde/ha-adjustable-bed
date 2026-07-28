@@ -2265,7 +2265,15 @@ BEDS_REQUIRING_PERSISTENT_CONNECTION: Final = frozenset(
 # controller by default so consecutive controls keep their intended state.
 BEDS_WITH_DISCONNECT_AFTER_COMMAND_DEFAULT_DISABLED: Final = (
     BEDS_REQUIRING_PERSISTENT_CONNECTION
-    | frozenset({BED_TYPE_JENSEN, BED_TYPE_JIECANG, BED_TYPE_VIBRADORM})
+    | frozenset(
+        {
+            BED_TYPE_JENSEN,
+            BED_TYPE_JIECANG,
+            BED_TYPE_KAIDI,
+            BED_TYPE_OKIN_CB24,
+            BED_TYPE_VIBRADORM,
+        }
+    )
 )
 
 

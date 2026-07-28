@@ -546,6 +546,7 @@ class TestSingleAddressCoordinator:
             data={CONF_PAIR_ID: "pair_single", "name": "Single", CONF_BED_TYPE: bed_type}
         )
         inner = SingleAddressInner(controller_type)
+        inner.bed_type = bed_type
         return SingleAddressPairedCoordinator(None, entry, inner)
 
     async def test_sbi_uses_native_side_and_both_packets(self):
