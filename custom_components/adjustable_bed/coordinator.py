@@ -266,12 +266,18 @@ class ChildEntryView:
         keys: Collection[str] | None = None,
     ) -> None:
         """Update this side's config in place and route selected keys to the parent."""
-        self._child_data = dict(new_data)
-        persisted_data = (
-            self._child_data
-            if keys is None
-            else {key: self._child_data[key] for key in keys if key in self._child_data}
-        )
+        if keys is None:
+            self._child_data = dict(new_data)
+            persisted_data = self._child_data
+        else:
+            for key in keys:
+                if key in new_data:
+                    self._child_data[key] = new_data[key]
+                else:
+                    self._child_data.pop(key, None)
+            persisted_data = {
+                key: self._child_data[key] for key in keys if key in self._child_data
+            }
         self._persist_cb(persisted_data)
 
     def __getattr__(self, name: str) -> Any:

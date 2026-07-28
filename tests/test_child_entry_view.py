@@ -83,6 +83,24 @@ def test_persist_updates_view_in_place_and_routes_to_callback():
     assert routed == [{"a": 2, "b": 3}]
 
 
+def test_persist_selected_keys_preserves_other_child_data():
+    parent = SimpleNamespace(entry_id="parent-id", options={})
+    routed: list[dict] = []
+    view = ChildEntryView(
+        parent,
+        {"address": "AA:BB", "name": "Left", "bond": False, "context": "old"},
+        routed.append,
+    )
+
+    view.persist_data(
+        {"address": "changed", "name": "Changed", "bond": True},
+        keys={"bond", "context"},
+    )
+
+    assert view.data == {"address": "AA:BB", "name": "Left", "bond": True}
+    assert routed == [{"bond": True}]
+
+
 def test_data_is_isolated_copy():
     parent = SimpleNamespace(entry_id="p", options={})
     source = {"a": 1}

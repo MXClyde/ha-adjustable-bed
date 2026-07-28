@@ -423,6 +423,36 @@ class TestPairedSetup:
         assert result["type"] == FlowResultType.ABORT
         assert result["reason"] == "remove_bond_ambiguous"
 
+    @pytest.mark.parametrize("invalid_address", [None, 123, "", "   "])
+    async def test_bond_removal_refuses_child_without_usable_address(
+        self,
+        hass: HomeAssistant,
+        enable_custom_integrations,
+        invalid_address: object,
+    ) -> None:
+        """Bond removal must not select a child whose address cannot be queried."""
+        data = _paired_entry_data()
+        data[CONF_PAIR_CHILDREN] = [data[CONF_PAIR_CHILDREN][0]]
+        data[CONF_PAIR_CHILDREN][0][CONF_ADDRESS] = invalid_address
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Malformed pair",
+            data=data,
+            unique_id=PAIR_ID,
+            entry_id="malformed_pair_address_bond_removal",
+            version=4,
+        )
+        entry.add_to_hass(hass)
+
+        menu = await hass.config_entries.options.async_init(entry.entry_id)
+        result = await hass.config_entries.options.async_configure(
+            menu["flow_id"],
+            {"next_step_id": "remove_bond"},
+        )
+
+        assert result["type"] == FlowResultType.ABORT
+        assert result["reason"] == "remove_bond_ambiguous"
+
     async def test_bond_removal_auto_selects_the_only_child(
         self,
         hass: HomeAssistant,

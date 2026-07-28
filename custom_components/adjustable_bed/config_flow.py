@@ -5096,7 +5096,14 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
             if child is None:
                 continue
             raw_address = child.get(CONF_ADDRESS)
-            address = raw_address.upper() if isinstance(raw_address, str) else ""
+            address = raw_address.strip().upper() if isinstance(raw_address, str) else ""
+            if not address:
+                return self._async_abort_bond_removal(
+                    "ambiguous",
+                    self.config_entry.title,
+                    str(self.config_entry.data.get(CONF_ADDRESS, "")),
+                    BondOwner(),
+                )
             address_sides.setdefault(address, []).append(side)
             name = child.get(CONF_NAME) or side.title()
             choices[side] = f"{side.title()}: {name} ({address})"
