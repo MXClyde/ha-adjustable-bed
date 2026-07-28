@@ -1334,6 +1334,7 @@ class TestBluetoothDiscoveryFlow:
             BED_TYPE_LEGGETT_WILINKE,
             BED_TYPE_LIMOSS,
             BED_TYPE_LINAK,
+            BED_TYPE_OCTO,
             BED_TYPE_OKIN_CB24,
             BED_TYPE_OKIN_CST,
             BED_TYPE_OKIN_ORE,
@@ -1371,6 +1372,7 @@ class TestBluetoothDiscoveryFlow:
             is False
         )
         assert disconnect_after_command_default_enabled(BED_TYPE_LIMOSS, None) is False
+        assert disconnect_after_command_default_enabled(BED_TYPE_OCTO, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_OKIN_CB24, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_OKIN_CST, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_OKIMAT, None) is False

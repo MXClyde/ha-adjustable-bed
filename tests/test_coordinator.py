@@ -2793,6 +2793,30 @@ class TestDisconnectCommandSerialization:
 
         await coordinator.async_disconnect()
 
+    async def test_idle_disconnect_skipped_during_position_hydration(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ):
+        """Hydration owns the connection across all attempts and retry backoffs."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        coordinator._position_hydration_running = True
+
+        with patch.object(
+            coordinator,
+            "_async_disconnect_locked",
+            new_callable=AsyncMock,
+        ) as disconnect:
+            await coordinator._async_idle_disconnect()
+
+        disconnect.assert_not_awaited()
+        assert coordinator._client is not None
+
+        coordinator._position_hydration_running = False
+        await coordinator.async_disconnect()
+
 
 class TestSleepNumberMcrCoordinatorLifecycle:
     """Test Sleep Number MCR coordinator lifecycle behavior."""

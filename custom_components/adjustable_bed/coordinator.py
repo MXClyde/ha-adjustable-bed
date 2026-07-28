@@ -3876,6 +3876,14 @@ class AdjustableBedCoordinator:
             self._address,
         )
         async with self._command_lock:
+            if self._position_hydration_running:
+                # Commands may re-arm the timer between hydration attempts.
+                # The final hydration cleanup starts a fresh timer.
+                _LOGGER.debug(
+                    "Skipping idle disconnect during position hydration for %s",
+                    self._address,
+                )
+                return
             if self._disconnect_timer is not None:
                 # A command ran while this firing waited for the command lock and
                 # re-armed the timer, so the bed is no longer idle.
