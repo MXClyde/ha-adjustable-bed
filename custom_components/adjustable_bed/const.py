@@ -2249,6 +2249,42 @@ DEFAULT_IDLE_DISCONNECT_SECONDS: Final = 40
 DEFAULT_OCTO_PIN: Final = ""
 DEFAULT_CONNECTION_PROFILE: Final = CONNECTION_PROFILE_BALANCED
 
+# Bed types whose controller has to hold the BLE link open for the entry's
+# lifetime. The coordinator already suppresses the post-command disconnect for
+# them (see _disconnect_after_operation_enabled), so defaulting the option on
+# would only advertise something the bed cannot do.
+BEDS_REQUIRING_PERSISTENT_CONNECTION: Final = frozenset(
+    {
+        BED_TYPE_LEGGETT_GEN2,
+        BED_TYPE_SLEEP_NUMBER_MCR,
+    }
+)
+
+
+def disconnect_after_command_default_enabled(
+    bed_type: str | None, protocol_variant: str | None = None
+) -> bool:
+    """Return whether a NEW entry should free the BLE link after each command.
+
+    These beds accept a single BLE connection at a time, so holding the link
+    locks the physical remote and the vendor app out until the idle timeout
+    expires. Handing the link straight back is the better default; beds that
+    need it held open keep the option off.
+
+    A legacy umbrella bed type with an auto variant (leggett_platt) cannot be
+    resolved here, so it gets the permissive default. That is safe: if it
+    resolves to a persistent protocol at connect time, the coordinator suppresses
+    the disconnect anyway.
+
+    Only new entries consult this. An existing entry already stores its own
+    value, which is left alone.
+    """
+    if not bed_type:
+        return DEFAULT_DISCONNECT_AFTER_COMMAND
+    resolved = resolve_explicit_bed_type(bed_type, protocol_variant)
+    return resolved not in BEDS_REQUIRING_PERSISTENT_CONNECTION
+
+
 # Connection profiles
 CONNECTION_PROFILES: Final = {
     CONNECTION_PROFILE_BALANCED: ConnectionProfileSettings(

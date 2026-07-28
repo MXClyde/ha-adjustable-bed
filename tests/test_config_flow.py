@@ -96,6 +96,7 @@ from custom_components.adjustable_bed.const import (
     CONF_BLE_BOND_MARKER_UNRELIABLE,
     CONF_DISABLE_ANGLE_SENSING,
     CONF_DISABLE_DISCOVERY,
+    CONF_DISCONNECT_AFTER_COMMAND,
     CONF_HAS_MASSAGE,
     CONF_KAIDI_ADV_TYPE,
     CONF_KAIDI_PRODUCT_ID,
@@ -1320,6 +1321,119 @@ class TestBluetoothDiscoveryFlow:
             marker for marker in result["data_schema"].schema if marker.schema == CONF_MOTOR_COUNT
         )
         assert motor_count_marker.default() == 1
+
+    def test_disconnect_after_command_default_per_bed_type(self):
+        """Beds that must hold the link open keep the option off; others get it on."""
+        from custom_components.adjustable_bed.const import (
+            BED_TYPE_LEGGETT_GEN2,
+            BED_TYPE_LEGGETT_PLATT,
+            BED_TYPE_LINAK,
+            BED_TYPE_SLEEP_NUMBER_MCR,
+            LEGGETT_VARIANT_GEN2,
+            VARIANT_AUTO,
+            disconnect_after_command_default_enabled,
+        )
+
+        assert disconnect_after_command_default_enabled(BED_TYPE_LINAK, VARIANT_AUTO) is True
+        assert disconnect_after_command_default_enabled(BED_TYPE_LEGGETT_GEN2, None) is False
+        assert disconnect_after_command_default_enabled(BED_TYPE_SLEEP_NUMBER_MCR, None) is False
+        # An umbrella type resolves through its explicit variant.
+        assert (
+            disconnect_after_command_default_enabled(BED_TYPE_LEGGETT_PLATT, LEGGETT_VARIANT_GEN2)
+            is False
+        )
+        # No bed type chosen yet (auto-detect): keep the conservative default.
+        assert disconnect_after_command_default_enabled(None, None) is False
+
+    async def test_discovery_defaults_to_freeing_the_link_after_each_command(
+        self,
+        hass: HomeAssistant,
+        mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+        enable_custom_integrations,
+    ):
+        """A Linak bed accepts one BLE link, so hand it back after each command."""
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_BLUETOOTH},
+            data=mock_bluetooth_service_info,
+        )
+
+        assert result["step_id"] == "bluetooth_confirm"
+        marker = next(
+            marker
+            for marker in result["data_schema"].schema
+            if marker.schema == CONF_DISCONNECT_AFTER_COMMAND
+        )
+        assert marker.default() is True
+
+    def test_untouched_disconnect_default_follows_the_chosen_bed_type(self):
+        """Picking another bed type must not persist the previous type's default.
+
+        The checkbox is rendered from the bed type the step defaulted to, so a
+        submitted value that still equals it was never touched and has to be
+        recomputed for the bed the user actually chose.
+        """
+        from custom_components.adjustable_bed.config_flow import AdjustableBedConfigFlow
+
+        flow = AdjustableBedConfigFlow()
+        # Rendered pre-checked for the detected Linak bed.
+        flow._rendered_disconnect_default = True
+
+        # Untouched, but the user switched to a bed that holds its link open.
+        assert (
+            flow._disconnect_after_command_choice(
+                {CONF_DISCONNECT_AFTER_COMMAND: True}, BED_TYPE_LEGGETT_GEN2, None
+            )
+            is False
+        )
+        # Untouched and the bed type is unchanged: the rendered default stands.
+        assert (
+            flow._disconnect_after_command_choice(
+                {CONF_DISCONNECT_AFTER_COMMAND: True}, BED_TYPE_LINAK, VARIANT_AUTO
+            )
+            is True
+        )
+        # Explicitly unchecked: the user's choice wins over the bed type default.
+        assert (
+            flow._disconnect_after_command_choice(
+                {CONF_DISCONNECT_AFTER_COMMAND: False}, BED_TYPE_LINAK, VARIANT_AUTO
+            )
+            is False
+        )
+        # Field absent from the submission: fall back to the chosen bed type.
+        assert flow._disconnect_after_command_choice({}, BED_TYPE_LINAK, VARIANT_AUTO) is True
+
+    async def test_explicitly_unchecking_disconnect_after_command_is_kept(
+        self,
+        hass: HomeAssistant,
+        mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+        enable_custom_integrations,
+    ):
+        """A value that differs from the rendered default is the user's choice."""
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_BLUETOOTH},
+            data=mock_bluetooth_service_info,
+        )
+
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_NAME: "My Bed",
+                CONF_MOTOR_COUNT: 2,
+                CONF_HAS_MASSAGE: False,
+                CONF_DISABLE_ANGLE_SENSING: False,
+                CONF_PREFERRED_ADAPTER: "auto",
+                CONF_DISCONNECT_AFTER_COMMAND: False,
+            },
+        )
+
+        result = await _advance_progress(hass, result)
+        assert result["step_id"] == "verify_connection"
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+        assert result["data"][CONF_DISCONNECT_AFTER_COMMAND] is False
 
     async def test_bluetooth_discovery_confirm(
         self,
