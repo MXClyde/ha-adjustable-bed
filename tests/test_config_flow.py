@@ -1333,7 +1333,9 @@ class TestBluetoothDiscoveryFlow:
             BED_TYPE_LINAK,
             BED_TYPE_OKIN_CB24,
             BED_TYPE_OKIN_UUID,
+            BED_TYPE_REVERIE_NIGHTSTAND,
             BED_TYPE_SLEEP_NUMBER_MCR,
+            BED_TYPE_SLEEPSTAR,
             BED_TYPE_SLEEPYS_BOX25,
             BED_TYPE_VIBRADORM,
             LEGGETT_VARIANT_GEN2,
@@ -1349,6 +1351,8 @@ class TestBluetoothDiscoveryFlow:
         assert disconnect_after_command_default_enabled(BED_TYPE_KAIDI, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_OKIN_CB24, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_OKIN_UUID, None) is False
+        assert disconnect_after_command_default_enabled(BED_TYPE_REVERIE_NIGHTSTAND, None) is False
+        assert disconnect_after_command_default_enabled(BED_TYPE_SLEEPSTAR, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_SLEEPYS_BOX25, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_VIBRADORM, None) is False
         # An umbrella type resolves through its explicit variant.
