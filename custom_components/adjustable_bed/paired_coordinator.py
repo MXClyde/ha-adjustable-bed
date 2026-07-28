@@ -695,6 +695,13 @@ class SingleAddressSideCoordinator:
         for callback_fn in list(self._single_position_callbacks):
             callback_fn(dict(self._single_position_data))
 
+    def _unregister_inner_position_callback(self) -> None:
+        """Release the shared-position relay registered by CB24 views."""
+        unregister = getattr(self, "_single_unregister_position_callback", None)
+        if unregister is not None:
+            unregister()
+            object.__setattr__(self, "_single_unregister_position_callback", None)
+
     def register_position_callback(
         self, callback_fn: Callable[[dict[str, float]], None]
     ) -> Callable[[], None]:
@@ -833,6 +840,7 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
             SIDE_RIGHT: SingleAddressSideCoordinator(inner, SIDE_RIGHT, self),
         }
         self._single_both = SingleAddressSideCoordinator(inner, SIDE_BOTH, self)
+        self._single_side_coordinators = (*children.values(), self._single_both)
         super().__init__(
             hass,
             entry,
@@ -970,11 +978,18 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
     async def _async_cancel_single_position_hydration(self) -> None:
         """Cancel and await logical-side hydration."""
         task = self._single_position_hydration_task
-        if task is not None and not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        self._single_position_hydration_task = None
+        try:
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise
+        finally:
+            if self._single_position_hydration_task is task:
+                self._single_position_hydration_task = None
 
     async def async_pause_position_hydration(self) -> None:
         """Pause physical and logical hydration during diagnostics."""
@@ -1023,6 +1038,8 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
         for unsub in self._child_unsubs:
             unsub()
         self._child_unsubs.clear()
+        for side_coordinator in self._single_side_coordinators:
+            side_coordinator._unregister_inner_position_callback()
         await self._single_inner.async_shutdown()
 
     def _wire_child_connection_callbacks(self) -> None:

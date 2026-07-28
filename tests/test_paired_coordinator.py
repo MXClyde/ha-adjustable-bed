@@ -669,6 +669,34 @@ class TestSingleAddressCoordinator:
         assert hydrated.is_set()
         assert coordinator._single_inner.position_hydration_pause_count == 0
 
+    async def test_cancel_hydration_preserves_callers_cancellation(self):
+        coordinator = self._coordinator(BED_TYPE_SLEEP_NUMBER, SleepNumberController)
+        hydration_started = asyncio.Event()
+        hydration_cancelled = asyncio.Event()
+
+        async def hydrate():
+            hydration_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                hydration_cancelled.set()
+                await asyncio.Event().wait()
+
+        hydration_task = asyncio.create_task(hydrate())
+        coordinator._single_position_hydration_task = hydration_task
+        await hydration_started.wait()
+
+        cancel_task = asyncio.create_task(
+            coordinator._async_cancel_single_position_hydration()
+        )
+        await hydration_cancelled.wait()
+        cancel_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await cancel_task
+        assert hydration_task.cancelled()
+        assert coordinator._single_position_hydration_task is None
+
     async def test_sleep_number_reconnect_stops_hydration_after_swallowed_cancel(
         self,
     ):
@@ -767,6 +795,16 @@ class TestSingleAddressCoordinator:
         assert right.position_data == {"back": 42.0}
         assert left_updates == [{"back": 42.0}]
         assert right_updates == [{"back": 42.0}]
+
+    async def test_cb24_shutdown_unregisters_shared_position_relays(self):
+        coordinator = self._coordinator(BED_TYPE_OKIN_CB24, OkinCB24Controller)
+        inner = coordinator._single_inner
+
+        assert len(inner._position_callbacks) == 3
+
+        await coordinator.async_shutdown()
+
+        assert inner._position_callbacks == set()
 
     async def test_sbi_position_updates_remain_side_scoped(self):
         coordinator = self._coordinator(BED_TYPE_SBI, SBIController)

@@ -1557,20 +1557,6 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     motor_pulse_delay_ms = pulse_defaults[1]
             else:
                 motor_pulse_delay_ms = pulse_defaults[1]
-            _LOGGER.info(
-                "User confirmed bed setup: name=%s, type=%s (detected: %s), variant=%s, address=%s, motors=%s, massage=%s, disable_angle_sensing=%s, adapter=%s, pulse_count=%s, pulse_delay=%s",
-                user_input.get(CONF_NAME, self._discovery_info.name or "Adjustable Bed"),
-                selected_bed_type,
-                detected_bed_type,
-                protocol_variant,
-                self._discovery_info.address,
-                user_input.get(CONF_MOTOR_COUNT, DEFAULT_MOTOR_COUNT),
-                user_input.get(CONF_HAS_MASSAGE, DEFAULT_HAS_MASSAGE),
-                user_input.get(CONF_DISABLE_ANGLE_SENSING, DEFAULT_DISABLE_ANGLE_SENSING),
-                preferred_adapter,
-                motor_pulse_count,
-                motor_pulse_delay_ms,
-            )
             if not errors:
                 disconnect_after_command = self._disconnect_after_command_choice(
                     user_input,
@@ -1585,6 +1571,25 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                         bed_type=selected_bed_type,
                         protocol_variant=protocol_variant,
                     )
+                _LOGGER.info(
+                    "User confirmed bed setup: name=%s, type=%s (detected: %s), variant=%s, address=%s, motors=%s, massage=%s, disable_angle_sensing=%s, adapter=%s, pulse_count=%s, pulse_delay=%s",
+                    user_input.get(
+                        CONF_NAME, self._discovery_info.name or "Adjustable Bed"
+                    ),
+                    selected_bed_type,
+                    detected_bed_type,
+                    protocol_variant,
+                    self._discovery_info.address,
+                    user_input.get(CONF_MOTOR_COUNT, DEFAULT_MOTOR_COUNT),
+                    user_input.get(CONF_HAS_MASSAGE, DEFAULT_HAS_MASSAGE),
+                    user_input.get(
+                        CONF_DISABLE_ANGLE_SENSING,
+                        DEFAULT_DISABLE_ANGLE_SENSING,
+                    ),
+                    preferred_adapter,
+                    motor_pulse_count,
+                    motor_pulse_delay_ms,
+                )
                 entry_data = {
                     CONF_ADDRESS: self._discovery_info.address.upper(),
                     CONF_BED_TYPE: selected_bed_type,
