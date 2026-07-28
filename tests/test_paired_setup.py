@@ -851,7 +851,7 @@ class TestPairedBuilders:
         hass.config_entries.async_update_entry(
             entry,
             data=with_updated_child(
-                entry.data,
+                {**entry.data, "connection_profile": "performance"},
                 SIDE_LEFT,
                 {
                     "ble_bond_established": True,
@@ -886,6 +886,7 @@ class TestPairedBuilders:
         assert left is not None
         assert "ble_bond_established" not in left
         assert "ble_bond_context" not in left
+        assert "connection_profile" not in left
 
     async def test_each_parent_listener_consumes_one_child_bond_update(
         self,

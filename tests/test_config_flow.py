@@ -3939,6 +3939,7 @@ async def test_combined_bond_removal_targets_the_selected_child(
     enable_custom_integrations,
 ) -> None:
     """The confirmation reads address and ownership from one child descriptor."""
+    stored_left_address = f"  {_BONDED_ADDRESS.lower()}  "
     right_address = "AA:BB:CC:DD:EE:01"
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -3948,11 +3949,11 @@ async def test_combined_bond_removal_targets_the_selected_child(
             CONF_BED_TYPE: BED_TYPE_OKIMAT,
             CONF_PAIR_ID: "pair_bond_removal",
             CONF_PAIR_MODE: PAIR_MODE_SEPARATE_ADDRESS,
-            CONF_PAIR_MEMBER_ADDRESSES: [_BONDED_ADDRESS, right_address],
+            CONF_PAIR_MEMBER_ADDRESSES: [stored_left_address, right_address],
             CONF_PAIR_CHILDREN: [
                 {
                     CONF_SIDE: SIDE_LEFT,
-                    CONF_ADDRESS: _BONDED_ADDRESS,
+                    CONF_ADDRESS: stored_left_address,
                     CONF_NAME: "Left side",
                     CONF_BED_TYPE: BED_TYPE_OKIMAT,
                     CONF_BLE_BOND_ESTABLISHED: True,
@@ -3991,12 +3992,13 @@ async def test_combined_bond_removal_targets_the_selected_child(
         menu["flow_id"],
         {"next_step_id": "remove_bond"},
     )
-    with _patch_inventory(inventory):
+    with _patch_inventory(inventory) as read_bonds:
         result = await hass.config_entries.options.async_configure(
             side_form["flow_id"],
             {"side": SIDE_LEFT},
         )
 
+    read_bonds.assert_awaited_once_with(_BONDED_ADDRESS)
     assert result["step_id"] == "remove_bond"
     assert result["description_placeholders"]["name"] == "Left side"
     assert result["description_placeholders"]["address"] == _BONDED_ADDRESS

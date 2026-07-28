@@ -5069,12 +5069,17 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
         """Return the exact entry data backing the selected bond address."""
         side = self._bond_removal_side
         if side is None:
-            return dict(self.config_entry.data)
-        return effective_child_data(
-            self.config_entry.data,
-            side,
-            self.config_entry.options,
-        )
+            data = dict(self.config_entry.data)
+        else:
+            data = effective_child_data(
+                self.config_entry.data,
+                side,
+                self.config_entry.options,
+            )
+        address = data.get(CONF_ADDRESS)
+        if isinstance(address, str):
+            data[CONF_ADDRESS] = address.strip().upper()
+        return data
 
     def _bond_target_coordinator(self) -> Any | None:
         """Return the coordinator whose locks and runtime state own the target."""

@@ -155,6 +155,7 @@ from .const import (
     POSITION_SEEK_TIMEOUT,
     REVERIE_BACK_MAX_ANGLE,
     RICHMAT_REMOTE_AUTO,
+    RUNTIME_BOND_KEYS,
     VARIANT_AUTO,
     connection_gated_by_bond,
     get_richmat_features,
@@ -505,7 +506,12 @@ class AdjustableBedCoordinator:
             self._connection_profile,
         )
 
-    def _async_persist_config(self, new_data: dict[str, Any]) -> None:
+    def _async_persist_config(
+        self,
+        new_data: dict[str, Any],
+        *,
+        keys: Collection[str] | None = None,
+    ) -> None:
         """Persist a runtime config change to the correct backing store.
 
         For a paired child the entry is a ChildEntryView, which routes the update
@@ -514,7 +520,7 @@ class AdjustableBedCoordinator:
         """
         entry = self.entry
         if isinstance(entry, ChildEntryView):
-            entry.persist_data(new_data)
+            entry.persist_data(new_data, keys=keys)
         else:
             self.hass.config_entries.async_update_entry(entry, data=new_data)
 
@@ -1228,7 +1234,7 @@ class AdjustableBedCoordinator:
         if data == dict(self.entry.data):
             return
         self._begin_internal_entry_update(False)
-        self._async_persist_config(data)
+        self._async_persist_config(data, keys=RUNTIME_BOND_KEYS)
 
     def _log_bond_marker_unreliable(self) -> None:
         """Log the latch transition. The write itself is batched by the caller."""
