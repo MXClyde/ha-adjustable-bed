@@ -3540,15 +3540,18 @@ class AdjustableBedCoordinator:
     async def _async_cancel_position_hydration(self) -> None:
         """Cancel and await the active position hydration task."""
         task = self._position_hydration_task
-        if task is not None and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                current_task = asyncio.current_task()
-                if current_task is not None and current_task.cancelling():
-                    raise
-        self._position_hydration_task = None
+        try:
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise
+        finally:
+            if self._position_hydration_task is task:
+                self._position_hydration_task = None
 
     async def async_pause_position_hydration(self) -> None:
         """Suppress background position reads during external BLE diagnostics."""
@@ -3666,9 +3669,11 @@ class AdjustableBedCoordinator:
 
     async def async_shutdown(self) -> None:
         """Stop background tasks and disconnect the coordinator."""
-        await self._async_cancel_position_hydration()
-        self._cancel_passive_position_reconciliation_task()
-        await self.async_disconnect()
+        try:
+            await self._async_cancel_position_hydration()
+        finally:
+            self._cancel_passive_position_reconciliation_task()
+            await self.async_disconnect()
 
     async def async_disconnect(
         self,

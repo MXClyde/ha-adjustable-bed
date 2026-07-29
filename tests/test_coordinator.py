@@ -1375,6 +1375,48 @@ class TestCoordinatorConnection:
         assert coordinator._position_hydration_task is None
         mock_disconnect.assert_awaited_once_with()
 
+    async def test_async_shutdown_cancellation_finishes_cleanup(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+    ) -> None:
+        """Caller cancellation must not strand hydration or skip shutdown cleanup."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        hydration_started = asyncio.Event()
+        hydration_cancelled = asyncio.Event()
+
+        async def _hydrate() -> None:
+            hydration_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                hydration_cancelled.set()
+                await asyncio.Event().wait()
+
+        hydration_task = hass.async_create_task(_hydrate())
+        coordinator._position_hydration_task = hydration_task
+        passive_task = MagicMock()
+        coordinator._passive_position_reconciliation_task = passive_task
+        await hydration_started.wait()
+
+        with patch.object(
+            coordinator,
+            "async_disconnect",
+            new=AsyncMock(),
+        ) as mock_disconnect:
+            shutdown_task = hass.async_create_task(coordinator.async_shutdown())
+            await hydration_cancelled.wait()
+            shutdown_task.cancel()
+
+            with pytest.raises(asyncio.CancelledError):
+                await shutdown_task
+
+        assert hydration_task.cancelled()
+        assert coordinator._position_hydration_task is None
+        passive_task.cancel.assert_called_once_with()
+        assert coordinator._passive_position_reconciliation_task is None
+        mock_disconnect.assert_awaited_once_with()
+
 
 class TestCoordinatorPositionSeek:
     """Test coordinator position seeking behavior."""
