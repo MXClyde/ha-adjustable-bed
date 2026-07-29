@@ -953,6 +953,19 @@ class TestJensenPositionParsing:
         assert controller._position_received is None
         assert controller._notify_callback.call_count == 2
 
+    async def test_read_positions_times_out_without_notification_response(
+        self,
+        _shorten_mocked_config_timeout: None,
+    ):
+        """A missing response must not block serialized controller operations."""
+        controller = JensenController(MagicMock())
+        controller._write_gatt_with_retry = AsyncMock()
+
+        with pytest.raises(TimeoutError):
+            await controller.read_positions()
+
+        assert controller._position_received is None
+
     def test_raw_to_percentage_head_flat(self):
         """Test head position at flat returns 0%."""
         # Create controller instance with mock coordinator

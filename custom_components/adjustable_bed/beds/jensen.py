@@ -515,8 +515,7 @@ class JensenController(BedController):
             # angle sensing is disabled; with callback=None we still avoid state updates.
             # Wait for its response so it cannot satisfy a later position read.
             try:
-                async with asyncio.timeout(_POSITION_RESPONSE_TIMEOUT):
-                    await self.read_positions()
+                await self.read_positions()
             except TimeoutError:
                 _LOGGER.warning(
                     "Timeout waiting for Jensen warm-up position response, continuing"
@@ -570,9 +569,10 @@ class JensenController(BedController):
             if not await self._send_position_query():
                 return
             # The GATT write only acknowledges the query. Keep notifications
-            # alive until the position response arrives; the coordinator owns
-            # the surrounding read timeout.
-            await position_received.wait()
+            # alive until the position response arrives, but do not hold the
+            # coordinator's serialized operation lock indefinitely.
+            async with asyncio.timeout(_POSITION_RESPONSE_TIMEOUT):
+                await position_received.wait()
         finally:
             if self._position_received is position_received:
                 self._position_received = None
