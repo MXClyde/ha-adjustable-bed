@@ -514,8 +514,13 @@ class JensenController(BedController):
             # see a 0x10 command first. Always send one READ_POSITION warm-up even when
             # angle sensing is disabled; with callback=None we still avoid state updates.
             # Wait for its response so it cannot satisfy a later position read.
-            async with asyncio.timeout(_POSITION_RESPONSE_TIMEOUT):
-                await self.read_positions()
+            try:
+                async with asyncio.timeout(_POSITION_RESPONSE_TIMEOUT):
+                    await self.read_positions()
+            except TimeoutError:
+                _LOGGER.warning(
+                    "Timeout waiting for Jensen warm-up position response, continuing"
+                )
 
         except BleakError as err:
             _LOGGER.warning("Failed to start Jensen notifications: %s", err)

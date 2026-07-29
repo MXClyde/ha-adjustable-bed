@@ -382,6 +382,24 @@ class TestJensenNotificationStartup:
         )
         await notify_task
 
+    async def test_start_notify_continues_without_warmup_response(
+        self,
+        hass: HomeAssistant,
+        mock_jensen_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """A missing warm-up response must not prevent command startup."""
+        coordinator = AdjustableBedCoordinator(hass, mock_jensen_config_entry)
+        await coordinator.async_connect()
+        mock_bleak_client.write_gatt_char = AsyncMock()
+
+        await coordinator.controller.start_notify(None)
+
+        mock_bleak_client.start_notify.assert_awaited()
+        assert "Timeout waiting for Jensen warm-up position response" in caplog.text
+
     async def test_start_notify_none_keeps_position_updates_ignored(
         self,
         hass: HomeAssistant,
