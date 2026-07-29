@@ -144,6 +144,7 @@ class JensenController(BedController):
         self._config_received: asyncio.Event | None = None
         self._config_data: bytes | None = None
         self._position_received: asyncio.Event | None = None
+        self._position_query_lock = asyncio.Lock()
         # Note: Light and massage state is tracked locally. It may become out of sync
         # if the bed is controlled via remote or the app, or after HA restarts.
         # The Jensen protocol does not support querying actual state.
@@ -564,19 +565,20 @@ class JensenController(BedController):
             motor_count: Unused for Jensen (always reads both head and foot).
         """
         del motor_count  # Unused - Jensen always reads both motors
-        position_received = asyncio.Event()
-        self._position_received = position_received
-        try:
-            if not await self._send_position_query():
-                raise ConnectionError("Failed to send Jensen position query")
-            # The GATT write only acknowledges the query. Keep notifications
-            # alive until the position response arrives, but do not hold the
-            # coordinator's serialized operation lock indefinitely.
-            async with asyncio.timeout(_POSITION_RESPONSE_TIMEOUT):
-                await position_received.wait()
-        finally:
-            if self._position_received is position_received:
-                self._position_received = None
+        async with self._position_query_lock:
+            position_received = asyncio.Event()
+            self._position_received = position_received
+            try:
+                if not await self._send_position_query():
+                    raise ConnectionError("Failed to send Jensen position query")
+                # The GATT write only acknowledges the query. Keep notifications
+                # alive until the position response arrives, but do not hold the
+                # coordinator's serialized operation lock indefinitely.
+                async with asyncio.timeout(_POSITION_RESPONSE_TIMEOUT):
+                    await position_received.wait()
+            finally:
+                if self._position_received is position_received:
+                    self._position_received = None
 
     async def _move_with_stop(self, command: bytes) -> None:
         """Execute a movement command and always send STOP at the end."""

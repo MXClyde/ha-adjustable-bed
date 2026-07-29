@@ -967,6 +967,35 @@ class TestJensenPositionParsing:
         assert controller._position_received is None
         assert controller._notify_callback.call_count == 2
 
+    async def test_read_positions_serializes_overlapping_queries(self):
+        """Each overlapping reader must wait for its own position response."""
+        controller = JensenController(MagicMock())
+        controller._send_position_query = AsyncMock(return_value=True)
+
+        first_read = asyncio.create_task(controller.read_positions())
+        await asyncio.sleep(0)
+        second_read = asyncio.create_task(controller.read_positions())
+        await asyncio.sleep(0)
+
+        controller._send_position_query.assert_awaited_once()
+        controller._handle_notification(
+            MagicMock(),
+            bytearray([0x10, 0x00, 0x00, 0x01, 0x00, 0x01]),
+        )
+        await first_read
+        await asyncio.sleep(0)
+
+        assert controller._send_position_query.await_count == 2
+        assert not second_read.done()
+
+        controller._handle_notification(
+            MagicMock(),
+            bytearray([0x10, 0x00, 0x00, 0x01, 0x00, 0x01]),
+        )
+        await second_read
+
+        assert controller._position_received is None
+
     async def test_read_positions_times_out_without_notification_response(
         self,
         _shorten_mocked_config_timeout: None,
