@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,6 +14,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.adjustable_bed.adapter import AdapterSelectionResult
 from custom_components.adjustable_bed.ble_diagnostics import (
+    MAX_DIAGNOSTIC_QUERY_PREEMPTIONS,
     BLEDiagnosticRunner,
     DiagnosticReport,
 )
@@ -160,6 +162,83 @@ def _build_diagnostic_client(services: _FakeServices) -> MagicMock:
 
 class TestBleDiagnosticsRunner:
     """Test enriched BLE diagnostics output."""
+
+    async def test_diagnostic_query_retries_after_command_preemption(
+        self,
+        hass: HomeAssistant,
+    ):
+        """A responsive command must delay, not abort, support diagnostics."""
+        coordinator = MagicMock()
+        coordinator.client = MagicMock(is_connected=True)
+        coordinator.controller = MagicMock()
+        query_attempts = 0
+
+        async def _execute_query(query_fn, **_kwargs):
+            nonlocal query_attempts
+            query_attempts += 1
+            if query_attempts == 1:
+                operation_task = asyncio.create_task(query_fn(coordinator.controller))
+                operation_task.cancel()
+                return await operation_task
+            return await query_fn(coordinator.controller)
+
+        coordinator.async_execute_controller_query = AsyncMock(
+            side_effect=_execute_query
+        )
+        runner = BLEDiagnosticRunner(
+            hass,
+            "AA:BB:CC:DD:EE:FF",
+            capture_duration=0,
+            coordinator=coordinator,
+        )
+        runner._using_coordinator_connection = True
+
+        async def _query() -> str:
+            return "complete"
+
+        assert await runner._async_execute_diagnostic_query(_query) == "complete"
+        assert coordinator.async_execute_controller_query.await_count == 2
+        assert coordinator.pause_disconnect_timer.call_count == 2
+
+    async def test_diagnostic_query_bounds_repeated_command_preemption(
+        self,
+        hass: HomeAssistant,
+    ):
+        """Repeated commands eventually return control to report cleanup."""
+        coordinator = MagicMock()
+        coordinator.client = MagicMock(is_connected=True)
+        coordinator.controller = MagicMock()
+
+        async def _preempt_query(query_fn, **_kwargs):
+            operation_task = asyncio.create_task(query_fn(coordinator.controller))
+            operation_task.cancel()
+            return await operation_task
+
+        coordinator.async_execute_controller_query = AsyncMock(
+            side_effect=_preempt_query
+        )
+        runner = BLEDiagnosticRunner(
+            hass,
+            "AA:BB:CC:DD:EE:FF",
+            capture_duration=0,
+            coordinator=coordinator,
+        )
+        runner._using_coordinator_connection = True
+
+        async def _query() -> None:
+            return None
+
+        with pytest.raises(RuntimeError, match="repeatedly preempted"):
+            await runner._async_execute_diagnostic_query(_query)
+
+        assert (
+            coordinator.async_execute_controller_query.await_count
+            == MAX_DIAGNOSTIC_QUERY_PREEMPTIONS
+        )
+        assert (
+            coordinator.pause_disconnect_timer.call_count
+            == MAX_DIAGNOSTIC_QUERY_PREEMPTIONS
+        )
 
     async def test_run_diagnostics_resumes_hydration_when_pause_raises(
         self,

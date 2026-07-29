@@ -936,6 +936,7 @@ class TestCoordinatorConnection:
         """Fresh command feedback must cancel hydration queued behind that command."""
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         coordinator._disable_angle_sensing = False
+        coordinator._client = MagicMock(is_connected=True)
         coordinator._position_connection_generation = 1
         coordinator._controller = make_controller_mock(
             position_number_specs=(
@@ -956,6 +957,41 @@ class TestCoordinatorConnection:
 
                 coordinator._handle_position_update("back", 12.0)
                 coordinator._handle_position_update("legs", 4.0)
+            finally:
+                coordinator._command_lock.release()
+            await hydration
+
+        ensure_connected.assert_not_awaited()
+
+    async def test_queued_position_read_does_not_reconnect_after_command_disconnect(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+    ) -> None:
+        """A command-released link must stay released while hydration is queued."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._disable_angle_sensing = False
+        coordinator._client = MagicMock(is_connected=True)
+        coordinator._position_connection_generation = 1
+        coordinator._controller = make_controller_mock(
+            position_number_specs=(
+                SimpleNamespace(position_key="back"),
+                SimpleNamespace(position_key="legs"),
+            )
+        )
+
+        await coordinator._command_lock.acquire()
+        with patch.object(
+            coordinator,
+            "async_ensure_connected",
+            new_callable=AsyncMock,
+        ) as ensure_connected:
+            try:
+                hydration = asyncio.create_task(
+                    coordinator.async_read_initial_positions()
+                )
+                await asyncio.sleep(0)
+                coordinator._client.is_connected = False
             finally:
                 coordinator._command_lock.release()
             await hydration

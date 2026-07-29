@@ -1034,13 +1034,23 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
         self._single_inner.begin_internal_bond_update(bond_established)
 
     async def async_shutdown(self) -> None:
-        await self._async_cancel_single_position_hydration()
+        # Suppress reconnect-driven hydration before awaiting cancellation:
+        # connection callbacks can otherwise replace the task being drained.
+        self._single_position_hydration_pause_count += 1
         for unsub in self._child_unsubs:
             unsub()
         self._child_unsubs.clear()
-        for side_coordinator in self._single_side_coordinators:
-            side_coordinator._unregister_inner_position_callback()
-        await self._single_inner.async_shutdown()
+        try:
+            await self._async_cancel_single_position_hydration()
+        finally:
+            try:
+                # Also drain any task queued by a callback that was already in
+                # flight when shutdown disabled future scheduling.
+                await self._async_cancel_single_position_hydration()
+            finally:
+                for side_coordinator in self._single_side_coordinators:
+                    side_coordinator._unregister_inner_position_callback()
+                await self._single_inner.async_shutdown()
 
     def _wire_child_connection_callbacks(self) -> None:
         self._child_unsubs.append(

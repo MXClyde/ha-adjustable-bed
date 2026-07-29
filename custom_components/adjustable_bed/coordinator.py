@@ -3367,18 +3367,24 @@ class AdjustableBedCoordinator:
                         ):
                             # A command that established this connection may
                             # have refreshed every axis while hydration waited
-                            # for the command lock. Avoid entering the query
-                            # path, which would reconnect a bed that has since
-                            # disconnected after that command.
-                            if all(
-                                self._position_is_current(axis)
-                                for axis in expected_axes
+                            # for the command lock, or deliberately released
+                            # the link. Avoid entering the query path, which
+                            # would reconnect after disconnect-after-command.
+                            if (
+                                self._client is None
+                                or not self._client.is_connected
+                                or all(
+                                    self._position_is_current(axis)
+                                    for axis in expected_axes
+                                )
                             ):
                                 return
 
                             def _initial_position_read_needed() -> bool:
                                 return (
                                     not self._position_hydration_pause_count
+                                    and self._client is not None
+                                    and self._client.is_connected
                                     and not all(
                                         self._position_is_current(axis)
                                         for axis in expected_axes

@@ -55,6 +55,7 @@ CONNECTION_TIMEOUT = 30.0
 DEFAULT_CAPTURE_DURATION = 120  # 2 minutes
 MAX_CAPTURED_NOTIFICATIONS = 5000
 MAX_RECONNECT_ATTEMPTS = 2
+MAX_DIAGNOSTIC_QUERY_PREEMPTIONS = 3
 
 _SKIPPED_READ_ERROR = "Skipped: connection lost during service enumeration"
 
@@ -369,17 +370,31 @@ class BLEDiagnosticRunner:
             self._client = coordinator.client
             return await query()
 
-        try:
-            return await coordinator.async_execute_controller_query(
-                _execute,
-                cancel_running=False,
-                skip_disconnect=True,
-                preemptible=True,
-            )
-        finally:
-            # Serialized queries normally restart the idle timer. Diagnostics
-            # own the shared link until _disconnect() resumes it after capture.
-            coordinator.pause_disconnect_timer()
+        for attempt in range(MAX_DIAGNOSTIC_QUERY_PREEMPTIONS):
+            try:
+                try:
+                    return await coordinator.async_execute_controller_query(
+                        _execute,
+                        cancel_running=False,
+                        skip_disconnect=True,
+                        preemptible=True,
+                    )
+                except asyncio.CancelledError:
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise
+                    if attempt + 1 == MAX_DIAGNOSTIC_QUERY_PREEMPTIONS:
+                        raise RuntimeError(
+                            "Diagnostic query was repeatedly preempted by commands"
+                        ) from None
+                    _LOGGER.debug(
+                        "Diagnostic query was preempted by a controller command; retrying"
+                    )
+            finally:
+                # Serialized queries normally restart the idle timer. Diagnostics
+                # own the shared link until _disconnect() resumes it after capture.
+                coordinator.pause_disconnect_timer()
+        raise RuntimeError("Diagnostic query preemption retry limit is invalid")
 
     async def _async_execute_diagnostic_command(
         self,

@@ -38,6 +38,7 @@ FOOT_POS_FLAT = 1
 FOOT_POS_MAX = 30500
 
 _CONFIG_RESPONSE_TIMEOUT = 5.0
+_POSITION_RESPONSE_TIMEOUT = 5.0
 
 
 class JensenCommands:
@@ -512,7 +513,9 @@ class JensenController(BedController):
             # Jensen beds can ignore the first flat preset after reconnect unless they
             # see a 0x10 command first. Always send one READ_POSITION warm-up even when
             # angle sensing is disabled; with callback=None we still avoid state updates.
-            await self._send_position_query()
+            # Wait for its response so it cannot satisfy a later position read.
+            async with asyncio.timeout(_POSITION_RESPONSE_TIMEOUT):
+                await self.read_positions()
 
         except BleakError as err:
             _LOGGER.warning("Failed to start Jensen notifications: %s", err)

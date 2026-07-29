@@ -697,6 +697,49 @@ class TestSingleAddressCoordinator:
         assert hydration_task.cancelled()
         assert coordinator._single_position_hydration_task is None
 
+    async def test_shutdown_cancellation_finishes_single_address_cleanup(self):
+        coordinator = self._coordinator(BED_TYPE_SLEEP_NUMBER, SleepNumberController)
+        hydration_started = asyncio.Event()
+        hydration_cancelled = asyncio.Event()
+        inner_shutdown = asyncio.Event()
+
+        async def hydrate():
+            hydration_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                hydration_cancelled.set()
+                await asyncio.Event().wait()
+
+        async def shutdown_inner():
+            inner_shutdown.set()
+
+        hydration_task = asyncio.create_task(hydrate())
+        coordinator._single_position_hydration_task = hydration_task
+        object.__setattr__(
+            coordinator._single_inner,
+            "async_shutdown",
+            shutdown_inner,
+        )
+        await hydration_started.wait()
+
+        shutdown_task = asyncio.create_task(coordinator.async_shutdown())
+        await hydration_cancelled.wait()
+
+        coordinator._on_child_connection_change(True)
+        assert coordinator._single_position_hydration_task is hydration_task
+
+        shutdown_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await shutdown_task
+
+        assert hydration_task.cancelled()
+        assert coordinator._single_position_hydration_task is None
+        assert coordinator._child_unsubs == []
+        assert coordinator._single_inner._position_callbacks == set()
+        assert inner_shutdown.is_set()
+
     async def test_sleep_number_reconnect_stops_hydration_after_swallowed_cancel(
         self,
     ):

@@ -38,9 +38,13 @@ from .conftest import make_controller_mock
 
 @pytest.fixture
 def _shorten_mocked_config_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep mocked config-query timeouts while avoiding five-second waits."""
+    """Keep mocked response timeouts while avoiding five-second waits."""
     monkeypatch.setattr(
         "custom_components.adjustable_bed.beds.jensen._CONFIG_RESPONSE_TIMEOUT",
+        0.01,
+    )
+    monkeypatch.setattr(
+        "custom_components.adjustable_bed.beds.jensen._POSITION_RESPONSE_TIMEOUT",
         0.01,
     )
 
@@ -350,6 +354,33 @@ class TestJensenNotificationStartup:
         assert calls[0].kwargs == {"response": True}
         assert calls[1].args == (JENSEN_CHAR_UUID, JensenCommands.READ_POSITION)
         assert calls[1].kwargs == {"response": True}
+
+    async def test_start_notify_waits_for_read_position_response(
+        self,
+        hass: HomeAssistant,
+        mock_jensen_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """No later operation can inherit the warm-up query's response."""
+        coordinator = AdjustableBedCoordinator(hass, mock_jensen_config_entry)
+        await coordinator.async_connect()
+        mock_bleak_client.write_gatt_char = AsyncMock()
+
+        notify_task = asyncio.create_task(coordinator.controller.start_notify(None))
+        await asyncio.sleep(0)
+
+        assert not notify_task.done()
+        assert mock_bleak_client.write_gatt_char.call_args_list[-1].args == (
+            JENSEN_CHAR_UUID,
+            JensenCommands.READ_POSITION,
+        )
+
+        coordinator.controller._handle_notification(
+            MagicMock(),
+            bytearray([0x10, 0x00, 0x00, 0x01, 0x00, 0x01]),
+        )
+        await notify_task
 
     async def test_start_notify_none_keeps_position_updates_ignored(
         self,
