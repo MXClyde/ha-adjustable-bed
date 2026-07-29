@@ -438,6 +438,9 @@ class JensenController(BedController):
                 foot_pos,
             )
 
+            if self._position_received is not None:
+                self._position_received.set()
+
             if self._notify_callback:
                 head_pct = self._raw_to_percentage(head_pos, "head")
                 foot_pct = self._raw_to_percentage(foot_pos, "foot")
@@ -451,8 +454,6 @@ class JensenController(BedController):
                 # Map to standard motor names (back and legs)
                 self._notify_callback("back", head_pct)
                 self._notify_callback("legs", foot_pct)
-            if self._position_received is not None:
-                self._position_received.set()
 
         elif cmd_type == 0x0A:
             # Config response - signal query_config if waiting
@@ -521,7 +522,7 @@ class JensenController(BedController):
                     "Timeout waiting for Jensen warm-up position response, continuing"
                 )
 
-        except BleakError as err:
+        except (BleakError, ConnectionError) as err:
             _LOGGER.warning("Failed to start Jensen notifications: %s", err)
             # Log all available services for debugging
             self.log_discovered_services(level=logging.INFO)
@@ -552,7 +553,7 @@ class JensenController(BedController):
             )
             _LOGGER.debug("Sent READ_POSITION command to Jensen bed")
             return True
-        except BleakError as err:
+        except (BleakError, ConnectionError) as err:
             _LOGGER.warning("Failed to send READ_POSITION command: %s", err)
             return False
 
@@ -567,7 +568,7 @@ class JensenController(BedController):
         self._position_received = position_received
         try:
             if not await self._send_position_query():
-                return
+                raise ConnectionError("Failed to send Jensen position query")
             # The GATT write only acknowledges the query. Keep notifications
             # alive until the position response arrives, but do not hold the
             # coordinator's serialized operation lock indefinitely.

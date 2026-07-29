@@ -923,6 +923,20 @@ class TestJensenFeatureDetection:
 class TestJensenPositionParsing:
     """Test Jensen position notification parsing."""
 
+    def test_notification_signals_waiter_before_callback(self):
+        """A callback failure must not hide a received position response."""
+        controller = JensenController(MagicMock())
+        controller._position_received = asyncio.Event()
+        controller._notify_callback = MagicMock(side_effect=RuntimeError("callback failed"))
+
+        with pytest.raises(RuntimeError, match="callback failed"):
+            controller._handle_notification(
+                MagicMock(),
+                bytearray([0x10, 0x00, 0x00, 0x01, 0x00, 0x01]),
+            )
+
+        assert controller._position_received.is_set()
+
     async def test_read_positions_waits_for_notification_response(self):
         """The query is incomplete until its asynchronous position frame arrives."""
         controller = JensenController(MagicMock())
@@ -962,6 +976,28 @@ class TestJensenPositionParsing:
         controller._write_gatt_with_retry = AsyncMock()
 
         with pytest.raises(TimeoutError):
+            await controller.read_positions()
+
+        assert controller._position_received is None
+
+    async def test_send_position_query_handles_disconnect_during_write(self):
+        """A disconnect race follows the explicit failed-query path."""
+        coordinator = MagicMock()
+        coordinator.client.is_connected = True
+        controller = JensenController(coordinator)
+        controller._write_gatt_with_retry = AsyncMock(
+            side_effect=ConnectionError("disconnected")
+        )
+
+        assert await controller._send_position_query() is False
+        controller._write_gatt_with_retry.assert_awaited_once()
+
+    async def test_read_positions_raises_when_query_fails(self):
+        """A failed query must not look like a successful position refresh."""
+        controller = JensenController(MagicMock())
+        controller._send_position_query = AsyncMock(return_value=False)
+
+        with pytest.raises(ConnectionError, match="Failed to send Jensen position query"):
             await controller.read_positions()
 
         assert controller._position_received is None
