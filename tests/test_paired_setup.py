@@ -1310,6 +1310,7 @@ class TestPairBedsConversion:
         left_after = dev_reg.async_get_device(identifiers={(DOMAIN, LEFT_ADDR)})
         assert left_after is not None
         assert left_after.id == left_device_id  # same device, not recreated
+        assert left_after.config_entry_id == pair.entry_id
         assert left_after.name_by_user == "Left headboard"
         assert left_after.via_device_id == parent.id
 
@@ -1342,6 +1343,7 @@ class TestPairBedsConversion:
         final_device = dev_reg.async_get_device(identifiers={(DOMAIN, LEFT_ADDR)})
         assert final_device is not None
         assert final_device.id == left_device_id
+        assert final_device.config_entry_id == left.entry_id
         assert final_device.name_by_user == "Left headboard"
         assert final_device.via_device_id is None
 

@@ -154,6 +154,18 @@ class PairedBedCoordinator:
     def child_for_side(self, side: str) -> AdjustableBedCoordinator | None:
         return self._children.get(side)
 
+    async def async_remove_child(self, side: str) -> None:
+        """Drop a side whose standalone entry could not be absorbed safely."""
+        child = self._children.pop(side, None)
+        if child is None:
+            return
+        # Rebuild the aggregate connection callbacks without the removed child.
+        for unsubscribe in self._child_unsubs:
+            unsubscribe()
+        self._child_unsubs.clear()
+        self._wire_child_connection_callbacks()
+        await child.async_shutdown()
+
     @property
     def is_connected(self) -> bool:
         """True if *any* side is connected (a half-available pair is usable)."""
