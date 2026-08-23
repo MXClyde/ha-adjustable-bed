@@ -932,7 +932,12 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
 
     def _on_child_connection_change(self, connected: bool) -> None:
         super()._on_child_connection_change(connected)
-        if not connected or self._single_inner.bed_type != BED_TYPE_SLEEP_NUMBER:
+        if not connected:
+            task = self._single_position_hydration_task
+            if task is not None and not task.done():
+                task.cancel()
+            return
+        if self._single_inner.bed_type != BED_TYPE_SLEEP_NUMBER:
             return
         self._schedule_single_position_hydration()
 

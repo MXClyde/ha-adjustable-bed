@@ -359,11 +359,15 @@ class TestPairedSetup:
 
         with (
             patch.object(hass.config_entries, "async_add", side_effect=fail_second),
+            patch(
+                "custom_components.adjustable_bed._async_transfer_device_registry_entry"
+            ) as transfer_device,
             pytest.raises(RuntimeError, match="injected second-side failure"),
         ):
             await async_unpair_entry(hass, entry)
         await hass.async_block_till_done()
 
+        transfer_device.assert_not_called()
         pair = hass.config_entries.async_get_entry(entry.entry_id)
         assert pair is not None
         assert pair.state == ConfigEntryState.LOADED
@@ -371,6 +375,9 @@ class TestPairedSetup:
         row = ent_reg.async_get(row_id)
         assert row is not None
         assert row.config_entry_id == entry.entry_id
+        device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, LEFT_ADDR)})
+        assert device is not None
+        assert device.config_entry_id == entry.entry_id
 
     async def test_paired_entry_creates_parent_and_child_devices(
         self,

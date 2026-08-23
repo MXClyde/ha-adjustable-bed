@@ -881,19 +881,23 @@ async def async_unpair_entry(hass: HomeAssistant, entry: ConfigEntry) -> list[Co
                 ent_reg.async_update_entity(entity_id, config_entry_id=entry.entry_id)
         for single, _address in singles:
             device = child_devices.get(single.entry_id)
+            if device is None:
+                continue
+            current = dev_reg.async_get(device.id)
             if (
-                device is not None
-                and device.id in dev_reg.devices
+                current is not None
+                and single.entry_id in current.config_entries
                 and hass.config_entries.async_get_entry(single.entry_id) is not None
             ):
-                _async_transfer_device_registry_entry(
-                    dev_reg,
-                    device,
-                    source_entry_id=single.entry_id,
-                    target_entry_id=entry.entry_id,
-                    identifier=(DOMAIN, _address),
-                    via_device_id=parent.id if parent is not None else None,
-                )
+                with contextlib.suppress(Exception):
+                    _async_transfer_device_registry_entry(
+                        dev_reg,
+                        current,
+                        source_entry_id=single.entry_id,
+                        target_entry_id=entry.entry_id,
+                        identifier=(DOMAIN, _address),
+                        via_device_id=parent.id if parent is not None else None,
+                    )
         for single, _address in reversed(singles):
             if hass.config_entries.async_get_entry(single.entry_id) is not None:
                 with contextlib.suppress(Exception):

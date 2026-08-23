@@ -641,6 +641,35 @@ class TestSingleAddressCoordinator:
         assert first_task.cancelled()
         assert coordinator._single_inner.cancelled_position_hydrations == 2
 
+    async def test_sleep_number_disconnect_cancels_queued_logical_hydration(self):
+        coordinator = self._coordinator(BED_TYPE_SLEEP_NUMBER, SleepNumberController)
+        hydration_queued = asyncio.Event()
+        hydrated = False
+
+        async def wait_for_command():
+            hydration_queued.set()
+            await asyncio.Event().wait()
+
+        async def hydrate():
+            nonlocal hydrated
+            hydrated = True
+
+        coordinator._single_inner._async_cancel_position_hydration = wait_for_command
+        for child in coordinator.children.values():
+            object.__setattr__(child, "async_read_initial_positions", hydrate)
+
+        coordinator._on_child_connection_change(True)
+        task = coordinator._single_position_hydration_task
+        assert task is not None
+        await hydration_queued.wait()
+
+        coordinator._on_child_connection_change(False)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert not hydrated
+        assert coordinator._single_position_hydration_task is None
+
     async def test_sleep_number_diagnostics_pause_logical_hydration(self):
         coordinator = self._coordinator(BED_TYPE_SLEEP_NUMBER, SleepNumberController)
         side = coordinator.children[SIDE_LEFT]
