@@ -1195,11 +1195,14 @@ RICHMAT_REMOTE_ZR60: Final = "ZR60"
 RICHMAT_REMOTE_I7RM: Final = "I7RM"
 RICHMAT_REMOTE_190_0055: Final = "190-0055"
 RICHMAT_REMOTE_BT6500: Final = "BT6500"
+RICHMAT_REMOTE_LP_QRRM: Final = "LP-QRRM"
 
 # Richmat WiLinke stop-byte compatibility.
 # Most Richmat remotes use END=0x6E, but some devices require 0x5E to stop
 # movement: QRRM remotes and BedTech BT6500 beds (issue #194).
-RICHMAT_WILINKE_STOP_COMPAT_REMOTE_CODES: Final[frozenset[str]] = frozenset({"qrrm", "bt6500"})
+RICHMAT_WILINKE_STOP_COMPAT_REMOTE_CODES: Final[frozenset[str]] = frozenset(
+    {"qrrm", "bt6500", RICHMAT_REMOTE_LP_QRRM.lower()}
+)
 
 # Display names for remote selection
 RICHMAT_REMOTES: Final = {
@@ -1216,6 +1219,7 @@ RICHMAT_REMOTES: Final = {
     RICHMAT_REMOTE_ZR60: "ZR60 (Head, Feet, Lights)",
     RICHMAT_REMOTE_I7RM: "I7RM / HJH85 / Sleep Function 2.0 (Head, Feet, Pillow, Lumbar, Massage, Lights)",
     RICHMAT_REMOTE_190_0055: "190-0055 (Head, Pillow, Feet, Massage, Lights)",
+    RICHMAT_REMOTE_LP_QRRM: "L&P QRRM (Head, Feet, Flat, Zero G, Custom 1/2)",
 }
 
 # Feature sets for each remote code
@@ -1286,6 +1290,16 @@ RICHMAT_REMOTE_FEATURES: Final = {
         | _F.MOTOR_FEET
         | _F.MOTOR_PILLOW
         | _F.MOTOR_LUMBAR
+    ),
+    # L&P QRRM surface reported in #504. QRRM alone is only a selector family,
+    # so keep this explicit instead of exposing these presets on every QRRM bed.
+    RICHMAT_REMOTE_LP_QRRM: (
+        _F.PRESET_FLAT
+        | _F.PRESET_MEMORY_1
+        | _F.PRESET_MEMORY_2
+        | _F.PRESET_ZERO_G
+        | _F.MOTOR_HEAD
+        | _F.MOTOR_FEET
     ),
     RICHMAT_REMOTE_BURM: (
         _F.PRESET_FLAT

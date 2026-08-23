@@ -2865,12 +2865,16 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
 
         # Add remote selection for Richmat beds
         if bed_type == BED_TYPE_RICHMAT:
+            current_remote = current_data.get(CONF_RICHMAT_REMOTE, RICHMAT_REMOTE_AUTO)
+            remote_options = dict(RICHMAT_REMOTES)
+            if current_remote not in remote_options:
+                remote_options[current_remote] = f"{current_remote.upper()} (current detected code)"
             schema_dict[
                 vol.Optional(
                     CONF_RICHMAT_REMOTE,
-                    default=current_data.get(CONF_RICHMAT_REMOTE, RICHMAT_REMOTE_AUTO),
+                    default=current_remote,
                 )
-            ] = vol.In(RICHMAT_REMOTES)
+            ] = vol.In(remote_options)
 
         if bed_type in MALOUF_BED_TYPES:
             schema_dict[

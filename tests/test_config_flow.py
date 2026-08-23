@@ -82,6 +82,7 @@ from custom_components.adjustable_bed.const import (
     CONF_PASSIVE_POSITION_RECONCILIATION,
     CONF_PREFERRED_ADAPTER,
     CONF_PROTOCOL_VARIANT,
+    CONF_RICHMAT_REMOTE,
     DOMAIN,
     KAIDI_VARIANT_SEAT_1,
     KEESON_VARIANT_ERGOMOTION,
@@ -89,6 +90,7 @@ from custom_components.adjustable_bed.const import (
     MALOUF_LAYOUT_HILO,
     OCTO_VARIANT_STANDARD,
     OCTO_VARIANT_STAR2,
+    RICHMAT_REMOTE_LP_QRRM,
     RICHMAT_WILINKE_SERVICE_UUIDS,
     RONDURE_VARIANT_SIDE_A,
     SBI_VARIANT_SIDE_B,
@@ -2278,6 +2280,47 @@ class TestUserFlow:
 
 class TestOptionsFlow:
     """Test options flow."""
+
+    async def test_richmat_options_can_replace_detected_qrrm_with_lp_profile(
+        self,
+        hass: HomeAssistant,
+        enable_custom_integrations,
+    ) -> None:
+        """Existing QRRM entries should be able to select the L&P preset surface."""
+        del enable_custom_integrations
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="QRRM106475",
+            data={
+                CONF_ADDRESS: "57:4C:54:00:2D:BE",
+                CONF_NAME: "QRRM106475",
+                CONF_BED_TYPE: BED_TYPE_RICHMAT,
+                CONF_MOTOR_COUNT: 2,
+                CONF_PROTOCOL_VARIANT: "auto",
+                CONF_RICHMAT_REMOTE: "qrrm",
+            },
+            unique_id="57:4C:54:00:2D:BE",
+        )
+        entry.add_to_hass(hass)
+        await async_setup_component(hass, DOMAIN, {})
+        await hass.async_block_till_done()
+
+        initial = await hass.config_entries.options.async_init(entry.entry_id)
+        markers = {marker.schema: marker for marker in initial["data_schema"].schema}
+        remote_marker = markers[CONF_RICHMAT_REMOTE]
+        remote_validator = initial["data_schema"].schema[remote_marker]
+
+        assert remote_marker.default() == "qrrm"
+        assert "qrrm" in remote_validator.container
+        assert RICHMAT_REMOTE_LP_QRRM in remote_validator.container
+
+        saved = await hass.config_entries.options.async_configure(
+            initial["flow_id"],
+            user_input={CONF_RICHMAT_REMOTE: RICHMAT_REMOTE_LP_QRRM},
+        )
+
+        assert saved["type"] == FlowResultType.CREATE_ENTRY
+        assert entry.data[CONF_RICHMAT_REMOTE] == RICHMAT_REMOTE_LP_QRRM
 
     async def test_options_flow_records_pulse_settings_as_user_owned(
         self,

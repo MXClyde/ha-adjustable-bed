@@ -27,6 +27,7 @@ from custom_components.adjustable_bed.const import (
     RICHMAT_NORDIC_CHAR_UUID,
     RICHMAT_PROTOCOL_PREFIX55,
     RICHMAT_PROTOCOL_PREFIXAA,
+    RICHMAT_REMOTE_LP_QRRM,
     RICHMAT_VARIANT_NORDIC,
     get_richmat_features,
     get_richmat_motor_count,
@@ -486,6 +487,51 @@ class TestRichmatFeatureDetection:
         assert controller.supports_lights is True
         assert controller.has_pillow_support is True
         assert controller.has_lumbar_support is True
+
+    def test_lp_qrrm_profile_exposes_reported_presets_only(self):
+        """L&P QRRM should expose the four-position surface from issue #504."""
+        coordinator = MagicMock()
+        controller = RichmatController(
+            coordinator,
+            is_wilinke=True,
+            remote_code=RICHMAT_REMOTE_LP_QRRM,
+        )
+
+        assert controller.supports_preset_flat is True
+        assert controller.supports_preset_zero_g is True
+        assert controller.supports_memory_presets is True
+        assert controller.memory_slot_count == 2
+        assert controller.memory_slot_names == ("Custom 1", "Custom 2")
+        assert controller.supports_memory_programming is False
+        assert controller.supports_preset_anti_snore is False
+        assert controller.supports_preset_tv is False
+        assert controller.supports_preset_lounge is False
+        assert controller.supports_lights is False
+        assert controller.has_pillow_support is False
+        assert controller.has_lumbar_support is False
+
+    def test_lp_qrrm_profile_uses_recovered_wilinke_frames(self):
+        """L&P presets should match the clean-room recovered app packets."""
+        coordinator = MagicMock()
+        controller = RichmatController(
+            coordinator,
+            is_wilinke=True,
+            remote_code=RICHMAT_REMOTE_LP_QRRM,
+        )
+
+        assert controller._build_command(RichmatCommands.PRESET_FLAT) == bytes.fromhex(
+            "6e010031a0"
+        )
+        assert controller._build_command(RichmatCommands.PRESET_ZERO_G) == bytes.fromhex(
+            "6e010045b4"
+        )
+        assert controller._build_command(RichmatCommands.PRESET_MEMORY_1) == bytes.fromhex(
+            "6e01002e9d"
+        )
+        assert controller._build_command(RichmatCommands.PRESET_MEMORY_2) == bytes.fromhex(
+            "6e01002f9e"
+        )
+        assert controller._build_stop_command()[3] == RichmatCommands.END_COMPAT
 
     def test_resolve_bt6500_title_alias_from_qrrm_family(self):
         """BT6500 titles should resolve away from the generic QRRM profile."""

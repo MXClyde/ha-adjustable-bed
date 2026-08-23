@@ -46,6 +46,7 @@ Brands using Richmat actuators:
 | ✅ | [BedTech](https://play.google.com/store/apps/details?id=com.bedtech) | `com.bedtech` |
 | ✅ | [SleepFunction Bed Control](https://play.google.com/store/apps/details?id=com.richmat.sleepfunction) | `com.richmat.sleepfunction` |
 | ✅ | [L&P Adjustable Base](https://play.google.com/store/apps/details?id=com.richmat.lp2) | `com.richmat.lp2` |
+| ✅ | L&P Adjustable Base 2.2.1 (legacy) | `com.richmat.lp` |
 | ✅ | [SVEN & SON](https://play.google.com/store/apps/details?id=com.richmat.svenson) | `com.richmat.svenson` |
 
 ## Features
@@ -75,6 +76,13 @@ Brands using Richmat actuators:
 FEE9/QRRM advertisements are shared with BedTech. A confirmed BedTech-specific
 manufacturer field (`0x4C57`) selects the BedTech protocol; QRRM devices without
 that field retain Richmat behavior, including the confirmed Casper RGB-light model.
+
+QRRM is a selector family, not a single physical remote layout. For the L&P
+surface reported in issue #504, with Flat, Zero G, Custom 1, and Custom 2, choose
+**L&P QRRM** under the integration options. It remains an explicit profile because
+the BLE name and GATT layout do not distinguish it from other QRRM surfaces.
+The command frames are recovered from the L&P app, but this profile has not yet
+been validated on physical hardware.
 
 ### Prefix55 Variant
 **Format:** 5 bytes `[0x55, 0x01, 0x00, command, checksum]`
