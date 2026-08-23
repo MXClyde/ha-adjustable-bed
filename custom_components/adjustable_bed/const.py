@@ -1291,8 +1291,9 @@ RICHMAT_REMOTE_FEATURES: Final = {
         | _F.MOTOR_PILLOW
         | _F.MOTOR_LUMBAR
     ),
-    # L&P QRRM surface reported in #504. QRRM alone is only a selector family,
-    # so keep this explicit instead of exposing these presets on every QRRM bed.
+    # L&P QRRM surface reported in #504. Current L&P and Richmat apps keep the
+    # generic QRRM profile empty until the user selects a physical remote, so
+    # keep this explicit instead of exposing these presets on every QRRM bed.
     RICHMAT_REMOTE_LP_QRRM: (
         _F.PRESET_FLAT
         | _F.PRESET_MEMORY_1
@@ -1463,8 +1464,8 @@ RICHMAT_REMOTE_FEATURES: Final = {
     ),
 }
 
-# Some Richmat OEM apps expose a generic QRRM family in BLE, then ask the user
-# to pick the actual retail model. Use entry/device names to recover those
+# Some Richmat OEM apps discover a generic QRRM name, then ask the user to pick
+# the actual product profile. Use entry/device names to recover those
 # model-specific surfaces when we have enough context.
 RICHMAT_MODEL_REMOTE_ALIASES: Final[dict[str, str]] = {
     "bt2000": "a7rm",
@@ -1486,10 +1487,9 @@ def resolve_richmat_remote_code(
 ) -> str:
     """Resolve a Richmat remote code using config and model-specific aliases.
 
-    QRRM is a selector family in OEM apps rather than a concrete remote surface.
-    If the config or device title includes a known retail model (for example
-    "BedTech BT6500"), prefer that model-specific surface over the generic QRRM
-    feature map.
+    QRRM does not identify a concrete remote surface. If the config or device
+    title includes a known retail model (for example "BedTech BT6500"), prefer
+    that model-specific surface over the generic QRRM feature map.
     """
     normalized = (remote_code or RICHMAT_REMOTE_AUTO).lower()
     if normalized not in {"", RICHMAT_REMOTE_AUTO, "qrrm"}:

@@ -42,11 +42,12 @@ Brands using Richmat actuators:
 
 | Analyzed | App | Package ID |
 |----------|-----|------------|
-| ✅ | [RMControl](https://play.google.com/store/apps/details?id=com.richmat.rmcontrol2) | `com.richmat.rmcontrol2` |
+| ✅ | [RMControl](https://play.google.com/store/apps/details?id=com.richmat.rmcontrol2) 21.3.2 | `com.richmat.rmcontrol2` |
 | ✅ | [BedTech](https://play.google.com/store/apps/details?id=com.bedtech) | `com.bedtech` |
 | ✅ | [SleepFunction Bed Control](https://play.google.com/store/apps/details?id=com.richmat.sleepfunction) | `com.richmat.sleepfunction` |
-| ✅ | [L&P Adjustable Base](https://play.google.com/store/apps/details?id=com.richmat.lp2) | `com.richmat.lp2` |
+| ✅ | [L&P Adjustable Base](https://play.google.com/store/apps/details?id=com.richmat.lp2) 2.3.25 | `com.richmat.lp2` |
 | ✅ | L&P Adjustable Base 2.2.1 (legacy) | `com.richmat.lp` |
+| ✅ | [LP Control](https://play.google.com/store/apps/details?id=com.leggett.android.universal) 2.9.0 | `com.leggett.android.universal` |
 | ✅ | [SVEN & SON](https://play.google.com/store/apps/details?id=com.richmat.svenson) | `com.richmat.svenson` |
 
 ## Features
@@ -77,12 +78,15 @@ FEE9/QRRM advertisements are shared with BedTech. A confirmed BedTech-specific
 manufacturer field (`0x4C57`) selects the BedTech protocol; QRRM devices without
 that field retain Richmat behavior, including the confirmed Casper RGB-light model.
 
-QRRM is a selector family, not a single physical remote layout. For the L&P
-surface reported in issue #504, with Flat, Zero G, Custom 1, and Custom 2, choose
-**L&P QRRM** under the integration options. It remains an explicit profile because
-the BLE name and GATT layout do not distinguish it from other QRRM surfaces.
-The command frames are recovered from the L&P app, but this profile has not yet
-been validated on physical hardware.
+QRRM is a generic controller name, not a single physical remote layout. For the
+L&P surface reported in issue #504, with Flat, Zero G, Custom 1, and Custom 2,
+choose **L&P QRRM** under the integration options. It remains an explicit profile
+because the BLE name and GATT layout do not distinguish it from other QRRM
+surfaces.
+The current L&P and Richmat apps make the same explicit product-profile choice;
+their generic QRRM profiles contain no controls. Flat is confirmed on the issue
+#504 hardware. The other command frames are statically verified across the apps
+but have not yet been validated on that physical bed.
 
 ### Prefix55 Variant
 **Format:** 5 bytes `[0x55, 0x01, 0x00, command, checksum]`

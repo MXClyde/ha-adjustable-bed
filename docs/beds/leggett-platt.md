@@ -15,27 +15,27 @@
 
 | Analyzed | App | Package ID |
 |----------|-----|------------|
-| ✅ | [L&P Adjustable Base](https://play.google.com/store/apps/details?id=com.richmat.lp2) | `com.richmat.lp2` |
+| ✅ | [L&P Adjustable Base](https://play.google.com/store/apps/details?id=com.richmat.lp2) 2.3.25 | `com.richmat.lp2` |
 | ✅ | L&P Adjustable Base 2.2.1 (legacy) | `com.richmat.lp` |
-| ✅ | [LP Control](https://play.google.com/store/apps/details?id=com.leggett.android.universal) (LP Comfort Connect) | `com.leggett.android.universal` |
+| ✅ | [LP Control](https://play.google.com/store/apps/details?id=com.leggett.android.universal) 2.9.0 (LP Comfort Connect) | `com.leggett.android.universal` |
 
 ## Features
 
-| Feature | Gen2 | Okin | MlRM |
-|---------|------|------|------|
-| Motor Control | ✅ (head, feet, pillow, lumbar) | ✅ (head, feet, tilt, lumbar) | ✅ (discrete) |
-| Position Feedback | ❌ | ❌ | ❌ |
-| Memory Presets | ✅ (4 slots) | ✅ (4 slots) | ✅ (2 slots) |
-| Massage | ✅ (0-10 levels) | ✅ (wave, timer) | ✅ (discrete UP/DOWN) |
-| Lighting | ✅ RGB | ✅ Toggle | ✅ Toggle |
-| Anti-Snore | ✅ | ❌ | ✅ |
-| Zero-G | ❌ | ✅ | ✅ |
-| TV Preset | ❌ | ❌ | ✅ |
-| Lounge Preset | ❌ | ❌ | ✅ |
+| Feature | Gen2 | Okin | MlRM | QRRM profile |
+|---------|------|------|------|--------------|
+| Motor Control | ✅ (head, feet, pillow, lumbar) | ✅ (head, feet, tilt, lumbar) | ✅ (discrete) | ✅ (head, feet) |
+| Position Feedback | ❌ | ❌ | ❌ | ❌ |
+| Memory Presets | ✅ (4 slots) | ✅ (4 slots) | ✅ (2 slots) | ✅ (2 slots) |
+| Massage | ✅ (0-10 levels) | ✅ (wave, timer) | ✅ (discrete UP/DOWN) | ❌ |
+| Lighting | ✅ RGB | ✅ Toggle | ✅ Toggle | ❌ |
+| Anti-Snore | ✅ | ❌ | ✅ | ❌ |
+| Zero-G | ❌ | ✅ | ✅ | ✅ |
+| TV Preset | ❌ | ❌ | ✅ | ❌ |
+| Lounge Preset | ❌ | ❌ | ✅ | ❌ |
 
 ## Detection
 
-Leggett & Platt beds have three protocol variants with different detection methods:
+Leggett & Platt beds have four protocol variants with different detection methods:
 
 ### QRRM Richmat Variant
 
@@ -43,9 +43,11 @@ Some L&P bases advertise as `QRRM` and are configured as the **Richmat** bed
 type, rather than one of the three Leggett-specific variants below. QRRM does
 not identify the physical remote layout. If the remote has Flat, Zero G,
 Custom 1, and Custom 2 buttons, select **L&P QRRM** as the Richmat remote in the
-integration options. Its command frames are recovered from the L&P app, but the
-profile still needs physical hardware validation. See [Richmat](richmat.md) for
-the protocol details.
+integration options. The current L&P and Richmat apps likewise require a typed,
+scanned, or previously saved physical remote profile because the BLE peripheral
+does not expose one. Flat is confirmed on the issue #504 hardware; the other
+command frames are recovered consistently from the current apps and still need
+physical validation. See [Richmat](richmat.md) for the protocol details.
 
 ### Gen2 Variant
 - **Service UUID:** `45e25100-...` (unique to Gen2), when advertised

@@ -298,9 +298,10 @@ Richmat beds have different feature sets based on the remote model. Selecting yo
 
 **Note:** The remote code is usually printed on the back of your physical remote.
 For an L&P bed that advertises as `QRRM` and has Flat, Zero G, Custom 1, and
-Custom 2 buttons, select **L&P QRRM**. A bare QRRM name does not identify the
-physical remote layout, so the integration cannot select this profile safely on
-its own.
+Custom 2 buttons, select **L&P QRRM**. Current L&P and Richmat apps also require
+a physical remote or product selection for QRRM devices. The BLE name and GATT
+services do not identify that profile, so the integration cannot select it
+safely on its own.
 
 ---
 
