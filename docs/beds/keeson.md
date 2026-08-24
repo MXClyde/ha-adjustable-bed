@@ -23,6 +23,7 @@ Brands using Keeson/Ergomotion actuators:
 - Purple adjustable bases
 - GhostBed
 - Member's Mark (Sam's Club) adjustable beds
+- GlideAway ComfortBase Odessa with lift kit (BaseI4/I5 massage controls confirmed)
 - South Bay International MMKD
 - Sealy Ease
 - Some Costco beds
@@ -73,6 +74,20 @@ Brands using Keeson/Ergomotion actuators:
 **Fallback Service UUIDs:** Some Keeson beds use different service UUIDs. The integration automatically tries these if the primary isn't found:
 - `0000fff0-0000-1000-8000-00805f9b34fb` (characteristic: `0000fff2`)
 - `0000ffb0-0000-1000-8000-00805f9b34fb` (characteristic: `0000ffb2`)
+
+The GlideAway ComfortBase Odessa hardware report in
+[issue #508](https://github.com/kristofferR/ha-adjustable-bed/issues/508)
+confirms these additional BaseI4/I5 massage actions. Their meanings are
+variant-specific and must not be applied to the KSBT, Sino, Purple, or
+Ergomotion profiles.
+
+| Action | Value |
+|--------|-------|
+| Wave next | `0x10000000` |
+| Wave previous | `0x04000000` |
+| Intensity 1 | `0x00080000` |
+| Intensity 2 | `0x00100000` |
+| Intensity 3 | `0x00200000` |
 
 ### JSON/A00A Variant (Juna, Linx, Ergo Health)
 
