@@ -84,9 +84,9 @@ choose **L&P QRRM** under the integration options. It remains an explicit profil
 because the BLE name and GATT layout do not distinguish it from other QRRM
 surfaces.
 The current L&P and Richmat apps make the same explicit product-profile choice;
-their generic QRRM profiles contain no controls. Flat is confirmed on the issue
-#504 hardware. The other command frames are statically verified across the apps
-but have not yet been validated on that physical bed.
+their generic QRRM profiles contain no controls. On the hardware from
+issue #504, Flat is confirmed. The other command frames are statically verified
+across the apps but have not yet been validated on that physical bed.
 
 ### Prefix55 Variant
 **Format:** 5 bytes `[0x55, 0x01, 0x00, command, checksum]`

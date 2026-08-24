@@ -1201,7 +1201,7 @@ RICHMAT_REMOTE_LP_QRRM: Final = "LP-QRRM"
 # Most Richmat remotes use END=0x6E, but some devices require 0x5E to stop
 # movement: QRRM remotes and BedTech BT6500 beds (issue #194).
 RICHMAT_WILINKE_STOP_COMPAT_REMOTE_CODES: Final[frozenset[str]] = frozenset(
-    {"qrrm", "bt6500", RICHMAT_REMOTE_LP_QRRM.lower()}
+    {"qrrm", "bt6500"}
 )
 
 # Display names for remote selection

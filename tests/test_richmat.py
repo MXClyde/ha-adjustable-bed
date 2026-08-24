@@ -511,7 +511,7 @@ class TestRichmatFeatureDetection:
         assert controller.has_lumbar_support is False
 
     def test_lp_qrrm_profile_uses_recovered_wilinke_frames(self):
-        """L&P presets should match the clean-room recovered app packets."""
+        """L&P commands should match the clean-room recovered app packets."""
         coordinator = MagicMock()
         controller = RichmatController(
             coordinator,
@@ -531,7 +531,7 @@ class TestRichmatFeatureDetection:
         assert controller._build_command(RichmatCommands.PRESET_MEMORY_2) == bytes.fromhex(
             "6e01002f9e"
         )
-        assert controller._build_stop_command()[3] == RichmatCommands.END_COMPAT
+        assert controller._build_stop_command() == bytes.fromhex("6e01006edd")
 
     def test_resolve_bt6500_title_alias_from_qrrm_family(self):
         """BT6500 titles should resolve away from the generic QRRM profile."""
