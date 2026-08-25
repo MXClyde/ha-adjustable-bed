@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
@@ -13,6 +13,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.adjustable_bed.beds.okin_cst import (
     _BUTTON_PRESS_REPEAT_COUNT,
     _PRESET_REPEAT_COUNT,
+    CstMotorCommands,
     CstRemoteCommands,
     OkinCstController,
 )
@@ -37,7 +38,7 @@ def mock_okin_cst_config_entry_data() -> dict:
         CONF_ADDRESS: "AA:BB:CC:DD:EE:FF",
         CONF_NAME: "Okin CST Test Bed",
         CONF_BED_TYPE: BED_TYPE_OKIN_CST,
-        CONF_MOTOR_COUNT: 4,
+        CONF_MOTOR_COUNT: 3,
         CONF_HAS_MASSAGE: True,
         CONF_DISABLE_ANGLE_SENSING: True,
         CONF_PREFERRED_ADAPTER: "auto",
@@ -82,9 +83,9 @@ def _payloads(mock_client: MagicMock) -> list[bytes]:
 
 def _assert_writes_use_cst_characteristic(mock_client: MagicMock) -> None:
     """Assert every write targets the CST write characteristic."""
-    for call in mock_client.write_gatt_char.call_args_list:
-        assert call.args[0] == OKIMAT_WRITE_CHAR_UUID
-        assert call.kwargs["response"] is True
+    for recorded_call in mock_client.write_gatt_char.call_args_list:
+        assert recorded_call.args[0] == OKIMAT_WRITE_CHAR_UUID
+        assert recorded_call.kwargs["response"] is True
 
 
 def _assert_button_press_sequence(payloads: list[bytes], command: bytes) -> None:
@@ -116,13 +117,29 @@ class TestOkinCstCapabilities:
         assert okin_cst_controller.supports_discrete_light_control is True
         assert okin_cst_controller.supports_massage is True
         assert okin_cst_controller.supports_massage_off_control is True
+        assert okin_cst_controller.supports_massage_toggle_control is False
         assert okin_cst_controller.supports_massage_intensity_step_control is True
+        assert okin_cst_controller.supports_head_massage_intensity_step_control is False
+        assert okin_cst_controller.supports_foot_massage_intensity_step_control is False
+        assert okin_cst_controller.supports_position_feedback is False
+        assert [spec.key for spec in okin_cst_controller.motor_control_specs] == [
+            "head",
+            "feet",
+            "lumbar",
+        ]
+        assert okin_cst_controller.stale_motor_entity_keys == frozenset({"back", "legs", "tilt"})
 
-    def test_remote_command_values_match_cst_protocol_constants(self) -> None:
-        """Massage toggle and stop are distinct CSTProtocol constants."""
-        assert CstRemoteCommands.MASSAGE_TOGGLE == 0x04000000
+    def test_command_values_match_reachable_cst_protocol(self) -> None:
+        """Only command values reachable from the shipped app are declared."""
+        assert CstMotorCommands.HEAD_UP == 0x00000001
+        assert CstMotorCommands.HEAD_DOWN == 0x00000002
+        assert CstMotorCommands.FOOT_UP == 0x00000004
+        assert CstMotorCommands.FOOT_DOWN == 0x00000008
+        assert CstMotorCommands.LUMBAR_UP == 0x00000010
+        assert CstMotorCommands.LUMBAR_DOWN == 0x00000020
         assert CstRemoteCommands.MASSAGE_OFF == 0x02000000
-        assert CstRemoteCommands.MASSAGE_TOGGLE != CstRemoteCommands.MASSAGE_OFF
+        assert CstRemoteCommands.MASSAGE_INTENSITY == 0x00000C00
+        assert CstRemoteCommands.MASSAGE_INTENSITY_MINUS == 0x01800000
 
 
 class TestOkinCstCommands:
@@ -132,13 +149,13 @@ class TestOkinCstCommands:
         "custom_components.adjustable_bed.beds.okin_cst.asyncio.sleep",
         new_callable=AsyncMock,
     )
-    async def test_flat_preset_uses_primary_field_and_long_hold(
+    async def test_flat_preset_uses_primary_field_and_app_one_shot_cadence(
         self,
         _mock_sleep: AsyncMock,
         okin_cst_controller: OkinCstController,
         mock_bleak_client: MagicMock,
     ) -> None:
-        """Flat uses the primary field and repeats long enough to complete recall."""
+        """Flat uses the primary field and the app's fixed 500 ms voice cadence."""
         mock_bleak_client.write_gatt_char.reset_mock()
 
         await okin_cst_controller.preset_flat()
@@ -305,14 +322,9 @@ class TestOkinCstCommands:
     @pytest.mark.parametrize(
         ("method_name", "command_value"),
         [
-            ("massage_toggle", CstRemoteCommands.MASSAGE_TOGGLE),
             ("massage_off", CstRemoteCommands.MASSAGE_OFF),
             ("massage_intensity_up", CstRemoteCommands.MASSAGE_INTENSITY),
             ("massage_intensity_down", CstRemoteCommands.MASSAGE_INTENSITY_MINUS),
-            ("massage_head_up", CstRemoteCommands.MASSAGE_HEAD),
-            ("massage_head_down", CstRemoteCommands.MASSAGE_HEAD_MINUS),
-            ("massage_foot_up", CstRemoteCommands.MASSAGE_FEET),
-            ("massage_foot_down", CstRemoteCommands.MASSAGE_FEET_MINUS),
         ],
     )
     @patch(
@@ -367,3 +379,58 @@ class TestOkinCstCommands:
             second_press,
             build_cst_command(control_value=CstRemoteCommands.MASSAGE_WAVE_2),
         )
+
+    @pytest.mark.parametrize(
+        ("method_name", "command_value"),
+        [
+            ("move_back_up", CstMotorCommands.HEAD_UP),
+            ("move_back_down", CstMotorCommands.HEAD_DOWN),
+            ("move_legs_up", CstMotorCommands.FOOT_UP),
+            ("move_legs_down", CstMotorCommands.FOOT_DOWN),
+            ("move_lumbar_up", CstMotorCommands.LUMBAR_UP),
+            ("move_lumbar_down", CstMotorCommands.LUMBAR_DOWN),
+        ],
+    )
+    @patch(
+        "custom_components.adjustable_bed.beds.okin_cst.asyncio.sleep",
+        new_callable=AsyncMock,
+    )
+    async def test_motor_actions_use_exact_primary_field_bits(
+        self,
+        _mock_sleep: AsyncMock,
+        okin_cst_controller: OkinCstController,
+        mock_bleak_client: MagicMock,
+        method_name: str,
+        command_value: int,
+    ) -> None:
+        """Head, foot, and lumbar use the app's reachable motor bits."""
+        mock_bleak_client.write_gatt_char.reset_mock()
+        method: Callable[[], Awaitable[None]] = getattr(okin_cst_controller, method_name)
+
+        await method()
+
+        expected = build_cst_command(motor_value=command_value)
+        assert _payloads(mock_bleak_client) == [
+            expected,
+        ] * okin_cst_controller._coordinator.motor_pulse_count + [
+            build_cst_command(),
+            build_cst_command(),
+        ]
+
+    @patch(
+        "custom_components.adjustable_bed.beds.okin_cst.asyncio.sleep",
+        new_callable=AsyncMock,
+    )
+    async def test_stop_sequence_waits_before_both_release_frames(
+        self,
+        mock_sleep: AsyncMock,
+        okin_cst_controller: OkinCstController,
+        mock_bleak_client: MagicMock,
+    ) -> None:
+        """The app sends zero releases at +100 ms and +200 ms."""
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await okin_cst_controller.stop_all()
+
+        assert _payloads(mock_bleak_client) == [build_cst_command()] * 2
+        assert mock_sleep.await_args_list == [call(0.1), call(0.1)]
