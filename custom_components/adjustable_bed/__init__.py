@@ -10,7 +10,7 @@ from types import MappingProxyType
 from typing import Any, cast
 
 from homeassistant.components import bluetooth
-from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
+from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry, ConfigEntryDisabler
 from homeassistant.const import CONF_ADDRESS, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
@@ -26,6 +26,7 @@ from .const import (
     BED_TYPE_KAIDI,
     BED_TYPE_OCTO,
     BED_TYPE_RICHMAT,
+    BED_TYPE_SLEEP_NUMBER,
     BED_TYPE_VIBRADORM,
     BEDTECH_MANUFACTURER_ID,
     BEDTECH_SERVICE_UUID,
@@ -322,11 +323,10 @@ async def _async_finish_entry_setup(
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     if schedule_initial_position_read:
-        entry.async_create_background_task(
-            hass,
-            coordinator.async_read_initial_positions(),
-            name=f"adjustable_bed_initial_position_read_{entry.entry_id}",
-        )
+        # The successful connect also requests hydration. Route both paths
+        # through the coordinator's session-aware deduplication so platform
+        # forwarding cannot race a second full read onto the same BLE link.
+        coordinator._schedule_position_hydration()
 
     _LOGGER.info("Adjustable Bed integration setup complete for %s", entry.title)
     return True
@@ -457,6 +457,53 @@ def _async_ensure_paired_device_registry(
         )
 
 
+def _device_for_entry_and_identifier(
+    registry: dr.DeviceRegistry,
+    config_entry_id: str,
+    identifier: tuple[str, str],
+) -> dr.DeviceEntry | None:
+    """Return one config entry's device carrying an exact identifier."""
+    return next(
+        (
+            device
+            for device in dr.async_entries_for_config_entry(registry, config_entry_id)
+            if identifier in device.identifiers
+        ),
+        None,
+    )
+
+
+def _async_transfer_device_registry_entry(
+    registry: dr.DeviceRegistry,
+    device: dr.DeviceEntry,
+    *,
+    source_entry_id: str,
+    target_entry_id: str,
+    identifier: tuple[str, str],
+    via_device_id: str | None,
+) -> None:
+    """Move a device between config entries without changing its registry id.
+
+    Home Assistant 2026.8 made devices single-owner. Registering the same
+    identifier for the target entry now creates a separate placeholder instead
+    of adding the target entry to the source device. Remove that placeholder
+    before transferring the customized source device. On older supported Home
+    Assistant releases the two lookups resolve to the same shared device, so the
+    removal is naturally skipped and the combined add/remove remains compatible.
+    """
+    target_device = _device_for_entry_and_identifier(
+        registry, target_entry_id, identifier
+    )
+    if target_device is not None and target_device.id != device.id:
+        registry.async_remove_device(target_device.id)
+    registry.async_update_device(
+        device.id,
+        add_config_entry_id=target_entry_id,
+        remove_config_entry_id=source_entry_id,
+        via_device_id=via_device_id,
+    )
+
+
 async def _async_release_absorbed_singles(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Disconnect (but do NOT remove) the original singles a single-connection pair
     is about to absorb, freeing their one-link BLE before the pair connects.
@@ -500,12 +547,11 @@ async def _async_rehome_absorbed_singles(hass: HomeAssistant, entry: ConfigEntry
     reset per-side history and customizations), this moves the existing rows onto
     the pair entry IN PLACE:
 
-    * Each child device already shares the single's ``(DOMAIN, MAC)`` identifier,
-      so ``_async_ensure_paired_device_registry`` (run earlier in setup) merged the
-      pair's config-entry id into the existing device and nested it under the
-      synthetic parent. Removing the original then only drops the original's
-      config-entry id, leaving the SAME device object (id, name_by_user, area)
-      alive.
+    * Each child device keeps the single's ``(DOMAIN, MAC)`` identifier. The
+      existing customized device is explicitly transferred to the pair entry and
+      nested under its synthetic parent, preserving the SAME registry object (id,
+      name_by_user, area). This also works with Home Assistant's single-owner
+      device model, where registering the pair first creates a separate placeholder.
     * Each entity row is re-pointed ``config_entry_id`` -> pair BEFORE the original
       is removed, so clearing the original config entry no longer deletes it (HA
       deletes entity rows indexed by the removed config entry). The paired platform
@@ -522,6 +568,12 @@ async def _async_rehome_absorbed_singles(hass: HomeAssistant, entry: ConfigEntry
     BLE has been freed.
     """
     ent_reg = er.async_get(hass)
+    dev_reg = dr.async_get(hass)
+    parent = _device_for_entry_and_identifier(
+        dev_reg,
+        entry.entry_id,
+        (DOMAIN, entry.data[CONF_PAIR_ID]),
+    )
     absorbed_sides: set[str] = set()
     for child in iter_children(entry.data):
         absorbed_id = child.get(KEY_ABSORBED_ENTRY_ID)
@@ -538,6 +590,14 @@ async def _async_rehome_absorbed_singles(hass: HomeAssistant, entry: ConfigEntry
         # failure the re-pointing is rolled back so the still-loaded single keeps
         # owning its rows; the side is then absorbed cleanly on the next reload.
         rehomed_entity_ids: list[str] = []
+        address = child.get(CONF_ADDRESS)
+        identifier = (DOMAIN, address) if isinstance(address, str) else None
+        original_device = (
+            _device_for_entry_and_identifier(dev_reg, absorbed_id, identifier)
+            if identifier is not None
+            else None
+        )
+        device_transferred = False
         try:
             # Re-point the original's entity rows onto the pair first. After this
             # they are indexed under the pair, not the original, so removing the
@@ -545,9 +605,19 @@ async def _async_rehome_absorbed_singles(hass: HomeAssistant, entry: ConfigEntry
             for reg_entry in er.async_entries_for_config_entry(ent_reg, absorbed_id):
                 ent_reg.async_update_entity(reg_entry.entity_id, config_entry_id=entry.entry_id)
                 rehomed_entity_ids.append(reg_entry.entity_id)
+            if original_device is not None and identifier is not None:
+                _async_transfer_device_registry_entry(
+                    dev_reg,
+                    original_device,
+                    source_entry_id=absorbed_id,
+                    target_entry_id=entry.entry_id,
+                    identifier=identifier,
+                    via_device_id=parent.id if parent is not None else None,
+                )
+                device_transferred = True
             # Now safe to drop the original entry: its entities are re-homed and
-            # its device still carries the pair's config entry, so HA deletes
-            # neither. async_remove() removes the entry even on an unclean platform
+            # its device is owned by the pair entry, so HA deletes neither.
+            # async_remove() removes the entry even on an unclean platform
             # unload (it returns {"require_restart": True} rather than raising); the
             # rows are already re-homed so the conversion is structurally complete,
             # but surface that case — the original's old entities may linger until a
@@ -565,15 +635,33 @@ async def _async_rehome_absorbed_singles(hass: HomeAssistant, entry: ConfigEntry
             # {MAC}_{key} unique_ids, and the paired platforms would adopt the same
             # rows — duplicate/missing controls. Restoring config_entry_id keeps
             # the side a consistent single, retried cleanly on the next reload.
-            for entity_id in rehomed_entity_ids:
-                try:
-                    ent_reg.async_update_entity(entity_id, config_entry_id=absorbed_id)
-                except Exception:  # noqa: BLE001 - best-effort rollback
-                    _LOGGER.debug(
-                        "Rollback of re-homed row %s to %s failed",
-                        entity_id,
-                        absorbed_id,
-                    )
+            if hass.config_entries.async_get_entry(absorbed_id) is not None:
+                for entity_id in rehomed_entity_ids:
+                    try:
+                        ent_reg.async_update_entity(entity_id, config_entry_id=absorbed_id)
+                    except Exception:  # noqa: BLE001 - best-effort rollback
+                        _LOGGER.debug(
+                            "Rollback of re-homed row %s to %s failed",
+                            entity_id,
+                            absorbed_id,
+                        )
+                if device_transferred and original_device is not None and identifier is not None:
+                    try:
+                        _async_transfer_device_registry_entry(
+                            dev_reg,
+                            original_device,
+                            source_entry_id=entry.entry_id,
+                            target_entry_id=absorbed_id,
+                            identifier=identifier,
+                            via_device_id=None,
+                        )
+                    except Exception:  # noqa: BLE001 - best-effort rollback
+                        _LOGGER.debug(
+                            "Rollback of device %s to %s failed",
+                            original_device.id,
+                            absorbed_id,
+                            exc_info=True,
+                        )
             _LOGGER.exception(
                 "Failed to re-home absorbed bed %s onto paired entry %s; rolled "
                 "back, will retry on the next reload",
@@ -696,6 +784,11 @@ async def async_unpair_entry(hass: HomeAssistant, entry: ConfigEntry) -> list[Co
         source = child.get(KEY_ORIGIN_SOURCE) or SOURCE_IMPORT
         single = ConfigEntry(
             data=single_data_from_child(child),
+            # Register both target entry ids before moving registry rows, but do
+            # not let async_add() set up their platforms until the transfer is
+            # complete. This avoids temporary duplicate entities/devices under
+            # Home Assistant's single-owner registries.
+            disabled_by=ConfigEntryDisabler.USER,
             discovery_keys=MappingProxyType({}),
             domain=DOMAIN,
             entry_id=origin_entry_id,
@@ -736,18 +829,48 @@ async def async_unpair_entry(hass: HomeAssistant, entry: ConfigEntry) -> list[Co
         raise HomeAssistantError("Could not unload the paired bed before unpairing")
 
     try:
+        # async_add() normally sets an entry up immediately. These entries are
+        # temporarily disabled, so both ids become valid registry owners without
+        # racing platform setup against the row transfers below.
         for single, _address in singles:
-            device = child_devices.get(single.entry_id)
             await hass.config_entries.async_add(single)
-            if device is not None:
-                dev_reg.async_update_device(device.id, via_device_id=None)
 
         # Entity-registry validation only permits ownership by config entries
         # already known to HA. Add both singles first, then explicitly re-home
-        # every per-side row (platform setup normally adopts them by unique_id;
-        # this makes the ownership transition deterministic).
+        # every per-side row before moving its device. HA 2026.8 removes entity
+        # rows whose config-entry owner no longer matches their device owner, so
+        # this ordering keeps both registry halves aligned throughout the move.
         for entity_id, owner_entry_id in row_owners.items():
             ent_reg.async_update_entity(entity_id, config_entry_id=owner_entry_id)
+
+        for single, _address in singles:
+            device = child_devices.get(single.entry_id)
+            if device is not None:
+                identifier = next(
+                    (
+                        candidate
+                        for candidate in device.identifiers
+                        if candidate == (DOMAIN, _address)
+                    ),
+                    (DOMAIN, _address),
+                )
+                _async_transfer_device_registry_entry(
+                    dev_reg,
+                    device,
+                    source_entry_id=entry.entry_id,
+                    target_entry_id=single.entry_id,
+                    identifier=identifier,
+                    via_device_id=None,
+                )
+
+        # Load the restored entries only after their existing device and entity
+        # rows belong to them. The setup paths now adopt those rows in place.
+        for single, _address in singles:
+            if not await hass.config_entries.async_set_disabled_by(single.entry_id, None):
+                _LOGGER.info(
+                    "Restored bed %s did not load immediately; Home Assistant will retry setup",
+                    single.title,
+                )
 
         removal = await hass.config_entries.async_remove(entry.entry_id)
         if removal.get("require_restart"):
@@ -759,19 +882,29 @@ async def async_unpair_entry(hass: HomeAssistant, entry: ConfigEntry) -> list[Co
         for entity_id in row_owners:
             if ent_reg.async_get(entity_id) is not None:
                 ent_reg.async_update_entity(entity_id, config_entry_id=entry.entry_id)
+        for single, _address in singles:
+            device = child_devices.get(single.entry_id)
+            if device is None:
+                continue
+            current = dev_reg.async_get(device.id)
+            if (
+                current is not None
+                and single.entry_id in current.config_entries
+                and hass.config_entries.async_get_entry(single.entry_id) is not None
+            ):
+                with contextlib.suppress(Exception):
+                    _async_transfer_device_registry_entry(
+                        dev_reg,
+                        current,
+                        source_entry_id=single.entry_id,
+                        target_entry_id=entry.entry_id,
+                        identifier=(DOMAIN, _address),
+                        via_device_id=parent.id if parent is not None else None,
+                    )
         for single, _address in reversed(singles):
             if hass.config_entries.async_get_entry(single.entry_id) is not None:
                 with contextlib.suppress(Exception):
                     await hass.config_entries.async_remove(single.entry_id)
-        for single, _address in singles:
-            device = child_devices.get(single.entry_id)
-            if device is not None:
-                dev_reg.async_update_device(
-                    device.id,
-                    add_config_entry_id=entry.entry_id,
-                    remove_config_entry_id=single.entry_id,
-                    via_device_id=parent.id if parent is not None else None,
-                )
         if hass.config_entries.async_get_entry(entry.entry_id) is not None:
             with contextlib.suppress(Exception):
                 await hass.config_entries.async_setup(entry.entry_id)
@@ -859,6 +992,24 @@ async def _async_setup_paired_entry(hass: HomeAssistant, entry: ConfigEntry) -> 
     # freeing the shared {address}_{key} unique_ids the paired platforms reuse.
     # No-op on reload (originals already gone).
     absorbed_sides = await _async_rehome_absorbed_singles(hass, entry)
+    # A side whose original entry survived a registry rollback must remain solely
+    # controlled by that original. Do not let paired platforms adopt the same
+    # unique ids back onto the pair under Home Assistant's single-owner registry.
+    retained_sides = {
+        side
+        for child in iter_children(entry.data)
+        if (side := child.get(CONF_SIDE))
+        and (absorbed_id := child.get(KEY_ABSORBED_ENTRY_ID))
+        and hass.config_entries.async_get_entry(absorbed_id) is not None
+    }
+    for side in retained_sides:
+        await coordinator.async_remove_child(side)
+    if not coordinator.children:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+        await coordinator.async_shutdown()
+        raise ConfigEntryNotReady(
+            f"Could not absorb either standalone side of paired bed {entry.title}"
+        )
     # A just-absorbed concurrent side may have failed its initial connect ONLY
     # because its original single was still holding the (single-link) BLE — which
     # the absorb above has now freed. Retry such a side once so a non-offline-
@@ -893,11 +1044,7 @@ async def _async_setup_paired_entry(hass: HomeAssistant, entry: ConfigEntry) -> 
     # per-side covers don't sit at "unknown" until the first movement.
     for child in coordinator.children.values():
         if child.is_connected:
-            entry.async_create_background_task(
-                hass,
-                child.async_read_initial_positions(),
-                name=f"adjustable_bed_paired_initial_read_{child.address}",
-            )
+            child._schedule_position_hydration()
 
     _LOGGER.info("Paired bed setup complete for %s", entry.title)
     return True
@@ -942,12 +1089,13 @@ async def _async_setup_single_address_paired_entry(
     hass.data[DOMAIN][entry.entry_id] = coordinator
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     await hass.config_entries.async_forward_entry_setups(entry, PAIRED_PLATFORMS)
-    for side, child in coordinator.children.items():
-        entry.async_create_background_task(
-            hass,
-            child.async_read_initial_positions(),
-            name=f"adjustable_bed_single_address_initial_read_{side}",
-        )
+    if inner.bed_type != BED_TYPE_SLEEP_NUMBER:
+        for side, child in coordinator.children.items():
+            entry.async_create_background_task(
+                hass,
+                child.async_read_initial_positions(),
+                name=f"adjustable_bed_single_address_initial_read_{side}",
+            )
     _LOGGER.info("Single-address paired bed setup complete for %s", entry.title)
     return True
 
