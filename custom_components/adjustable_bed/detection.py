@@ -733,17 +733,18 @@ def refine_okin_shared_uuid_protocol_from_gatt(
                     ", ".join(gatt_detection.signals),
                 )
             return BED_TYPE_LEGGETT_OKIN
-        if gatt_detection.bed_type == BED_TYPE_OKIN_RF_ECO_BT and _is_okimat_bed_model(ble_model):
-            # Full OKIMAT beds share the RF ECO BT stair's CSS GATT signature, so
-            # the bare signature is not enough to pick the single-actuator stair
-            # profile. The Device Info model proves this is a multi-motor OKIMAT
-            # bed (issue #406).
+        if gatt_detection.bed_type in {
+            BED_TYPE_OKIN_CST,
+            BED_TYPE_OKIN_RF_ECO_BT,
+        } and _is_okimat_bed_model(ble_model):
+            # Full OKIMAT beds share the CSS GATT inventory used to infer both
+            # profiles, so the Device Info model is the stronger signal (#406).
             if bed_type in OKIMAT_COMPATIBLE_PROFILES:
                 # Already on an OKIMAT-compatible controller; keep the saved label
                 # (BED_TYPE_OKIMAT/OKIN_UUID resolve to the same controller, and
                 # OKIN CST is its own deliberately preserved full-bed profile).
                 _LOGGER.debug(
-                    "Keeping %s profile for OKIMAT bed model %r despite RF ECO BT GATT signature",
+                    "Keeping %s profile for OKIMAT bed model %r despite shared OKIN GATT signals",
                     bed_type,
                     ble_model,
                 )
@@ -753,13 +754,18 @@ def refine_okin_shared_uuid_protocol_from_gatt(
             # is the wrong controller for an OKIMAT bed. Promote it to the
             # multi-motor OKIN UUID profile so the bed recovers (issue #406).
             _LOGGER.info(
-                "Promoted %s to %s for OKIMAT bed model %r despite RF ECO BT GATT signature",
+                "Promoted %s to %s for OKIMAT bed model %r despite shared OKIN GATT signals",
                 bed_type,
                 BED_TYPE_OKIN_UUID,
                 ble_model,
             )
             return BED_TYPE_OKIN_UUID
-        if bed_type == BED_TYPE_OKIN_CST and gatt_detection.bed_type == BED_TYPE_OKIN_RF_ECO_BT:
+        if {bed_type, gatt_detection.bed_type} == {
+            BED_TYPE_OKIN_CST,
+            BED_TYPE_OKIN_RF_ECO_BT,
+        }:
+            # CSS and Nordic DFU overlap across these profiles. GATT can narrow
+            # the family but cannot safely override the configured choice.
             return bed_type
         if gatt_detection.bed_type != bed_type:
             _LOGGER.info(
