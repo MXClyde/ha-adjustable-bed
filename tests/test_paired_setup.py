@@ -499,6 +499,44 @@ class TestPairedSetup:
 
         assert result["type"] == FlowResultType.FORM
         assert selected == [SIDE_LEFT]
+    async def test_unpair_keeps_offline_restored_beds(
+        self,
+        hass: HomeAssistant,
+        mock_coordinator_connected,
+        enable_custom_integrations,
+    ):
+        """Offline sides remain restored and retry setup after the pair is removed."""
+        from unittest.mock import patch
+
+        from homeassistant.exceptions import ConfigEntryNotReady
+
+        from custom_components.adjustable_bed.coordinator import (
+            AdjustableBedCoordinator,
+        )
+
+        entry = _paired_entry(hass)
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        async def offline_connect(_coordinator):
+            raise ConfigEntryNotReady("bed is offline")
+
+        with patch.object(
+            AdjustableBedCoordinator,
+            "async_connect",
+            new=offline_connect,
+        ):
+            restored = await async_unpair_entry(hass, entry)
+
+        assert hass.config_entries.async_get_entry(entry.entry_id) is None
+        assert {candidate.data[CONF_ADDRESS] for candidate in restored} == {
+            LEFT_ADDR,
+            RIGHT_ADDR,
+        }
+        assert all(candidate.disabled_by is None for candidate in restored)
+        assert all(candidate.state == ConfigEntryState.SETUP_RETRY for candidate in restored)
+        for candidate in restored:
+            candidate.async_cancel_retry_setup()
 
     async def test_unpair_rolls_back_if_second_single_cannot_be_added(
         self,
@@ -528,11 +566,15 @@ class TestPairedSetup:
 
         with (
             patch.object(hass.config_entries, "async_add", side_effect=fail_second),
+            patch(
+                "custom_components.adjustable_bed._async_transfer_device_registry_entry"
+            ) as transfer_device,
             pytest.raises(RuntimeError, match="injected second-side failure"),
         ):
             await async_unpair_entry(hass, entry)
         await hass.async_block_till_done()
 
+        transfer_device.assert_not_called()
         pair = hass.config_entries.async_get_entry(entry.entry_id)
         assert pair is not None
         assert pair.state == ConfigEntryState.LOADED
@@ -540,6 +582,9 @@ class TestPairedSetup:
         row = ent_reg.async_get(row_id)
         assert row is not None
         assert row.config_entry_id == entry.entry_id
+        device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, LEFT_ADDR)})
+        assert device is not None
+        assert device.config_entry_id == entry.entry_id
 
     async def test_paired_entry_creates_parent_and_child_devices(
         self,
@@ -1618,6 +1663,7 @@ class TestPairBedsConversion:
         left_after = dev_reg.async_get_device(identifiers={(DOMAIN, LEFT_ADDR)})
         assert left_after is not None
         assert left_after.id == left_device_id  # same device, not recreated
+        assert left_after.config_entry_id == pair.entry_id
         assert left_after.name_by_user == "Left headboard"
         assert left_after.via_device_id == parent.id
 
@@ -1650,6 +1696,7 @@ class TestPairBedsConversion:
         final_device = dev_reg.async_get_device(identifiers={(DOMAIN, LEFT_ADDR)})
         assert final_device is not None
         assert final_device.id == left_device_id
+        assert final_device.config_entry_id == left.entry_id
         assert final_device.name_by_user == "Left headboard"
         assert final_device.via_device_id is None
 
