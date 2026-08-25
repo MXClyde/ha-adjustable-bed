@@ -961,6 +961,7 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
     ) -> None:
         """Refresh each logical side without mixing same-named position axes."""
         current_task = asyncio.current_task()
+        retry_after_preemption = False
         try:
             if previous_task is not None:
                 try:
@@ -982,6 +983,8 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
                 return_exceptions=True,
             )
             for side, result in zip(self._children, results, strict=True):
+                if isinstance(result, asyncio.CancelledError):
+                    retry_after_preemption = True
                 if isinstance(result, BaseException):
                     _LOGGER.debug(
                         "Single-address position hydration failed for %s side: %s",
@@ -991,6 +994,14 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
         finally:
             if self._single_position_hydration_task is current_task:
                 self._single_position_hydration_task = None
+            if (
+                retry_after_preemption
+                and (current_task is None or not current_task.cancelling())
+                and not self._single_position_hydration_pause_count
+                and self._single_inner.is_connected
+                and self._single_inner.bed_type == BED_TYPE_SLEEP_NUMBER
+            ):
+                self._schedule_single_position_hydration()
 
     async def _async_cancel_single_position_hydration(self) -> None:
         """Cancel and await logical-side hydration."""

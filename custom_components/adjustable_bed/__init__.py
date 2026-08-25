@@ -866,10 +866,11 @@ async def async_unpair_entry(hass: HomeAssistant, entry: ConfigEntry) -> list[Co
         # Load the restored entries only after their existing device and entity
         # rows belong to them. The setup paths now adopt those rows in place.
         for single, _address in singles:
-            if not await hass.config_entries.async_set_disabled_by(
-                single.entry_id, None
-            ):
-                raise RuntimeError(f"Could not set up restored bed {single.title}")
+            if not await hass.config_entries.async_set_disabled_by(single.entry_id, None):
+                _LOGGER.info(
+                    "Restored bed %s did not load immediately; Home Assistant will retry setup",
+                    single.title,
+                )
 
         removal = await hass.config_entries.async_remove(entry.entry_id)
         if removal.get("require_restart"):

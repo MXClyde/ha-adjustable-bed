@@ -613,6 +613,32 @@ class TestSingleAddressCoordinator:
         assert events == ["cancel", SIDE_LEFT, SIDE_RIGHT]
         assert coordinator._single_inner.cancelled_position_hydrations == 1
 
+    async def test_sleep_number_preempted_hydration_is_rescheduled(self):
+        coordinator = self._coordinator(BED_TYPE_SLEEP_NUMBER, SleepNumberController)
+        calls = {SIDE_LEFT: 0, SIDE_RIGHT: 0}
+
+        for side, child in coordinator.children.items():
+
+            async def hydrate(*, logical_side=side):
+                calls[logical_side] += 1
+                if calls[logical_side] == 1:
+                    raise asyncio.CancelledError
+
+            object.__setattr__(child, "async_read_initial_positions", hydrate)
+
+        coordinator._on_child_connection_change(True)
+        first_task = coordinator._single_position_hydration_task
+        assert first_task is not None
+        await first_task
+
+        retry_task = coordinator._single_position_hydration_task
+        assert retry_task is not None
+        assert retry_task is not first_task
+        await retry_task
+
+        assert calls == {SIDE_LEFT: 2, SIDE_RIGHT: 2}
+        assert coordinator._single_position_hydration_task is None
+
     async def test_sleep_number_reconnect_replaces_inflight_hydration(self):
         coordinator = self._coordinator(BED_TYPE_SLEEP_NUMBER, SleepNumberController)
         started = asyncio.Event()

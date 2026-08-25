@@ -331,6 +331,45 @@ class TestPairedSetup:
             RIGHT_ADDR,
         }
 
+    async def test_unpair_keeps_offline_restored_beds(
+        self,
+        hass: HomeAssistant,
+        mock_coordinator_connected,
+        enable_custom_integrations,
+    ):
+        """Offline sides remain restored and retry setup after the pair is removed."""
+        from unittest.mock import patch
+
+        from homeassistant.exceptions import ConfigEntryNotReady
+
+        from custom_components.adjustable_bed.coordinator import (
+            AdjustableBedCoordinator,
+        )
+
+        entry = _paired_entry(hass)
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        async def offline_connect(_coordinator):
+            raise ConfigEntryNotReady("bed is offline")
+
+        with patch.object(
+            AdjustableBedCoordinator,
+            "async_connect",
+            new=offline_connect,
+        ):
+            restored = await async_unpair_entry(hass, entry)
+
+        assert hass.config_entries.async_get_entry(entry.entry_id) is None
+        assert {candidate.data[CONF_ADDRESS] for candidate in restored} == {
+            LEFT_ADDR,
+            RIGHT_ADDR,
+        }
+        assert all(candidate.disabled_by is None for candidate in restored)
+        assert all(candidate.state == ConfigEntryState.SETUP_RETRY for candidate in restored)
+        for candidate in restored:
+            candidate.async_cancel_retry_setup()
+
     async def test_unpair_rolls_back_if_second_single_cannot_be_added(
         self,
         hass: HomeAssistant,
