@@ -1195,11 +1195,14 @@ RICHMAT_REMOTE_ZR60: Final = "ZR60"
 RICHMAT_REMOTE_I7RM: Final = "I7RM"
 RICHMAT_REMOTE_190_0055: Final = "190-0055"
 RICHMAT_REMOTE_BT6500: Final = "BT6500"
+RICHMAT_REMOTE_LP_QRRM: Final = "LP-QRRM"
 
 # Richmat WiLinke stop-byte compatibility.
 # Most Richmat remotes use END=0x6E, but some devices require 0x5E to stop
 # movement: QRRM remotes and BedTech BT6500 beds (issue #194).
-RICHMAT_WILINKE_STOP_COMPAT_REMOTE_CODES: Final[frozenset[str]] = frozenset({"qrrm", "bt6500"})
+RICHMAT_WILINKE_STOP_COMPAT_REMOTE_CODES: Final[frozenset[str]] = frozenset(
+    {"qrrm", "bt6500"}
+)
 
 # Display names for remote selection
 RICHMAT_REMOTES: Final = {
@@ -1216,6 +1219,7 @@ RICHMAT_REMOTES: Final = {
     RICHMAT_REMOTE_ZR60: "ZR60 (Head, Feet, Lights)",
     RICHMAT_REMOTE_I7RM: "I7RM / HJH85 / Sleep Function 2.0 (Head, Feet, Pillow, Lumbar, Massage, Lights)",
     RICHMAT_REMOTE_190_0055: "190-0055 (Head, Pillow, Feet, Massage, Lights)",
+    RICHMAT_REMOTE_LP_QRRM: "L&P QRRM (Head, Feet, Flat, Zero G, Custom 1/2)",
 }
 
 # Feature sets for each remote code
@@ -1286,6 +1290,17 @@ RICHMAT_REMOTE_FEATURES: Final = {
         | _F.MOTOR_FEET
         | _F.MOTOR_PILLOW
         | _F.MOTOR_LUMBAR
+    ),
+    # L&P QRRM surface reported in #504. Current L&P and Richmat apps keep the
+    # generic QRRM profile empty until the user selects a physical remote, so
+    # keep this explicit instead of exposing these presets on every QRRM bed.
+    RICHMAT_REMOTE_LP_QRRM: (
+        _F.PRESET_FLAT
+        | _F.PRESET_MEMORY_1
+        | _F.PRESET_MEMORY_2
+        | _F.PRESET_ZERO_G
+        | _F.MOTOR_HEAD
+        | _F.MOTOR_FEET
     ),
     RICHMAT_REMOTE_BURM: (
         _F.PRESET_FLAT
@@ -1449,8 +1464,8 @@ RICHMAT_REMOTE_FEATURES: Final = {
     ),
 }
 
-# Some Richmat OEM apps expose a generic QRRM family in BLE, then ask the user
-# to pick the actual retail model. Use entry/device names to recover those
+# Some Richmat OEM apps discover a generic QRRM name, then ask the user to pick
+# the actual product profile. Use entry/device names to recover those
 # model-specific surfaces when we have enough context.
 RICHMAT_MODEL_REMOTE_ALIASES: Final[dict[str, str]] = {
     "bt2000": "a7rm",
@@ -1472,10 +1487,9 @@ def resolve_richmat_remote_code(
 ) -> str:
     """Resolve a Richmat remote code using config and model-specific aliases.
 
-    QRRM is a selector family in OEM apps rather than a concrete remote surface.
-    If the config or device title includes a known retail model (for example
-    "BedTech BT6500"), prefer that model-specific surface over the generic QRRM
-    feature map.
+    QRRM does not identify a concrete remote surface. If the config or device
+    title includes a known retail model (for example "BedTech BT6500"), prefer
+    that model-specific surface over the generic QRRM feature map.
     """
     normalized = (remote_code or RICHMAT_REMOTE_AUTO).lower()
     if normalized not in {"", RICHMAT_REMOTE_AUTO, "qrrm"}:
