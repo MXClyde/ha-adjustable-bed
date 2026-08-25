@@ -39,9 +39,12 @@ from custom_components.adjustable_bed.const import (
     DOMAIN,
     OCTO_CHAR_UUID,
     OCTO_STAR2_CHAR_UUID,
+    OCTO_STAR2_SERVICE_UUID,
     OCTO_VARIANT_STANDARD,
     OCTO_VARIANT_STAR2,
+    VARIANT_AUTO,
 )
+from custom_components.adjustable_bed.controller_factory import create_controller
 from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
 from custom_components.adjustable_bed.light import LIGHT_DESCRIPTION, AdjustableBedLight
 
@@ -154,6 +157,78 @@ def _build_octo_response(
 
 class TestOctoVariantSelection:
     """Test Octo variant selection in controller creation."""
+
+    async def test_auto_variant_uses_star2_gatt_endpoint(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_bleak_client: MagicMock,
+    ):
+        """Auto should select Star2 when its writable GATT endpoint exists."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        star2_characteristic = MagicMock(uuid=OCTO_STAR2_CHAR_UUID)
+        star2_service = MagicMock(uuid=OCTO_STAR2_SERVICE_UUID)
+        star2_service.get_characteristic.side_effect = (
+            lambda uuid: star2_characteristic
+            if uuid.lower() == OCTO_STAR2_CHAR_UUID.lower()
+            else None
+        )
+        mock_bleak_client.services = [star2_service]
+
+        controller = await create_controller(
+            coordinator,
+            BED_TYPE_OCTO,
+            VARIANT_AUTO,
+            mock_bleak_client,
+            device_name="DA1458x",
+        )
+
+        assert isinstance(controller, OctoStar2Controller)
+
+    async def test_explicit_standard_overrides_star2_gatt_endpoint(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_bleak_client: MagicMock,
+    ):
+        """An explicit Standard selection should remain authoritative."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        star2_characteristic = MagicMock(uuid=OCTO_STAR2_CHAR_UUID)
+        star2_service = MagicMock(uuid=OCTO_STAR2_SERVICE_UUID)
+        star2_service.get_characteristic.return_value = star2_characteristic
+        mock_bleak_client.services = [star2_service]
+
+        controller = await create_controller(
+            coordinator,
+            BED_TYPE_OCTO,
+            OCTO_VARIANT_STANDARD,
+            mock_bleak_client,
+            device_name="DA1458x",
+        )
+
+        assert isinstance(controller, OctoController)
+
+    async def test_auto_variant_requires_star2_characteristic(
+        self,
+        hass: HomeAssistant,
+        mock_octo_config_entry,
+        mock_bleak_client: MagicMock,
+    ):
+        """The Star2 service alone should not select Star2 in Auto mode."""
+        coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
+        star2_service = MagicMock(uuid=OCTO_STAR2_SERVICE_UUID)
+        star2_service.get_characteristic.return_value = None
+        mock_bleak_client.services = [star2_service]
+
+        controller = await create_controller(
+            coordinator,
+            BED_TYPE_OCTO,
+            VARIANT_AUTO,
+            mock_bleak_client,
+            device_name="DA1458x",
+        )
+
+        assert isinstance(controller, OctoController)
 
     async def test_standard_variant_uses_octo_controller(
         self,

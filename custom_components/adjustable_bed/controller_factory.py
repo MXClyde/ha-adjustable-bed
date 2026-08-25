@@ -95,6 +95,8 @@ from .const import (
     MANUFACTURER_ID_OKIN,
     NORDIC_UART_SERVICE_UUID,
     NORDIC_UART_WRITE_CHAR_UUID,
+    OCTO_STAR2_CHAR_UUID,
+    OCTO_STAR2_SERVICE_UUID,
     OCTO_VARIANT_STAR2,
     OKIMAT_SERVICE_UUID,
     OKIMAT_WRITE_CHAR_UUID,
@@ -776,16 +778,23 @@ async def create_controller(
     if bed_type == BED_TYPE_OCTO:
         from .beds.octo import OctoController, OctoStar2Controller
 
-        # Use configured variant - no auto-detection
-        # DA1458x devices have Star2 service UUID but use standard Octo protocol,
-        # so auto-detection based on service UUID is unreliable
-        if protocol_variant == OCTO_VARIANT_STAR2:
-            _LOGGER.debug("Using Star2 Octo variant (configured)")
+        use_star2 = protocol_variant == OCTO_VARIANT_STAR2
+        if protocol_variant in (None, VARIANT_AUTO):
+            use_star2 = _gatt_has_characteristic(
+                client,
+                OCTO_STAR2_SERVICE_UUID,
+                OCTO_STAR2_CHAR_UUID,
+            )
+
+        if use_star2:
+            _LOGGER.debug(
+                "Using Star2 Octo variant (%s)",
+                "auto-detected from GATT" if protocol_variant in (None, VARIANT_AUTO) else "configured",
+            )
             return OctoStar2Controller(coordinator)
-        else:
-            # Default to standard Octo for all other cases
-            _LOGGER.debug("Using standard Octo variant")
-            return OctoController(coordinator, pin=octo_pin)
+
+        _LOGGER.debug("Using standard Octo variant")
+        return OctoController(coordinator, pin=octo_pin)
 
     if bed_type == BED_TYPE_JENSEN:
         from .beds.jensen import JensenController
