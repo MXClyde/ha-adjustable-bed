@@ -27,6 +27,7 @@ from custom_components.adjustable_bed.command_scheduler import (
     CommandOutcome,
     DeviceCommandScheduler,
     command_resources,
+    current_command_context,
 )
 from custom_components.adjustable_bed.const import (
     BED_TYPE_LINAK,
@@ -166,6 +167,7 @@ class ScheduledRecordingChild(RecordingChild):
     def __init__(self, side: str, log: list[tuple[str, str]], **kwargs) -> None:
         super().__init__(side, log, **kwargs)
         self.scheduler = DeviceCommandScheduler(side)
+        self.prepared_scopes: list[frozenset[str]] = []
 
     def request_command_cancel(self) -> None:
         self.scheduler.request_cancel()
@@ -176,17 +178,24 @@ class ScheduledRecordingChild(RecordingChild):
         operation,
         *,
         resource=None,
+        resources=None,
         cancel_running=True,
         group_id,
     ) -> CommandHandle:
         async def scheduled(_context: CommandContext) -> None:
             await operation()
 
+        command_scope = (
+            command_resources(*resources)
+            if resources is not None
+            else command_resources(resource or "*")
+        )
+        self.prepared_scopes.append(command_scope)
         return await self.scheduler.enqueue(
             CommandIntent(
                 scheduled,
-                resources=command_resources(resource or "*"),
-                replacement_key=resource or "*",
+                resources=command_scope,
+                replacement_key=(resource or "*") if resources is None else None,
                 cancel_running=cancel_running,
                 group_id=group_id,
             ),
@@ -277,6 +286,62 @@ class TestSideRouting:
         await both_task
         assert log.count((SIDE_LEFT, "command")) == 1
         assert log.count((SIDE_RIGHT, "command")) == 1
+
+    async def test_single_queued_behind_prepared_group_does_not_block_commit(self):
+        log: list[tuple[str, str]] = []
+        left = ScheduledRecordingChild(SIDE_LEFT, log)
+        right = ScheduledRecordingChild(SIDE_RIGHT, log)
+        coord = _make({SIDE_LEFT: left, SIDE_RIGHT: right})
+        blocker_started = asyncio.Event()
+        release_blocker = asyncio.Event()
+        operations: list[str] = []
+
+        async def blocker(_context: CommandContext) -> None:
+            blocker_started.set()
+            await release_blocker.wait()
+
+        async def both_back(child: RecordingChild) -> None:
+            operations.append(f"back:{child.side}")
+
+        async def left_legs(_child: RecordingChild) -> None:
+            operations.append("legs:left")
+
+        blocker_task = asyncio.create_task(
+            right.scheduler.execute(
+                CommandIntent(
+                    blocker,
+                    resources=command_resources("maintenance"),
+                    cancel_running=False,
+                )
+            )
+        )
+        await blocker_started.wait()
+        both_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "back",
+                both_back,
+                side=SIDE_BOTH,
+                resource="motor:back",
+            )
+        )
+        while not right.scheduler.has_pending:
+            await asyncio.sleep(0)
+
+        legs_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "legs",
+                left_legs,
+                side=SIDE_LEFT,
+                resource="motor:legs",
+            )
+        )
+        await asyncio.sleep(0)
+        release_blocker.set()
+
+        await asyncio.wait_for(
+            asyncio.gather(blocker_task, both_task, legs_task), timeout=1
+        )
+        assert operations == ["back:left", "back:right", "legs:left"]
 
     async def test_newer_same_axis_invalidates_prepared_single_side_command(self):
         log: list[tuple[str, str]] = []
@@ -381,6 +446,121 @@ class TestSideRouting:
         await asyncio.gather(blocker_task, back_task, legs_task)
 
         assert operations == ["back", "legs"]
+
+    async def test_active_axis_replacement_bypasses_disjoint_waiting_group(self):
+        log: list[tuple[str, str]] = []
+        left = ScheduledRecordingChild(SIDE_LEFT, log)
+        right = ScheduledRecordingChild(SIDE_RIGHT, log)
+        coord = _make({SIDE_LEFT: left, SIDE_RIGHT: right})
+        legs_started = asyncio.Event()
+        operations: list[str] = []
+
+        async def active_legs(_child: RecordingChild) -> None:
+            context = current_command_context()
+            assert context is not None
+            operations.append("legs:start")
+            legs_started.set()
+            await context.cancel_event.wait()
+            operations.append("legs:cleanup")
+
+        async def both_back(child: RecordingChild) -> None:
+            operations.append(f"back:{child.side}")
+
+        async def stop_legs(_child: RecordingChild) -> None:
+            operations.append("legs:replacement")
+
+        legs_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "legs",
+                active_legs,
+                side=SIDE_RIGHT,
+                resource="motor:legs",
+            )
+        )
+        await legs_started.wait()
+        back_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "back",
+                both_back,
+                side=SIDE_BOTH,
+                resource="motor:back",
+            )
+        )
+        while not right.scheduler.has_pending:
+            await asyncio.sleep(0)
+
+        replacement_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "stop legs",
+                stop_legs,
+                side=SIDE_RIGHT,
+                resource="motor:legs",
+            )
+        )
+        await asyncio.wait_for(replacement_task, timeout=1)
+        await asyncio.gather(legs_task, back_task)
+
+        assert operations[:3] == [
+            "legs:start",
+            "legs:cleanup",
+            "legs:replacement",
+        ]
+        assert operations[3:] == ["back:left", "back:right"]
+
+    async def test_group_enqueue_cancellation_aborts_completed_reservations(self):
+        log: list[tuple[str, str]] = []
+        left = ScheduledRecordingChild(SIDE_LEFT, log)
+        right = ScheduledRecordingChild(SIDE_RIGHT, log)
+        coord = _make({SIDE_LEFT: left, SIDE_RIGHT: right})
+        right_prepare_started = asyncio.Event()
+        original_prepare = right.async_prepare_command_operation
+
+        async def delayed_prepare(*args, **kwargs):
+            right_prepare_started.set()
+            await asyncio.Event().wait()
+            return await original_prepare(*args, **kwargs)
+
+        right.async_prepare_command_operation = delayed_prepare  # type: ignore[method-assign]
+        group_task = asyncio.create_task(
+            coord.async_execute_controller_command(
+                _noop,
+                side=SIDE_BOTH,
+                resource="motor:back",
+            )
+        )
+        await right_prepare_started.wait()
+        await asyncio.sleep(0)
+        group_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await group_task
+
+        ran = asyncio.Event()
+
+        async def later(_context: CommandContext) -> None:
+            ran.set()
+
+        await asyncio.wait_for(
+            left.scheduler.execute(CommandIntent(later, cancel_running=False)),
+            timeout=1,
+        )
+        assert ran.is_set()
+
+    async def test_linked_group_reserves_every_declared_resource(self):
+        log: list[tuple[str, str]] = []
+        left = ScheduledRecordingChild(SIDE_LEFT, log)
+        right = ScheduledRecordingChild(SIDE_RIGHT, log)
+        coord = _make({SIDE_LEFT: left, SIDE_RIGHT: right})
+        resources = {"motor:back", "motor:legs"}
+
+        await coord.async_run_child_operation(
+            "set positions",
+            _noop,
+            side=SIDE_BOTH,
+            resources=resources,
+        )
+
+        assert left.prepared_scopes == [frozenset(resources)]
+        assert right.prepared_scopes == [frozenset(resources)]
 
     async def test_linked_group_cleanup_finishes_before_replacement_starts(self):
         log: list[tuple[str, str]] = []

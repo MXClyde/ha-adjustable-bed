@@ -61,6 +61,54 @@ async def test_different_resources_queue_without_cancelling_active() -> None:
     assert events == ["back:start", "back:end", "legs"]
 
 
+async def test_active_resource_replacement_runs_before_disjoint_prepared_group() -> None:
+    scheduler = DeviceCommandScheduler("replacement-priority")
+    active_started = asyncio.Event()
+    events: list[str] = []
+
+    async def active(context) -> None:
+        events.append("legs:start")
+        active_started.set()
+        await context.cancel_event.wait()
+        events.append("legs:cleanup")
+
+    async def group(_context) -> None:
+        events.append("back:group")
+
+    async def replacement(_context) -> None:
+        events.append("legs:replacement")
+
+    active_task = asyncio.create_task(
+        scheduler.execute(
+            CommandIntent(active, resources=command_resources("motor:legs"))
+        )
+    )
+    await active_started.wait()
+    group_handle = await scheduler.enqueue(
+        CommandIntent(
+            group,
+            resources=command_resources("motor:back"),
+            cancel_running=False,
+            group_id="back-group",
+        ),
+        prepared=True,
+    )
+    replacement_task = asyncio.create_task(
+        scheduler.execute(
+            CommandIntent(
+                replacement,
+                resources=command_resources("motor:legs"),
+            )
+        )
+    )
+
+    await asyncio.wait_for(replacement_task, timeout=1)
+    assert events == ["legs:start", "legs:cleanup", "legs:replacement"]
+
+    await scheduler.cancel(group_handle)
+    await active_task
+
+
 async def test_same_resource_replaces_only_after_active_cleanup() -> None:
     scheduler = DeviceCommandScheduler("replace")
     first_started = asyncio.Event()

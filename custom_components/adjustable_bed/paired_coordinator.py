@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Callable, Collection, Coroutine, Mapping
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -27,7 +27,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 
-from .command_scheduler import CommandHandle
+from .command_scheduler import (
+    CommandHandle,
+    PreparedCommandInvalidated,
+    command_resources,
+)
 from .const import (
     BED_TYPE_OKIN_CB24,
     BED_TYPE_SLEEP_NUMBER,
@@ -122,9 +126,10 @@ class PairedBedCoordinator:
         # Orders connection switching in sequential mode; unused when concurrent.
         self._pair_command_lock = asyncio.Lock()
         # Concurrent pairs use one parent lane per physical side. Independent
-        # sides overlap, while a linked both-side command owns both lanes until
-        # its failure/STOP cleanup is complete.
+        # sides overlap. Linked groups serialize with each other but release the
+        # side lanes while waiting for both physical schedulers to become ready.
         self._pair_side_locks = {side: asyncio.Lock() for side in PAIR_SIDES}
+        self._pair_group_lock = asyncio.Lock()
         # Preemption: STOP bumps this so a movement still queued on the lock is
         # dropped instead of starting after the stop; _active_children are the
         # sides executing under the lock, so a cancel_running command can cancel
@@ -218,34 +223,40 @@ class PairedBedCoordinator:
             return [(s, self._children[s]) for s in PAIR_SIDES if s in self._children]
         return [(side, self._children[side])]
 
-    def _bump_pair_cancel_generation(self, side: str, resource: str | None) -> None:
+    def _bump_pair_cancel_generation(
+        self, side: str, resources: Collection[str]
+    ) -> None:
         """Invalidate queued commands whose resources overlap a newer request."""
         self._pair_cancel_counter[side] += 1
-        if resource is None or resource == "*":
+        if "*" in resources:
             self._pair_global_cancel_counter[side] += 1
             return
         resource_counters = self._pair_resource_cancel_counter[side]
-        resource_counters[resource] = resource_counters.get(resource, 0) + 1
+        for resource in resources:
+            resource_counters[resource] = resource_counters.get(resource, 0) + 1
 
     def _pair_cancel_generation(
-        self, side: str, resource: str | None
+        self, side: str, resources: Collection[str]
     ) -> tuple[int, ...]:
-        """Snapshot cancellation state relevant to one queued resource."""
-        if resource is None or resource == "*":
+        """Snapshot cancellation state relevant to queued resources."""
+        if "*" in resources:
             return (self._pair_cancel_counter[side],)
         return (
             self._pair_global_cancel_counter[side],
-            self._pair_resource_cancel_counter[side].get(resource, 0),
+            *(
+                self._pair_resource_cancel_counter[side].get(resource, 0)
+                for resource in sorted(resources)
+            ),
         )
 
     def _pair_command_was_cancelled(
         self,
         side: str,
-        resource: str | None,
+        resources: Collection[str],
         entry_cancel: Mapping[str, tuple[int, ...]],
     ) -> bool:
         """Return whether a newer overlapping command invalidated this request."""
-        return self._pair_cancel_generation(side, resource) != entry_cancel[side]
+        return self._pair_cancel_generation(side, resources) != entry_cancel[side]
 
     # ------------------------------------------------------------------ commands
     async def async_execute_controller_command(
@@ -311,14 +322,18 @@ class PairedBedCoordinator:
         side: str = SIDE_BOTH,
         cancel_running: bool = True,
         resource: str | None = None,
+        resources: Collection[str] | None = None,
     ) -> None:
         """Run a child-specific operation with the paired failure contract."""
+        if resource is not None and resources is not None:
+            raise ValueError("Pass resource or resources, not both")
         await self._run(
             action,
             side,
             operation,
             cancel_running=cancel_running,
             resource=resource,
+            resources=resources,
         )
 
     async def _run(
@@ -329,7 +344,15 @@ class PairedBedCoordinator:
         *,
         cancel_running: bool = True,
         resource: str | None = None,
+        resources: Collection[str] | None = None,
     ) -> None:
+        if resource is not None and resources is not None:
+            raise ValueError("Pass resource or resources, not both")
+        command_scope = (
+            command_resources(*resources)
+            if resources is not None
+            else command_resources(resource or "*")
+        )
         targets = self._targets_for(side)
         target_sides = [target_side for target_side, _ in targets]
         sequential = self._connection_mode == PAIR_CONNECTION_MODE_SEQUENTIAL
@@ -342,7 +365,7 @@ class PairedBedCoordinator:
         # right movement (and vice versa).
         if cancel_running:
             for target_side in target_sides:
-                self._bump_pair_cancel_generation(target_side, resource)
+                self._bump_pair_cancel_generation(target_side, command_scope)
             target_children = {child for _, child in targets}
             # If this command overlaps the in-flight one, preempt the WHOLE
             # in-flight command (all its children), not just the shared side: a
@@ -355,8 +378,8 @@ class PairedBedCoordinator:
             active_group_overlaps = (
                 not self._active_group_resources
                 or "*" in self._active_group_resources
-                or resource is None
-                or resource in self._active_group_resources
+                or "*" in command_scope
+                or not command_scope.isdisjoint(self._active_group_resources)
             )
             if any(child in target_children for child in self._active_children) and (
                 sequential or active_group_overlaps
@@ -364,7 +387,7 @@ class PairedBedCoordinator:
                 for child in list(self._active_children):
                     child.request_command_cancel()
         entry_cancel = {
-            s: self._pair_cancel_generation(s, resource) for s in target_sides
+            s: self._pair_cancel_generation(s, command_scope) for s in target_sides
         }
 
         if not sequential:
@@ -376,38 +399,32 @@ class PairedBedCoordinator:
                     child,
                     op,
                     cancel_running=cancel_running,
-                    resource=resource,
+                    resources=command_scope,
                     entry_cancel=entry_cancel,
                 )
                 return
 
-            # Acquire only the targeted side lanes, in stable order. This keeps
-            # left-only and right-only work independent while ensuring a newer
-            # command that cancelled a linked group waits for that group's STOP
-            # cleanup before it can reach either child scheduler.
-            async with contextlib.AsyncExitStack() as stack:
-                target_by_side = dict(targets)
-                for target_side in PAIR_SIDES:
-                    if target_side in target_by_side:
-                        await stack.enter_async_context(
-                            self._pair_side_locks[target_side]
-                        )
+            # Only one linked group may coordinate the two device schedulers at
+            # a time. The group itself briefly takes the side lanes for enqueue
+            # and takes them again for commit/execution, but releases them while
+            # waiting for READY so a command for the active motor can preempt.
+            async with self._pair_group_lock:
                 if any(
-                    self._pair_command_was_cancelled(s, resource, entry_cancel)
+                    self._pair_command_was_cancelled(s, command_scope, entry_cancel)
                     for s in target_sides
                 ):
                     return
 
                 active_children = {child for _, child in targets}
                 self._active_children = active_children
-                self._active_group_resources = frozenset({resource or "*"})
+                self._active_group_resources = command_scope
                 try:
                     await self._run_both_concurrent(
                         action,
                         targets,
                         op,
                         cancel_running=cancel_running,
-                        resource=resource,
+                        resources=command_scope,
                     )
                 finally:
                     self._active_children = set()
@@ -421,7 +438,7 @@ class PairedBedCoordinator:
             # waited — drop this now-stale movement instead of starting it right
             # after the safety stop.
             if any(
-                self._pair_command_was_cancelled(s, resource, entry_cancel)
+                self._pair_command_was_cancelled(s, command_scope, entry_cancel)
                 for s in target_sides
             ):
                 return
@@ -430,7 +447,7 @@ class PairedBedCoordinator:
             try:
                 try:
                     await self._run_both_sequential(
-                        action, targets, op, entry_cancel, resource
+                        action, targets, op, entry_cancel, command_scope
                     )
                 except asyncio.CancelledError:
                     # The parent command was cancelled (service cancellation or
@@ -447,6 +464,18 @@ class PairedBedCoordinator:
             finally:
                 self._active_children = set()
 
+    @contextlib.asynccontextmanager
+    async def _locked_target_sides(
+        self, targets: Collection[tuple[str, AdjustableBedCoordinator]]
+    ) -> AsyncIterator[None]:
+        """Lock selected physical side lanes in stable order."""
+        target_by_side = dict(targets)
+        async with contextlib.AsyncExitStack() as stack:
+            for side in PAIR_SIDES:
+                if side in target_by_side:
+                    await stack.enter_async_context(self._pair_side_locks[side])
+            yield
+
     async def _run_single_concurrent(
         self,
         action: str,
@@ -455,7 +484,7 @@ class PairedBedCoordinator:
         op: Callable[[AdjustableBedCoordinator], Coroutine[Any, Any, None]],
         *,
         cancel_running: bool,
-        resource: str | None,
+        resources: frozenset[str],
         entry_cancel: Mapping[str, tuple[int, ...]],
     ) -> None:
         """Admit one side without holding pair metadata across its operation."""
@@ -464,26 +493,42 @@ class PairedBedCoordinator:
             # Compatibility for coordinator doubles. Separate side locks still
             # allow left and right to overlap while serializing one fake child.
             async with self._pair_side_locks[side]:
-                if self._pair_command_was_cancelled(side, resource, entry_cancel):
+                if self._pair_command_was_cancelled(side, resources, entry_cancel):
                     return
                 await op(child)
             return
 
         handle: CommandHandle | None = None
         async with self._pair_side_locks[side]:
-            if self._pair_command_was_cancelled(side, resource, entry_cancel):
+            if self._pair_command_was_cancelled(side, resources, entry_cancel):
                 return
             handle = await child.async_prepare_command_operation(
                 lambda: op(child),
-                resource=resource,
+                resources=resources,
                 cancel_running=cancel_running,
                 group_id=uuid4().hex,
             )
+        try:
+            await child.async_wait_prepared_command(handle)
+        except PreparedCommandInvalidated:
+            await child.async_abort_prepared_command(handle)
+            return
+        except BaseException:
+            await child.async_abort_prepared_command(handle)
+            raise
+
+        # Waiting behind an earlier prepared group must not retain this side
+        # lane, because that group needs the lane to commit. Reacquire only for
+        # the synchronous validation/commit transition.
+        async with self._pair_side_locks[side]:
             try:
                 await child.async_wait_prepared_command(handle)
-                if self._pair_command_was_cancelled(side, resource, entry_cancel):
+                if self._pair_command_was_cancelled(side, resources, entry_cancel):
                     await child.async_abort_prepared_command(handle)
                     return
+            except PreparedCommandInvalidated:
+                await child.async_abort_prepared_command(handle)
+                return
             except BaseException:
                 await child.async_abort_prepared_command(handle)
                 raise
@@ -491,6 +536,11 @@ class PairedBedCoordinator:
 
         try:
             await child.async_wait_prepared_command_result(handle)
+        except PreparedCommandInvalidated:
+            # Replacement and STOP are successful cancellation outcomes for an
+            # ordinary side command. Operation failures still arrive as their
+            # original exception and continue to propagate.
+            return
         except asyncio.CancelledError:
             await child.async_abort_prepared_command(handle)
             raise
@@ -502,7 +552,7 @@ class PairedBedCoordinator:
         op: Callable[[AdjustableBedCoordinator], Coroutine[Any, Any, None]],
         *,
         cancel_running: bool,
-        resource: str | None,
+        resources: frozenset[str],
     ) -> None:
         """Prepare every physical scheduler, then commit the linked command."""
         if not all(
@@ -511,38 +561,65 @@ class PairedBedCoordinator:
         ):
             # Compatibility for third-party/test coordinator doubles. Production
             # children always expose the scheduler reservation API.
-            await self._run_both_concurrent_legacy(action, targets, op)
+            async with self._locked_target_sides(targets):
+                await self._run_both_concurrent_legacy(action, targets, op)
             return
 
         group_id = uuid4().hex
+        child_by_side = dict(targets)
         prepared: dict[str, tuple[AdjustableBedCoordinator, CommandHandle]] = {}
         committed = False
         result_tasks: dict[str, asyncio.Task[None]] = {}
-        try:
-            enqueue_tasks = {
-                side: asyncio.create_task(
-                    child.async_prepare_command_operation(
-                        lambda child=child: op(child),
-                        resource=resource,
-                        cancel_running=cancel_running,
-                        group_id=group_id,
-                    )
-                )
-                for side, child in targets
-            }
-            enqueue_results = await asyncio.gather(
-                *enqueue_tasks.values(), return_exceptions=True
-            )
-            enqueue_errors: dict[str, BaseException] = {}
-            for side, result in zip(enqueue_tasks, enqueue_results, strict=True):
-                if isinstance(result, BaseException):
-                    enqueue_errors[side] = result
-                else:
-                    child = dict(targets)[side]
-                    prepared[side] = (child, result)
-            if enqueue_errors:
-                raise PairedSideError(action, enqueue_errors)
 
+        def collect_enqueues(
+            enqueue_tasks: Mapping[str, asyncio.Task[CommandHandle]],
+        ) -> dict[str, BaseException]:
+            """Recover every completed reservation, including during cancellation."""
+            errors: dict[str, BaseException] = {}
+            for side, task in enqueue_tasks.items():
+                if not task.done() or task.cancelled():
+                    continue
+                try:
+                    handle = task.result()
+                except BaseException as err:
+                    errors[side] = err
+                else:
+                    prepared[side] = (child_by_side[side], handle)
+            return errors
+
+        try:
+            async with self._locked_target_sides(targets):
+                enqueue_tasks = {
+                    side: asyncio.create_task(
+                        child.async_prepare_command_operation(
+                            lambda child=child: op(child),
+                            resources=resources,
+                            cancel_running=cancel_running,
+                            group_id=group_id,
+                        )
+                    )
+                    for side, child in targets
+                }
+                try:
+                    await asyncio.gather(
+                        *enqueue_tasks.values(), return_exceptions=True
+                    )
+                except asyncio.CancelledError:
+                    for task in enqueue_tasks.values():
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(
+                        *enqueue_tasks.values(), return_exceptions=True
+                    )
+                    collect_enqueues(enqueue_tasks)
+                    raise
+                enqueue_errors = collect_enqueues(enqueue_tasks)
+                if enqueue_errors:
+                    raise PairedSideError(action, enqueue_errors)
+
+            # Do not hold the side lanes while an older operation is ahead of a
+            # group reservation. A newer replacement for that active resource
+            # can now enter its child scheduler and run before this disjoint group.
             ready_tasks = {
                 side: asyncio.create_task(child.async_wait_prepared_command(handle))
                 for side, (child, handle) in prepared.items()
@@ -558,37 +635,59 @@ class PairedBedCoordinator:
             if ready_errors:
                 raise PairedSideError(action, ready_errors)
 
-            # No controller coroutine has run before this point. Commit every
-            # ready handle synchronously so neither side can observe a partial
-            # group caused by another await between releases.
-            for child, handle in prepared.values():
-                child.commit_prepared_command(handle)
-            committed = True
+            # Reacquire both lanes and revalidate reservations. From commit until
+            # result/STOP cleanup completes, overlapping commands wait here.
+            async with self._locked_target_sides(targets):
+                revalidation_errors: dict[str, BaseException] = {}
+                for side, (child, handle) in prepared.items():
+                    try:
+                        await child.async_wait_prepared_command(handle)
+                    except Exception as err:  # noqa: BLE001 - collect both sides
+                        revalidation_errors[side] = err
+                if revalidation_errors:
+                    raise PairedSideError(action, revalidation_errors)
 
-            result_tasks = {
-                side: asyncio.create_task(
-                    child.async_wait_prepared_command_result(handle)
-                )
-                for side, (child, handle) in prepared.items()
-            }
-            await asyncio.wait(
-                result_tasks.values(), return_when=asyncio.FIRST_EXCEPTION
-            )
-            errors: dict[str, BaseException] = {}
-            for side, task in result_tasks.items():
-                if task.done() and not task.cancelled():
-                    error = task.exception()
-                    if error is not None:
-                        errors[side] = error
-            if errors:
-                stop_errors = await self._stop_children(targets)
-                raise PairedSideError(action, _merge_stop_errors(errors, stop_errors))
+                # No controller coroutine has run before this point. Commit every
+                # ready handle synchronously so neither side can observe a partial
+                # group caused by another await between releases.
+                for child, handle in prepared.values():
+                    child.commit_prepared_command(handle)
+                committed = True
 
-            await asyncio.gather(*result_tasks.values())
-        except asyncio.CancelledError:
-            if committed:
-                await self._stop_children(targets)
-            raise
+                result_tasks = {
+                    side: asyncio.create_task(
+                        child.async_wait_prepared_command_result(handle)
+                    )
+                    for side, (child, handle) in prepared.items()
+                }
+                try:
+                    await asyncio.wait(
+                        result_tasks.values(), return_when=asyncio.FIRST_EXCEPTION
+                    )
+                    errors: dict[str, BaseException] = {}
+                    for side, task in result_tasks.items():
+                        if task.done() and not task.cancelled():
+                            error = task.exception()
+                            if error is not None:
+                                errors[side] = error
+                    if errors:
+                        stop_errors = await self._stop_children(targets)
+                        raise PairedSideError(
+                            action, _merge_stop_errors(errors, stop_errors)
+                        )
+
+                    await asyncio.gather(*result_tasks.values())
+                except asyncio.CancelledError:
+                    await self._stop_children(targets)
+                    raise
+                finally:
+                    for task in result_tasks.values():
+                        if not task.done():
+                            task.cancel()
+                    if result_tasks:
+                        await asyncio.gather(
+                            *result_tasks.values(), return_exceptions=True
+                        )
         finally:
             if not committed:
                 await asyncio.gather(
@@ -598,11 +697,6 @@ class PairedBedCoordinator:
                     ),
                     return_exceptions=True,
                 )
-            for task in result_tasks.values():
-                if not task.done():
-                    task.cancel()
-            if result_tasks:
-                await asyncio.gather(*result_tasks.values(), return_exceptions=True)
 
     async def _run_both_concurrent_legacy(
         self,
@@ -651,7 +745,7 @@ class PairedBedCoordinator:
         targets: list[tuple[str, AdjustableBedCoordinator]],
         op: Callable[[AdjustableBedCoordinator], Coroutine[Any, Any, None]],
         entry_cancel: Mapping[str, tuple[int, ...]],
-        resource: str | None,
+        resources: frozenset[str],
     ) -> None:
         """Run each side in turn holding only ONE BLE link at a time: connect the
         side, run its op, then disconnect it before moving to the next.
@@ -675,7 +769,7 @@ class PairedBedCoordinator:
             # cycle — checking only the side about to run would let a later side
             # connect after an earlier side of a both-cycle was already cancelled.
             return any(
-                self._pair_command_was_cancelled(s, resource, entry_cancel)
+                self._pair_command_was_cancelled(s, resources, entry_cancel)
                 for s, _ in targets
             )
 
@@ -791,7 +885,7 @@ class PairedBedCoordinator:
         # Bump each targeted side's counter so a movement still queued on the pair
         # lock for that side drops instead of starting right after this safety stop.
         for target_side, _ in targets:
-            self._bump_pair_cancel_generation(target_side, None)
+            self._bump_pair_cancel_generation(target_side, command_resources("*"))
         errors = await self._stop_children(targets)
         if errors:
             raise PairedSideError("stop", errors)
@@ -1180,10 +1274,10 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
         op: Callable[[AdjustableBedCoordinator], Coroutine[Any, Any, None]],
         *,
         cancel_running: bool,
-        resource: str | None,
+        resources: frozenset[str],
     ) -> None:
         """Serialize non-native both over the one physical command lock."""
-        del cancel_running, resource
+        del cancel_running, resources
         try:
             if self._single_native_both and len({child for _, child in targets}) == 1:
                 await op(targets[0][1])

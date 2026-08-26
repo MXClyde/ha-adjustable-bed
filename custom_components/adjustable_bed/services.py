@@ -844,10 +844,16 @@ async def _execute_position_requests(
     try:
         for coordinator, side in targets:
             if isinstance(coordinator, PairedBedCoordinator):
+                resources = {
+                    f"motor:{plans[(_plan_key(target), motor)]['position_key']}"
+                    for target in _command_targets(coordinator, side)
+                    for motor, _ in requests
+                }
                 await coordinator.async_run_child_operation(
                     "set positions",
                     seek_all,
                     side=side,
+                    resources=resources,
                 )
             else:
                 await seek_all(coordinator)
@@ -989,20 +995,15 @@ async def handle_timed_move(call: ServiceCall) -> None:
     try:
         for coordinator, side in targets:
             if isinstance(coordinator, PairedBedCoordinator):
-                position_keys = {
-                    plans[_plan_key(target)][3]
+                resources = {
+                    f"motor:{plans[_plan_key(target)][3]}"
                     for target in _command_targets(coordinator, side)
                 }
-                resource = (
-                    f"motor:{next(iter(position_keys))}"
-                    if len(position_keys) == 1
-                    else None
-                )
                 await coordinator.async_run_child_operation(
                     "timed move",
                     move,
                     side=side,
-                    resource=resource,
+                    resources=resources,
                 )
             else:
                 await move(coordinator)

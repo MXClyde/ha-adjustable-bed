@@ -4591,6 +4591,7 @@ class AdjustableBedCoordinator:
         operation: Callable[[], Awaitable[None]],
         *,
         resource: str | None,
+        resources: Collection[str] | None = None,
         kind: CommandKind,
         cancel_running: bool,
         pulse_count: int | None = None,
@@ -4598,7 +4599,11 @@ class AdjustableBedCoordinator:
         group_id: str | None = None,
     ) -> CommandIntent:
         """Build one device intent while preserving legacy cancellation signals."""
-        resources = command_resources(resource or "*")
+        command_scope = (
+            command_resources(*resources)
+            if resources is not None
+            else command_resources(resource or "*")
+        )
         if cancel_running:
             # Keep preemptible non-scheduler work (queries and legacy direct
             # writes) responsive. Scheduler-owned operations use their private
@@ -4611,9 +4616,9 @@ class AdjustableBedCoordinator:
 
         return CommandIntent(
             scheduled,
-            resources=resources,
+            resources=command_scope,
             kind=kind,
-            replacement_key=resource or "*",
+            replacement_key=(resource or "*") if resources is None else None,
             cancel_running=cancel_running,
             group_id=group_id,
             pulse_count=pulse_count,
@@ -4625,6 +4630,7 @@ class AdjustableBedCoordinator:
         operation: Callable[[], Awaitable[None]],
         *,
         resource: str | None = None,
+        resources: Collection[str] | None = None,
         kind: CommandKind = CommandKind.GROUP,
         cancel_running: bool = True,
         group_id: str,
@@ -4633,6 +4639,7 @@ class AdjustableBedCoordinator:
         intent = self._build_command_intent(
             operation,
             resource=resource,
+            resources=resources,
             kind=kind,
             cancel_running=cancel_running,
             group_id=group_id,

@@ -227,9 +227,17 @@ class DeviceCommandScheduler:
         async with self._lock:
             if self._closed:
                 raise RuntimeError(f"Command scheduler for {self._name} is shut down")
+            replaces_active = False
             if intent.cancel_running:
-                self._replace_conflicts_locked(handle)
-            self._queue.append(handle)
+                replaces_active = self._replace_conflicts_locked(handle)
+            # A replacement for the operation currently owning the link must be
+            # next after that operation's cleanup. Otherwise an older,
+            # unrelated prepared group can sit in front of a motor STOP/reverse
+            # and prevent the replacement from ever reaching the active motor.
+            if replaces_active:
+                self._queue.appendleft(handle)
+            else:
+                self._queue.append(handle)
             if self._worker is None or self._worker.done():
                 self._worker = asyncio.create_task(
                     self._run(), name=f"adjustable_bed_commands_{self._name}"
@@ -312,9 +320,12 @@ class DeviceCommandScheduler:
             with contextlib.suppress(asyncio.CancelledError):
                 await worker
 
-    def _replace_conflicts_locked(self, incoming: CommandHandle) -> None:
+    def _replace_conflicts_locked(self, incoming: CommandHandle) -> bool:
+        """Cancel conflicts and report whether the active handle was replaced."""
         active = self._active
+        replaces_active = False
         if active is not None and self._handles_conflict(active, incoming):
+            replaces_active = True
             active.context.cancel_reason = CommandOutcome.REPLACED
             active.context.cancel_event.set()
 
@@ -325,6 +336,7 @@ class DeviceCommandScheduler:
             queued.context.cancel_reason = CommandOutcome.REPLACED
             queued.context.cancel_event.set()
             self._finish_locked(queued, CommandOutcome.REPLACED)
+        return replaces_active
 
     @staticmethod
     def _handles_conflict(existing: CommandHandle, incoming: CommandHandle) -> bool:
