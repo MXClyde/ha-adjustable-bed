@@ -621,6 +621,7 @@ class TestOctoCommands:
         hass: HomeAssistant,
         mock_octo_star2_config_entry,
         mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
     ):
         """Star2 movement writes should appear in command traces."""
         coordinator = AdjustableBedCoordinator(hass, mock_octo_star2_config_entry)
@@ -634,8 +635,13 @@ class TestOctoCommands:
         trace = coordinator.command_trace[0]
         assert trace["payload"]["hex"] == controller.CMD_HEAD_UP.hex()
         assert trace["characteristic_uuid"] == OCTO_STAR2_CHAR_UUID
-        assert trace["write_mode"] == "without_response"
+        assert trace["write_mode"] == "with_response"
         assert trace["operation_name"] == "command"
+        mock_bleak_client.write_gatt_char.assert_called_once_with(
+            OCTO_STAR2_CHAR_UUID,
+            controller.CMD_HEAD_UP,
+            response=True,
+        )
 
     async def test_move_with_stop_sends_stop_on_error(
         self,
