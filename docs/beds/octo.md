@@ -406,6 +406,7 @@ To configure PIN, enter your 4-digit PIN during setup or in the integration opti
 
 **Service UUID:** `0000aa5c-0000-1000-8000-00805f9b34fb`
 **Write Characteristic:** `00005a55-0000-1000-8000-00805f9b34fb`
+**Write Type:** Write request (with response)
 **Format:** Fixed 15-byte commands starting with `0x68`, ending with `0x16`
 
 #### Motor Commands

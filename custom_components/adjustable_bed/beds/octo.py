@@ -1470,7 +1470,7 @@ class OctoStar2Controller(BedController):
     - Packet format: starts with 0x68, ends with 0x16
     """
 
-    _write_with_response = False
+    _write_with_response = True
 
     # Star2 fixed command bytes
     # Protocol reverse-engineered by goedh452
