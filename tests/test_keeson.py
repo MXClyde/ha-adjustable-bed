@@ -656,6 +656,113 @@ class TestKeesonLights:
 class TestKeesonMassage:
     """Test Keeson massage commands."""
 
+    @pytest.mark.parametrize(
+        ("method_name", "expected_payload"),
+        [
+            ("massage_wave_next", "e5fe1600000010f6"),
+            ("massage_wave_previous", "e5fe160000000402"),
+        ],
+    )
+    async def test_base_wave_direction_commands(
+        self,
+        hass: HomeAssistant,
+        mock_keeson_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        method_name: str,
+        expected_payload: str,
+    ):
+        """Base wave actions should send the hardware-confirmed literal frames."""
+        coordinator = AdjustableBedCoordinator(hass, mock_keeson_config_entry)
+        await coordinator.async_connect()
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await getattr(coordinator.controller, method_name)()
+
+        mock_bleak_client.write_gatt_char.assert_awaited_once_with(
+            KEESON_BASE_WRITE_CHAR_UUID,
+            bytes.fromhex(expected_payload),
+            response=True,
+        )
+
+    @pytest.mark.parametrize(
+        ("level", "expected_payload"),
+        [
+            (1, "e5fe1600000800fe"),
+            (2, "e5fe1600001000f6"),
+            (3, "e5fe1600002000e6"),
+        ],
+    )
+    async def test_base_direct_intensity_commands(
+        self,
+        hass: HomeAssistant,
+        mock_keeson_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        level: int,
+        expected_payload: str,
+    ):
+        """Base intensity actions should send the hardware-confirmed literal frames."""
+        coordinator = AdjustableBedCoordinator(hass, mock_keeson_config_entry)
+        await coordinator.async_connect()
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await coordinator.controller.set_massage_intensity_preset(level)
+
+        mock_bleak_client.write_gatt_char.assert_awaited_once_with(
+            KEESON_BASE_WRITE_CHAR_UUID,
+            bytes.fromhex(expected_payload),
+            response=True,
+        )
+
+    @pytest.mark.parametrize(
+        ("variant", "supported"),
+        [
+            ("base", True),
+            ("json", False),
+            ("ksbt", False),
+            ("ksbt_cr", False),
+            ("ksbt04c", False),
+            ("sleep_harmony", False),
+            ("ergomotion", False),
+            ("okin", False),
+            ("serta", False),
+            ("sino", False),
+            ("purple", False),
+        ],
+    )
+    def test_direct_massage_controls_are_base_only(
+        self,
+        hass: HomeAssistant,
+        mock_keeson_config_entry,
+        variant: str,
+        supported: bool,
+    ):
+        """Variant-specific Base meanings must not leak into other profiles."""
+        coordinator = AdjustableBedCoordinator(hass, mock_keeson_config_entry)
+        controller = KeesonController(coordinator, variant=variant)
+
+        assert controller.supports_massage_wave_direction_control is supported
+        assert controller.supports_massage_intensity_preset_control is supported
+        assert controller.supports_massage_mode_step_control is not supported
+
+    async def test_base_intensity_rejects_unknown_level(
+        self,
+        hass: HomeAssistant,
+        mock_keeson_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """Only the three hardware-confirmed intensity keys should be accepted."""
+        coordinator = AdjustableBedCoordinator(hass, mock_keeson_config_entry)
+        await coordinator.async_connect()
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        with pytest.raises(ValueError, match="Unsupported massage intensity preset: 4"):
+            await coordinator.controller.set_massage_intensity_preset(4)
+
+        mock_bleak_client.write_gatt_char.assert_not_awaited()
+
     async def test_massage_toggle(
         self,
         hass: HomeAssistant,

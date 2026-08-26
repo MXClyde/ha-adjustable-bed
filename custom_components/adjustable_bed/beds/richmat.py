@@ -25,6 +25,7 @@ from ..const import (
     RICHMAT_PROTOCOL_SINGLE,
     RICHMAT_PROTOCOL_WILINKE,
     RICHMAT_REMOTE_AUTO,
+    RICHMAT_REMOTE_LP_QRRM,
     RICHMAT_WILINKE_CHAR_UUIDS,
     RICHMAT_WILINKE_SERVICE_UUIDS,
     RICHMAT_WILINKE_STOP_COMPAT_REMOTE_CODES,
@@ -450,6 +451,13 @@ class RichmatController(BedController):
         if self._features & RichmatFeatures.PRESET_MEMORY_3:
             count += 1
         return count
+
+    @property
+    def memory_slot_names(self) -> tuple[str | None, ...]:
+        """Return model-specific names for Richmat memory slots."""
+        if self._remote_code.lower() == RICHMAT_REMOTE_LP_QRRM.lower():
+            return ("Custom 1", "Custom 2")
+        return ()
 
     @property
     def supports_memory_programming(self) -> bool:

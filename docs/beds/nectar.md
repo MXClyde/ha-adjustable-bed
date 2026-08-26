@@ -12,9 +12,11 @@
 
 Some newer Nectar Motion bases advertise only as `OKIN-XXXXXX` and use the
 [Okin CST](okin-cst.md) 14-byte protocol instead of this 7-byte protocol.
-If diagnostics show the `62741523-...` OKIN service, `90311623-...` CSS service,
-and Nordic DFU service `00001530-...`, choose **Okin CST / Nectar Motion** in
-manual setup.
+The `62741523-...` OKIN service, `90311623-...` CSS service, and Nordic DFU
+service `00001530-...` are not sufficient by themselves to identify CST because
+RF ECO BT stair actuators share that GATT inventory. Choose **Okin CST / Nectar
+Motion** only when the known base or app identity also corroborates CST. Device
+Information model `MEGAMAT MBZ` identifies RF ECO BT instead.
 
 ## Apps
 
@@ -86,8 +88,9 @@ Detected by device name containing: `nectar` (case-insensitive) AND Okin service
 Some Nectar bases advertise only as `OKIN-XXXXXX`. Those names are ambiguous
 with classic Okimat, 7-byte Nectar, and newer CST controllers, so setup prompts
 for the Okin-family protocol. Choose `Nectar` only for the 7-byte protocol.
-Choose `Okin CST / Nectar Motion` when diagnostics show the CSS service
-`90311623-...` plus Nordic DFU service `00001530-...`.
+Do not choose `Okin CST / Nectar Motion` from CSS plus Nordic DFU alone. Choose
+it only when a known Nectar Motion base or app identity corroborates CST; Device
+Information model `MEGAMAT MBZ` identifies RF ECO BT instead.
 
 Or manually configured with bed type: `nectar`
 

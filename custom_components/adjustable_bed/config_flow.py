@@ -518,6 +518,8 @@ def _motor_count_options(
     """Return motor counts supported by the selected protocol."""
     if bed_type == BED_TYPE_OCTO and protocol_variant != OCTO_VARIANT_STAR2:
         return [1, 2, 3, 4]
+    if bed_type == BED_TYPE_OKIN_CST:
+        return [3]
     return [2, 3, 4]
 
 
@@ -555,6 +557,8 @@ def _default_motor_count(
         and device_name.strip().lower().startswith("rtv")
     ):
         return 1
+    if bed_type == BED_TYPE_OKIN_CST:
+        return 3
     return DEFAULT_MOTOR_COUNT
 
 
@@ -4894,12 +4898,16 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
 
         # Add remote selection for Richmat beds
         if bed_type == BED_TYPE_RICHMAT:
+            current_remote = current_data.get(CONF_RICHMAT_REMOTE, RICHMAT_REMOTE_AUTO)
+            remote_options = dict(RICHMAT_REMOTES)
+            if current_remote not in remote_options:
+                remote_options[current_remote] = f"{current_remote.upper()} (current detected code)"
             schema_dict[
                 vol.Optional(
                     CONF_RICHMAT_REMOTE,
-                    default=current_data.get(CONF_RICHMAT_REMOTE, RICHMAT_REMOTE_AUTO),
+                    default=current_remote,
                 )
-            ] = vol.In(RICHMAT_REMOTES)
+            ] = vol.In(remote_options)
 
         if bed_type in MALOUF_BED_TYPES:
             schema_dict[

@@ -24,24 +24,10 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.exc import BleakError
 
-from ..const import (
-    OKIMAT_WRITE_CHAR_UUID,
-    OKIN_CST_POSITION_AXES,
-    OKIN_FOOT_MAX_ANGLE,
-    OKIN_FOOT_MAX_RAW,
-    OKIN_HEAD_MAX_ANGLE,
-    OKIN_HEAD_MAX_RAW,
-    OKIN_POSITION_NOTIFY_CHAR_UUID,
-)
-from .base import (
-    POSITION_UNIT_DEGREES,
-    BedController,
-    PositionNumberSpec,
-    build_position_number_spec,
-)
+from ..const import OKIMAT_NOTIFY_CHAR_UUID, OKIMAT_WRITE_CHAR_UUID
+from .base import BedController, MotorControlSpec
 from .okin_protocol import build_cst_command
 
 if TYPE_CHECKING:
@@ -49,10 +35,9 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-_NOT_CONNECTED_MSG = "Not connected to bed"
-_PRESET_REPEAT_COUNT = 100
-_PRESET_REPEAT_DELAY_MS = 300
-_BUTTON_PRESS_REPEAT_COUNT = 3
+_PRESET_REPEAT_COUNT = 6
+_PRESET_REPEAT_DELAY_MS = 100
+_BUTTON_PRESS_REPEAT_COUNT = 6
 _BUTTON_PRESS_REPEAT_DELAY_MS = 100
 _STOP_REPEAT_COUNT = 2
 _STOP_REPEAT_DELAY_MS = 100
@@ -66,10 +51,8 @@ class CstMotorCommands:
     HEAD_DOWN = 0x00000002
     FOOT_UP = 0x00000004
     FOOT_DOWN = 0x00000008
-    HEAD_TILT_UP = 0x00000010
-    HEAD_TILT_DOWN = 0x00000020
-    LUMBAR_UP = 0x00000040
-    LUMBAR_DOWN = 0x00000080
+    LUMBAR_UP = 0x00000010
+    LUMBAR_DOWN = 0x00000020
 
 
 class CstRemoteCommands:
@@ -85,21 +68,15 @@ class CstRemoteCommands:
     LOUNGE = 0x00002000
     INCLINE = 0x00004000
     ANTI_SNORE = 0x00008000
-    APP_MEMORY = 0x00010000
     SAVE_ZERO_G = FLAT | ZERO_G
     SAVE_LOUNGE = FLAT | LOUNGE
     SAVE_INCLINE = FLAT | INCLINE
     LIGHT_TOGGLE = 0x00020000
     LIGHT_ON = 0x00000040
     LIGHT_OFF = 0x00000080
-    MASSAGE_TOGGLE = 0x04000000
     MASSAGE_OFF = 0x02000000
     MASSAGE_INTENSITY = 0x00000C00
     MASSAGE_INTENSITY_MINUS = 0x01800000
-    MASSAGE_HEAD = 0x00000800
-    MASSAGE_FEET = 0x00000400
-    MASSAGE_HEAD_MINUS = 0x00800000
-    MASSAGE_FEET_MINUS = 0x01000000
     MASSAGE_WAVE_1 = 0x00080000
     MASSAGE_WAVE_2 = 0x00100000
     MASSAGE_WAVE_3 = 0x00200000
@@ -118,7 +95,6 @@ class OkinCstController(BedController):
     def __init__(self, coordinator: AdjustableBedCoordinator) -> None:
         """Initialize the OKIN CST controller."""
         super().__init__(coordinator)
-        self._notify_callback: Callable[[str, float], None] | None = None
         self._motor_state: dict[str, int] = {}
         self._massage_wave_index = 0
 
@@ -146,24 +122,6 @@ class OkinCstController(BedController):
     @property
     def supports_preset_incline(self) -> bool:
         return True
-
-    @property
-    def position_number_specs(self) -> tuple[PositionNumberSpec, ...]:
-        """Expose only the axes CST publishes feedback for.
-
-        CST reports angles for back and legs only, whatever motor count the user
-        configured, so this does not fall back to the standard motor_count gate.
-        """
-        return tuple(
-            build_position_number_spec(
-                axis,
-                max_value=self._coordinator.get_max_angle(axis),
-                unit=POSITION_UNIT_DEGREES,
-            )
-            # sorted() because OKIN_CST_POSITION_AXES is a frozenset and entity
-            # creation order must not vary between runs.
-            for axis in sorted(OKIN_CST_POSITION_AXES)
-        )
 
     @property
     def supports_memory_presets(self) -> bool:
@@ -197,118 +155,74 @@ class OkinCstController(BedController):
     def supports_stop_all(self) -> bool:
         return True
 
-    async def write_command(
-        self,
-        command: bytes,
-        repeat_count: int = 1,
-        repeat_delay_ms: int = 100,
-        cancel_event: asyncio.Event | None = None,
-    ) -> None:
-        """Write a command to the bed."""
-        if self.client is None or not self.client.is_connected:
-            _LOGGER.error("Cannot write command: BLE client not connected")
-            raise ConnectionError(_NOT_CONNECTED_MSG)
-
-        effective_cancel = cancel_event or self._coordinator.cancel_command
-
-        _LOGGER.debug(
-            "Writing CST command (%s): %s (repeat: %d, delay: %dms, response=True)",
-            OKIMAT_WRITE_CHAR_UUID,
-            command.hex(),
-            repeat_count,
-            repeat_delay_ms,
+    @property
+    def motor_control_specs(self) -> tuple[MotorControlSpec, ...]:
+        """Expose the app's fixed three-axis head, foot, and lumbar layout."""
+        return (
+            MotorControlSpec(
+                key="head",
+                translation_key="head",
+                open_fn=lambda ctrl: ctrl.move_head_up(),
+                close_fn=lambda ctrl: ctrl.move_head_down(),
+                stop_fn=lambda ctrl: ctrl.move_head_stop(),
+            ),
+            MotorControlSpec(
+                key="feet",
+                translation_key="feet",
+                open_fn=lambda ctrl: ctrl.move_feet_up(),
+                close_fn=lambda ctrl: ctrl.move_feet_down(),
+                stop_fn=lambda ctrl: ctrl.move_feet_stop(),
+                max_angle=45,
+            ),
+            MotorControlSpec(
+                key="lumbar",
+                translation_key="lumbar",
+                open_fn=lambda ctrl: ctrl.move_lumbar_up(),
+                close_fn=lambda ctrl: ctrl.move_lumbar_down(),
+                stop_fn=lambda ctrl: ctrl.move_lumbar_stop(),
+                max_angle=30,
+            ),
         )
 
-        for i in range(repeat_count):
-            if effective_cancel is not None and effective_cancel.is_set():
-                _LOGGER.info("Command cancelled after %d/%d writes", i, repeat_count)
-                return
-
-            try:
-                async with self._ble_lock:
-                    await self.client.write_gatt_char(
-                        OKIMAT_WRITE_CHAR_UUID, command, response=True
-                    )
-            except BleakError:
-                _LOGGER.exception("Failed to write command")
-                raise
-
-            if i < repeat_count - 1:
-                await asyncio.sleep(repeat_delay_ms / 1000)
-
-    # Position feedback (same as OkinUuidController)
+    @property
+    def stale_motor_entity_keys(self) -> frozenset[str]:
+        """Remove motor covers exposed by the former four-axis assumption."""
+        return frozenset({"back", "legs", "tilt"})
 
     async def start_notify(
         self, callback: Callable[[str, float], None] | None = None
     ) -> None:
-        """Start listening for position notifications."""
+        """Subscribe to CST notifications for raw diagnostic capture."""
         self._notify_callback = callback
-
-        if self.client is None or not self.client.is_connected:
-            _LOGGER.warning("Cannot start position notifications: not connected")
+        client = self.client
+        if client is None or not client.is_connected:
+            _LOGGER.warning("Cannot start CST notifications: not connected")
             return
 
         try:
             async with self._ble_lock:
-                await self.client.start_notify(
-                    OKIN_POSITION_NOTIFY_CHAR_UUID,
-                    self._handle_position_notification,
+                await client.start_notify(
+                    OKIMAT_NOTIFY_CHAR_UUID,
+                    self._handle_notification,
                 )
-            _LOGGER.info("Position notifications active for OKIN CST bed")
         except BleakError as err:
-            _LOGGER.debug(
-                "Could not start position notifications: %s",
-                err,
-            )
+            _LOGGER.debug("Could not start CST notifications: %s", err)
 
-    def _handle_position_notification(self, _: BleakGATTCharacteristic, data: bytearray) -> None:
-        """Handle position notification data."""
-        self.forward_raw_notification(OKIN_POSITION_NOTIFY_CHAR_UUID, bytes(data))
-
-        if len(data) < 7:
-            return
-
-        _LOGGER.debug("OKIN CST position notification: %s", data.hex())
-
-        head_raw = data[3] | (data[4] << 8)
-        head_angle = min(
-            round((head_raw / OKIN_HEAD_MAX_RAW) * OKIN_HEAD_MAX_ANGLE, 1),
-            OKIN_HEAD_MAX_ANGLE,
-        )
-
-        foot_raw = data[5] | (data[6] << 8)
-        foot_angle = min(
-            round((foot_raw / OKIN_FOOT_MAX_RAW) * OKIN_FOOT_MAX_ANGLE, 1),
-            OKIN_FOOT_MAX_ANGLE,
-        )
-
-        if self._notify_callback:
-            self._notify_callback("back", head_angle)
-            self._notify_callback("legs", foot_angle)
+    def _handle_notification(self, _: object, data: bytearray) -> None:
+        """Forward CST notifications without interpreting them as positions."""
+        self.forward_raw_notification(OKIMAT_NOTIFY_CHAR_UUID, bytes(data))
 
     async def stop_notify(self) -> None:
-        """Stop listening for position notifications."""
-        if self.client is None or not self.client.is_connected:
+        """Stop the raw CST diagnostic notification subscription."""
+        client = self.client
+        if client is None or not client.is_connected:
             return
 
         try:
             async with self._ble_lock:
-                await self.client.stop_notify(OKIN_POSITION_NOTIFY_CHAR_UUID)
-        except BleakError:
-            pass
-
-    async def read_positions(self, motor_count: int = 2) -> None:  # noqa: ARG002
-        """Read current position data."""
-        if self.client is None or not self.client.is_connected:
-            return
-
-        try:
-            async with self._ble_lock:
-                data = await self.client.read_gatt_char(OKIN_POSITION_NOTIFY_CHAR_UUID)
-            if data:
-                self._handle_position_notification(0, bytearray(data))  # type: ignore[arg-type]
+                await client.stop_notify(OKIMAT_NOTIFY_CHAR_UUID)
         except BleakError as err:
-            _LOGGER.debug("Could not read position data: %s", err)
+            _LOGGER.debug("Could not stop CST notifications: %s", err)
 
     # Motor movement helpers
 
@@ -316,7 +230,7 @@ class OkinCstController(BedController):
         """Calculate combined motor command from active motor states."""
         command = 0
         for value in self._motor_state.values():
-            command += value
+            command |= value
         return command
 
     async def _move_motor(self, motor: str, command_value: int | None) -> None:
@@ -327,8 +241,7 @@ class OkinCstController(BedController):
             self._motor_state[motor] = command_value
 
         combined = self._get_motor_command()
-        pulse_count = getattr(self._coordinator, "motor_pulse_count", 25)
-        pulse_delay = getattr(self._coordinator, "motor_pulse_delay_ms", 200)
+        pulse_count, pulse_delay = self.motor_pulse_settings()
 
         try:
             if combined:
@@ -345,9 +258,8 @@ class OkinCstController(BedController):
     async def _send_stop_sequence(self) -> None:
         """Send the app-style CST STOP sequence."""
         stop_event = asyncio.Event()
-        for index in range(_STOP_REPEAT_COUNT):
-            if index:
-                await asyncio.sleep(_STOP_REPEAT_DELAY_MS / 1000)
+        for _ in range(_STOP_REPEAT_COUNT):
+            await asyncio.sleep(_STOP_REPEAT_DELAY_MS / 1000)
             await self.write_command(build_cst_command(), cancel_event=stop_event)
 
     async def _send_repeated_command(
@@ -442,20 +354,6 @@ class OkinCstController(BedController):
         """Stop feet motor."""
         await self._move_motor("legs", None)
 
-    # Motor control - Tilt (head tilt / 4th motor)
-
-    async def move_tilt_up(self) -> None:
-        """Move head tilt up."""
-        await self._move_motor("head", CstMotorCommands.HEAD_TILT_UP)
-
-    async def move_tilt_down(self) -> None:
-        """Move head tilt down."""
-        await self._move_motor("head", CstMotorCommands.HEAD_TILT_DOWN)
-
-    async def move_tilt_stop(self) -> None:
-        """Stop tilt motor."""
-        await self._move_motor("head", None)
-
     # Motor control - Lumbar
 
     async def move_lumbar_up(self) -> None:
@@ -541,10 +439,6 @@ class OkinCstController(BedController):
         """Turn massage off."""
         await self._send_button_press(motor_value=CstRemoteCommands.MASSAGE_OFF)
 
-    async def massage_toggle(self) -> None:
-        """Toggle massage on/off."""
-        await self._send_button_press(motor_value=CstRemoteCommands.MASSAGE_TOGGLE)
-
     async def massage_intensity_up(self) -> None:
         """Increase overall massage intensity."""
         await self._send_button_press(motor_value=CstRemoteCommands.MASSAGE_INTENSITY)
@@ -553,26 +447,6 @@ class OkinCstController(BedController):
         """Decrease overall massage intensity."""
         await self._send_button_press(
             motor_value=CstRemoteCommands.MASSAGE_INTENSITY_MINUS
-        )
-
-    async def massage_head_up(self) -> None:
-        """Increase head massage intensity."""
-        await self._send_button_press(motor_value=CstRemoteCommands.MASSAGE_HEAD)
-
-    async def massage_head_down(self) -> None:
-        """Decrease head massage intensity."""
-        await self._send_button_press(
-            motor_value=CstRemoteCommands.MASSAGE_HEAD_MINUS
-        )
-
-    async def massage_foot_up(self) -> None:
-        """Increase foot massage intensity."""
-        await self._send_button_press(motor_value=CstRemoteCommands.MASSAGE_FEET)
-
-    async def massage_foot_down(self) -> None:
-        """Decrease foot massage intensity."""
-        await self._send_button_press(
-            motor_value=CstRemoteCommands.MASSAGE_FEET_MINUS
         )
 
     async def massage_mode_step(self) -> None:

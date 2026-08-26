@@ -244,8 +244,10 @@ hardware capability and is not software grouping across arbitrary entries.
 
 Octo beds have at least two protocol variants. Standard OCTO requires a
 recognized official device-name prefix because its `FFE0` service UUID is
-shared with other protocols. Star2 is auto-detected by its dedicated
-`0000aa5c-0000-1000-8000-00805f9b34fb` service UUID.
+shared with other protocols. Star2 is auto-detected when its dedicated
+`0000aa5c-0000-1000-8000-00805f9b34fb` service contains the
+`00005a55-0000-1000-8000-00805f9b34fb` write characteristic. Explicit variant
+selections override this GATT-based detection.
 
 ### Standard Variant (Most Common)
 
@@ -461,11 +463,14 @@ To configure PIN, enter your 4-digit PIN during setup or in the integration opti
 - **Standard variant:** Detected by an official OCTO device-name prefix. The
   shared `FFE0` service UUID alone is not sufficient because other protocol
   families also use it.
-- **Star2 variant:** Auto-detected by service UUID `0000aa5c-0000-1000-8000-00805f9b34fb`
+- **Star2 variant:** Auto-detected after connection when the
+  `0000aa5c-0000-1000-8000-00805f9b34fb` service contains the
+  `00005a55-0000-1000-8000-00805f9b34fb` write characteristic. Explicit
+  variant selections override this GATT-based detection.
 
 You can also manually select the variant in the integration options.
 
-Recognized Standard-variant name prefixes are:
+Recognized Octo device-name prefixes are:
 
 | Prefix | OCTO description |
 |--------|------------------|
@@ -483,6 +488,7 @@ Recognized Standard-variant name prefixes are:
 | `BM3` | BrickMini Basic 3M |
 | `DA1458x` | Legacy receiver/SoC name |
 
-These names select the likely protocol implementation. Features are still
-limited by the device capabilities and the support table above, and every OEM
-combination is not necessarily hardware-tested.
+These names identify the Octo protocol family. The connected GATT table selects
+the Standard or Star2 implementation when the variant is left on Auto. Features
+are still limited by the device capabilities and the support table above, and
+every OEM combination is not necessarily hardware-tested.

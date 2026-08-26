@@ -20,7 +20,6 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import (
     BED_TYPE_ERGOMOTION,
     BED_TYPE_KEESON,
-    BED_TYPE_OKIN_CST,
     BEDS_WITH_ANGLE_SENSING,
     CONF_BED_TYPE,
     CONF_HAS_MASSAGE,
@@ -29,7 +28,6 @@ from .const import (
     DEFAULT_MOTOR_COUNT,
     DOMAIN,
     KEESON_VARIANT_ERGOMOTION,
-    OKIN_CST_POSITION_AXES,
 )
 from .coordinator import AdjustableBedCoordinator
 from .entity import AdjustableBedEntity
@@ -169,14 +167,7 @@ def _sensor_entities_for(
         if bed_type not in BEDS_WITH_ANGLE_SENSING:
             _LOGGER.debug("Skipping angle sensors for %s - no angle feedback", bed_type)
         else:
-            sensor_descriptions = SENSOR_DESCRIPTIONS
-            if bed_type == BED_TYPE_OKIN_CST:
-                sensor_descriptions = tuple(
-                    description
-                    for description in SENSOR_DESCRIPTIONS
-                    if description.position_key in OKIN_CST_POSITION_AXES
-                )
-            for description in sensor_descriptions:
+            for description in SENSOR_DESCRIPTIONS:
                 if motor_count >= description.min_motors:
                     entities.append(AdjustableBedAngleSensor(coordinator, description))
     else:
