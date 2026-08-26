@@ -714,6 +714,8 @@ def refine_okin_shared_uuid_protocol_from_gatt(
     protocol_variant: str | None = None,
     ble_model: str | None = None,
     device_name: str | None = None,
+    *,
+    _log_correction: bool = True,
 ) -> str:
     """Correct shared OKIN UUID profiles once connected GATT services are known."""
     is_leggett_okin_variant = (
@@ -729,7 +731,7 @@ def refine_okin_shared_uuid_protocol_from_gatt(
         BED_TYPE_OKIN_RF_ECO_BT,
     }:
         if gatt_detection.bed_type == BED_TYPE_LEGGETT_OKIN:
-            if bed_type != BED_TYPE_LEGGETT_OKIN:
+            if bed_type != BED_TYPE_LEGGETT_OKIN and _log_correction:
                 _LOGGER.info(
                     "Refined shared OKIN protocol from %s to %s using LP Control "
                     "device identity and GATT signals: %s",
@@ -739,7 +741,7 @@ def refine_okin_shared_uuid_protocol_from_gatt(
                 )
             return BED_TYPE_LEGGETT_OKIN
         if _is_rf_eco_bt_stair_model(ble_model):
-            if bed_type != BED_TYPE_OKIN_RF_ECO_BT:
+            if bed_type != BED_TYPE_OKIN_RF_ECO_BT and _log_correction:
                 _LOGGER.info(
                     "Refined shared OKIN protocol from %s to %s using stair model %r",
                     bed_type,
@@ -757,22 +759,24 @@ def refine_okin_shared_uuid_protocol_from_gatt(
                 # Already on an OKIMAT-compatible controller; keep the saved label
                 # (BED_TYPE_OKIMAT/OKIN_UUID resolve to the same controller, and
                 # OKIN CST is its own deliberately preserved full-bed profile).
-                _LOGGER.debug(
-                    "Keeping %s profile for OKIMAT bed model %r despite shared OKIN GATT signals",
-                    bed_type,
-                    ble_model,
-                )
+                if _log_correction:
+                    _LOGGER.debug(
+                        "Keeping %s profile for OKIMAT bed model %r despite shared OKIN GATT signals",
+                        bed_type,
+                        ble_model,
+                    )
                 return bed_type
             # Any other shared-UUID guess — a persisted RF ECO BT stair entry, or
             # an incompatible profile such as Nectar / OKIN 7-byte / Leggett OKIN —
             # is the wrong controller for an OKIMAT bed. Promote it to the
             # multi-motor OKIN UUID profile so the bed recovers (issue #406).
-            _LOGGER.info(
-                "Promoted %s to %s for OKIMAT bed model %r despite shared OKIN GATT signals",
-                bed_type,
-                BED_TYPE_OKIN_UUID,
-                ble_model,
-            )
+            if _log_correction:
+                _LOGGER.info(
+                    "Promoted %s to %s for OKIMAT bed model %r despite shared OKIN GATT signals",
+                    bed_type,
+                    BED_TYPE_OKIN_UUID,
+                    ble_model,
+                )
             return BED_TYPE_OKIN_UUID
         if {bed_type, gatt_detection.bed_type} == {
             BED_TYPE_OKIN_CST,
@@ -781,7 +785,7 @@ def refine_okin_shared_uuid_protocol_from_gatt(
             # CSS and Nordic DFU overlap across these profiles. GATT can narrow
             # the family but cannot safely override the configured choice.
             return bed_type
-        if gatt_detection.bed_type != bed_type:
+        if gatt_detection.bed_type != bed_type and _log_correction:
             _LOGGER.info(
                 "Refined shared OKIN protocol from %s to %s using GATT signals: %s",
                 bed_type,

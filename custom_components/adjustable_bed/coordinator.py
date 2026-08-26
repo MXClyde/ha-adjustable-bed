@@ -71,6 +71,7 @@ from .const import (
     BED_TYPE_OKIN_FFE,
     BED_TYPE_OKIN_HANDLE,
     BED_TYPE_OKIN_NORDIC,
+    BED_TYPE_OKIN_RF_ECO_BT,
     BED_TYPE_OKIN_UUID,
     BED_TYPE_REVERIE,
     BED_TYPE_REVERIE_NIGHTSTAND,
@@ -177,9 +178,10 @@ _INITIAL_POSITION_READ_TIMEOUT = 10.0
 _INITIAL_POSITION_READ_RETRY_DELAY = 3.0
 _INITIAL_POSITION_READ_MAX_ATTEMPTS = 6
 _PASSIVE_POSITION_RECONCILIATION_IDLE_MARGIN = 15.0
-# One reconnect gives a stale CST entry another chance to reveal the RF ECO BT
-# stair model without making genuine CST receivers pay DIS timeouts forever.
-_OKIN_CST_DEVICE_INFO_MAX_READ_ATTEMPTS = 2
+# One reconnect gives a stale preserved OKIN profile another chance to reveal
+# the CST/RF ECO BT discriminator without making known receivers pay DIS
+# timeouts forever.
+_OKIN_PRESERVED_PROFILE_DEVICE_INFO_MAX_READ_ATTEMPTS = 2
 
 MAX_COMMAND_TRACE_ENTRIES = 100
 
@@ -1464,19 +1466,20 @@ class AdjustableBedCoordinator:
         )
 
         read_succeeded = has_useful_value and required_fields_present
-        cst_retry_exhausted = (
-            self._bed_type == BED_TYPE_OKIN_CST
+        profile_retry_exhausted = (
+            self._bed_type in {BED_TYPE_OKIN_CST, BED_TYPE_OKIN_RF_ECO_BT}
             and self._device_info_read_attempts
-            >= _OKIN_CST_DEVICE_INFO_MAX_READ_ATTEMPTS
+            >= _OKIN_PRESERVED_PROFILE_DEVICE_INFO_MAX_READ_ATTEMPTS
         )
-        self._device_info_read_done = read_succeeded or cst_retry_exhausted
+        self._device_info_read_done = read_succeeded or profile_retry_exhausted
 
-        if cst_retry_exhausted and not read_succeeded:
+        if profile_retry_exhausted and not read_succeeded:
             _LOGGER.debug(
                 "Device Information read for %s did not return the model after "
-                "%d attempts; caching the CST result for this coordinator session.",
+                "%d attempts; caching the %s profile for this coordinator session.",
                 self._address,
                 self._device_info_read_attempts,
+                self._bed_type,
             )
         elif not self._device_info_read_done:
             if has_useful_value and not required_fields_present:

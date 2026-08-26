@@ -970,6 +970,14 @@ class BLEDiagnosticRunner:
                 # Seed the same configured profile that runtime refinement uses
                 # so a support bundle does not contradict the active controller.
                 refinement_seed = configured_bed_type
+            bed_type_without_model = None
+            if model_number:
+                bed_type_without_model = refine_okin_shared_uuid_protocol_from_gatt(
+                    refinement_seed,
+                    gatt_services,
+                    device_name=observed_device_name or getattr(service_info, "name", None),
+                    _log_correction=False,
+                )
             bed_type = refine_okin_shared_uuid_protocol_from_gatt(
                 refinement_seed,
                 gatt_services,
@@ -980,12 +988,12 @@ class BLEDiagnosticRunner:
             confidence = gatt_detection.confidence
             ambiguous_types = list(gatt_detection.ambiguous_types or [])
             if bed_type != gatt_detection.bed_type:
-                if bed_type == refinement_seed and refinement_seed != gatt_detection.bed_type:
-                    signals.append("configured_profile:shared_okin_uuid")
-                else:
+                if bed_type_without_model is not None and bed_type != bed_type_without_model:
                     signals.append("device_info:model_number")
                     confidence = max(confidence, 0.95)
                     ambiguous_types = []
+                elif bed_type == refinement_seed and refinement_seed != gatt_detection.bed_type:
+                    signals.append("configured_profile:shared_okin_uuid")
             return {
                 "bed_type": bed_type,
                 "confidence": confidence,

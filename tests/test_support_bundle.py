@@ -23,6 +23,7 @@ from custom_components.adjustable_bed.const import (
     BED_TYPE_LEGGETT_OKIN,
     BED_TYPE_OKIN_CST,
     BED_TYPE_OKIN_RF_ECO_BT,
+    BED_TYPE_OKIN_UUID,
     CONF_BED_TYPE,
     CONF_BLE_BOND_ESTABLISHED,
     CONF_DISABLE_ANGLE_SENSING,
@@ -550,6 +551,19 @@ class TestBleDiagnosticsRunner:
         assert "configured_profile:shared_okin_uuid" in detection["signals"]
         assert "device_info:model_number" not in detection["signals"]
         assert detection["confidence"] == 0.8
+
+        coordinator.bed_type = BED_TYPE_OKIN_UUID
+        model_detection = runner._build_detection_section(
+            SimpleNamespace(name="OKIN-050226"),
+            gatt_services,
+            {"model_number": "OKIMAT 4 IPS/M"},
+        )
+
+        assert model_detection["bed_type"] == BED_TYPE_OKIN_UUID
+        assert "device_info:model_number" in model_detection["signals"]
+        assert "configured_profile:shared_okin_uuid" not in model_detection["signals"]
+        assert model_detection["confidence"] == 0.95
+        assert model_detection["ambiguous_types"] == []
 
     async def test_run_diagnostics_reconnects_after_mid_enumeration_disconnect(
         self,

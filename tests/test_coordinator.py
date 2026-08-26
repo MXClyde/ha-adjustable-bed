@@ -4152,6 +4152,7 @@ class TestDeviceInfoCache:
         [
             BED_TYPE_OKIMAT,
             BED_TYPE_OKIN_CST,
+            BED_TYPE_OKIN_RF_ECO_BT,
         ],
     )
     def test_missing_device_info_cache_policy(
@@ -4182,25 +4183,30 @@ class TestDeviceInfoCache:
 
         assert coordinator._device_info_read_done is False
 
-    def test_cst_missing_device_info_is_cached_after_bounded_retry(
+    @pytest.mark.parametrize(
+        "bed_type",
+        [BED_TYPE_OKIN_CST, BED_TYPE_OKIN_RF_ECO_BT],
+    )
+    def test_preserved_okin_profile_missing_device_info_is_cached_after_bounded_retry(
         self,
         hass: HomeAssistant,
+        bed_type: str,
     ):
-        """A genuine CST receiver should not pay DIS timeouts on every reconnect."""
+        """Preserved OKIN profiles should not pay DIS timeouts on every reconnect."""
         entry = MockConfigEntry(
             domain=DOMAIN,
             title=TEST_NAME,
             data={
                 CONF_ADDRESS: TEST_ADDRESS,
                 CONF_NAME: TEST_NAME,
-                CONF_BED_TYPE: BED_TYPE_OKIN_CST,
+                CONF_BED_TYPE: bed_type,
                 CONF_MOTOR_COUNT: 2,
                 CONF_HAS_MASSAGE: False,
                 CONF_DISABLE_ANGLE_SENSING: True,
                 CONF_PREFERRED_ADAPTER: "auto",
             },
             unique_id=TEST_ADDRESS,
-            entry_id="okin_cst_bounded_device_info_retry_test",
+            entry_id=f"{bed_type}_bounded_device_info_retry_test",
         )
         entry.add_to_hass(hass)
 
