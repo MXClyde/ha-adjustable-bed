@@ -3809,8 +3809,21 @@ class AdjustableBedCoordinator:
             # queues on self._lock and then tears the link down in the same tick
             # that the command which triggered the reconnect issues its first
             # GATT write, so the command fails (issue #368).
-            async with self._command_lock, self._lock:
-                return await self._async_disconnect_locked(reason)
+            disconnect_epoch = self._command_scheduler.request_stop(
+                ALL_COMMAND_RESOURCES
+            )
+            try:
+                async with self._command_lock, self._lock:
+                    return await self._async_disconnect_locked(reason)
+            finally:
+                # Drop commands admitted while teardown held the wire lock too.
+                # These two synchronous calls form one event-loop transition, so
+                # a post-disconnect command cannot slip between invalidation and
+                # release of the scheduler safety lane.
+                self._command_scheduler.request_cancel(
+                    ALL_COMMAND_RESOURCES, outcome=CommandOutcome.STOPPED
+                )
+                self._command_scheduler.finish_stop(disconnect_epoch)
 
         async with self._lock:
             return await self._async_disconnect_locked(reason)
@@ -4529,6 +4542,7 @@ class AdjustableBedCoordinator:
         skip_disconnect: bool = False,
         *,
         resource: str | None = None,
+        resources: Collection[str] | None = None,
         pulse_count: int | None = None,
         pulse_delay_ms: int | None = None,
         group_id: str | None = None,
@@ -4550,6 +4564,7 @@ class AdjustableBedCoordinator:
         await self._async_schedule_command_operation(
             operation,
             resource=resource,
+            resources=resources,
             kind=CommandKind.COMMAND,
             cancel_running=cancel_running,
             pulse_count=pulse_count,
@@ -4562,6 +4577,7 @@ class AdjustableBedCoordinator:
         operation: Callable[[], Awaitable[None]],
         *,
         resource: str | None,
+        resources: Collection[str] | None = None,
         kind: CommandKind,
         cancel_running: bool,
         pulse_count: int | None = None,
@@ -4590,6 +4606,7 @@ class AdjustableBedCoordinator:
         intent = self._build_command_intent(
             operation,
             resource=resource,
+            resources=resources,
             kind=kind,
             cancel_running=cancel_running,
             pulse_count=pulse_count,
@@ -4611,6 +4628,8 @@ class AdjustableBedCoordinator:
         group_id: str | None = None,
     ) -> CommandIntent:
         """Build one device intent while preserving legacy cancellation signals."""
+        if resource is not None and resources is not None:
+            raise ValueError("Pass resource or resources, not both")
         command_scope = (
             command_resources(*resources)
             if resources is not None
@@ -5209,6 +5228,8 @@ class AdjustableBedCoordinator:
         move_up_fn: Callable[[BedController], Coroutine[Any, Any, None]],
         move_down_fn: Callable[[BedController], Coroutine[Any, Any, None]],
         move_stop_fn: Callable[[BedController], Coroutine[Any, Any, None]],
+        *,
+        resources: Collection[str] | None = None,
     ) -> None:
         """Schedule one position target with axis-scoped replacement."""
 
@@ -5223,7 +5244,8 @@ class AdjustableBedCoordinator:
 
         await self._async_schedule_command_operation(
             operation,
-            resource=f"motor:{position_key}",
+            resource=None if resources is not None else f"motor:{position_key}",
+            resources=resources,
             kind=CommandKind.SEEK,
             cancel_running=True,
         )

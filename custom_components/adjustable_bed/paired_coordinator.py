@@ -29,6 +29,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 
 from .command_scheduler import (
     CommandHandle,
+    CommandOutcome,
     PreparedCommandInvalidated,
     command_resources,
 )
@@ -426,6 +427,7 @@ class PairedBedCoordinator:
                         op,
                         cancel_running=cancel_running,
                         resources=command_scope,
+                        entry_cancel=entry_cancel,
                     )
                 finally:
                     self._active_children = set()
@@ -490,7 +492,10 @@ class PairedBedCoordinator:
     ) -> None:
         """Admit one side without holding pair metadata across its operation."""
         prepare = getattr(child, "async_prepare_command_operation", None)
-        if not callable(prepare):
+        prepare_owner = getattr(child, "_single_inner", child)
+        if not callable(prepare) or not callable(
+            getattr(prepare_owner, "async_prepare_command_operation", None)
+        ):
             # Compatibility for coordinator doubles. Separate side locks still
             # allow left and right to overlap while serializing one fake child.
             async with self._pair_side_locks[side]:
@@ -554,8 +559,10 @@ class PairedBedCoordinator:
         *,
         cancel_running: bool,
         resources: frozenset[str],
+        entry_cancel: Mapping[str, tuple[int, ...]],
     ) -> None:
         """Prepare every physical scheduler, then commit the linked command."""
+        del entry_cancel
         if not all(
             callable(getattr(child, "async_prepare_command_operation", None))
             for _, child in targets
@@ -587,6 +594,12 @@ class PairedBedCoordinator:
                 else:
                     prepared[side] = (child_by_side[side], handle)
             return errors
+
+        def is_expected_invalidation(side: str, error: BaseException | None) -> bool:
+            return isinstance(error, PreparedCommandInvalidated) and (
+                prepared[side][1].outcome
+                in {CommandOutcome.REPLACED, CommandOutcome.STOPPED}
+            )
 
         try:
             async with self._locked_target_sides(targets):
@@ -628,25 +641,37 @@ class PairedBedCoordinator:
             ready_results = await asyncio.gather(
                 *ready_tasks.values(), return_exceptions=True
             )
-            ready_errors = {
-                side: result
-                for side, result in zip(ready_tasks, ready_results, strict=True)
-                if isinstance(result, BaseException)
-            }
+            ready_errors: dict[str, BaseException] = {}
+            ready_invalidated = False
+            for side, result in zip(ready_tasks, ready_results, strict=True):
+                if not isinstance(result, BaseException):
+                    continue
+                if is_expected_invalidation(side, result):
+                    ready_invalidated = True
+                else:
+                    ready_errors[side] = result
             if ready_errors:
                 raise PairedSideError(action, ready_errors)
+            if ready_invalidated:
+                return
 
             # Reacquire both lanes and revalidate reservations. From commit until
             # result/STOP cleanup completes, overlapping commands wait here.
             async with self._locked_target_sides(targets):
                 revalidation_errors: dict[str, BaseException] = {}
+                revalidation_invalidated = False
                 for side, (child, handle) in prepared.items():
                     try:
                         await child.async_wait_prepared_command(handle)
                     except Exception as err:  # noqa: BLE001 - collect both sides
-                        revalidation_errors[side] = err
+                        if is_expected_invalidation(side, err):
+                            revalidation_invalidated = True
+                        else:
+                            revalidation_errors[side] = err
                 if revalidation_errors:
                     raise PairedSideError(action, revalidation_errors)
+                if revalidation_invalidated:
+                    return
 
                 # No controller coroutine has run before this point. Commit every
                 # ready handle synchronously so neither side can observe a partial
@@ -666,10 +691,13 @@ class PairedBedCoordinator:
                         result_tasks.values(), return_when=asyncio.FIRST_EXCEPTION
                     )
                     errors: dict[str, BaseException] = {}
+                    expected_invalidations = False
                     for side, task in result_tasks.items():
                         if task.done() and not task.cancelled():
                             error = task.exception()
-                            if error is not None:
+                            if is_expected_invalidation(side, error):
+                                expected_invalidations = True
+                            elif error is not None:
                                 errors[side] = error
                     if errors:
                         stop_errors = await self._stop_children(targets)
@@ -677,7 +705,26 @@ class PairedBedCoordinator:
                             action, _merge_stop_errors(errors, stop_errors)
                         )
 
-                    await asyncio.gather(*result_tasks.values())
+                    if expected_invalidations:
+                        settled = await asyncio.gather(
+                            *result_tasks.values(), return_exceptions=True
+                        )
+                        late_errors = {
+                            side: result
+                            for side, result in zip(
+                                result_tasks, settled, strict=True
+                            )
+                            if isinstance(result, BaseException)
+                            and not is_expected_invalidation(side, result)
+                        }
+                        if late_errors:
+                            stop_errors = await self._stop_children(targets)
+                            raise PairedSideError(
+                                action,
+                                _merge_stop_errors(late_errors, stop_errors),
+                            )
+                    else:
+                        await asyncio.gather(*result_tasks.values())
                 except asyncio.CancelledError:
                     await self._stop_children(targets)
                     raise
@@ -1133,14 +1180,78 @@ class SingleAddressSideCoordinator:
         suffix = f"_{self._single_side}"
         return key if key.endswith(suffix) else f"{key}{suffix}"
 
+    def _scoped_command_resources(
+        self,
+        resource: str | None = None,
+        resources: Collection[str] | None = None,
+    ) -> frozenset[str]:
+        """Namespace scheduler resources by logical side on the shared link."""
+        if resource is not None and resources is not None:
+            raise ValueError("Pass resource or resources, not both")
+        raw_resources = (
+            command_resources(*resources)
+            if resources is not None
+            else command_resources(resource or "*")
+        )
+        sides = PAIR_SIDES if self._single_side == SIDE_BOTH else (self._single_side,)
+        return frozenset(
+            f"side:{side}:{item}" for side in sides for item in raw_resources
+        )
+
+    def request_command_cancel(
+        self,
+        resource: str | None = None,
+        *,
+        resources: Collection[str] | None = None,
+    ) -> None:
+        """Cancel only this logical side's resources on the shared scheduler."""
+        self._single_inner.request_command_cancel(
+            resources=self._scoped_command_resources(resource, resources)
+        )
+
+    async def async_prepare_command_operation(
+        self,
+        operation: Callable[[], Coroutine[Any, Any, None]],
+        *,
+        resource: str | None = None,
+        resources: Collection[str] | None = None,
+        **kwargs: Any,
+    ) -> CommandHandle:
+        """Reserve this logical side without colliding with the other side."""
+        return await self._single_inner.async_prepare_command_operation(
+            operation,
+            resources=self._scoped_command_resources(resource, resources),
+            **kwargs,
+        )
+
     async def async_execute_controller_command(
         self, command_fn: CommandFn, **kwargs: Any
     ) -> None:
         async def bound(controller: Any) -> None:
             await command_fn(controller.bind_side(self._single_side))
 
-        await self._single_inner.async_execute_controller_command(bound, **kwargs)
+        resource = kwargs.pop("resource", None)
+        resources = kwargs.pop("resources", None)
+        await self._single_inner.async_execute_controller_command(
+            bound,
+            resources=self._scoped_command_resources(resource, resources),
+            **kwargs,
+        )
         self._sync_position_state()
+
+    async def async_execute_command_group(
+        self,
+        operations: Collection[Callable[[], Coroutine[Any, Any, None]]],
+        *,
+        resources: Collection[str],
+        **kwargs: Any,
+    ) -> None:
+        """Run a logical-side command group on side-scoped resources."""
+        await self._single_inner.async_execute_command_group(
+            operations,
+            resources=self._scoped_command_resources(resources=resources),
+            **kwargs,
+        )
 
     async def async_execute_controller_query(
         self, query_fn: Callable[[Any], Coroutine[Any, Any, Any]], **kwargs: Any
@@ -1168,7 +1279,12 @@ class SingleAddressSideCoordinator:
                 native = bound.angle_to_native_position(position_key, target_angle)
                 await bound.set_motor_position(position_key, native)
 
-            await self._single_inner.async_execute_controller_command(set_direct)
+            await self._single_inner.async_execute_controller_command(
+                set_direct,
+                resources=self._scoped_command_resources(
+                    resource=f"motor:{position_key}"
+                ),
+            )
             self._single_position_data[position_key] = target_angle
             for callback_fn in list(self._single_position_callbacks):
                 callback_fn(dict(self._single_position_data))
@@ -1186,6 +1302,9 @@ class SingleAddressSideCoordinator:
             bind(move_up_fn),
             bind(move_down_fn),
             bind(move_stop_fn),
+            resources=self._scoped_command_resources(
+                resource=f"motor:{position_key}"
+            ),
         )
         self._sync_position_state()
 
@@ -1211,14 +1330,19 @@ class SingleAddressSideCoordinator:
         """Resume both physical and logical hydration through the paired owner."""
         self._single_hydration_owner.resume_position_hydration()
 
-    async def async_stop_command(self, **_kwargs: Any) -> None:
-        self._single_inner.request_command_cancel()
+    async def async_stop_command(
+        self, *, cancel_running: bool = True, **_kwargs: Any
+    ) -> None:
+        if cancel_running:
+            self.request_command_cancel()
 
         async def stop(controller: Any) -> None:
             await controller.bind_side(self._single_side).stop_all()
 
         await self._single_inner.async_execute_controller_command(
-            stop, cancel_running=False
+            stop,
+            cancel_running=False,
+            resources=self._scoped_command_resources(),
         )
 
 
@@ -1276,9 +1400,10 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
         *,
         cancel_running: bool,
         resources: frozenset[str],
+        entry_cancel: Mapping[str, tuple[int, ...]],
     ) -> None:
         """Serialize non-native both over the one physical command lock."""
-        del cancel_running, resources
+        del cancel_running
         try:
             if self._single_native_both and len({child for _, child in targets}) == 1:
                 await op(targets[0][1])
@@ -1286,6 +1411,13 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
 
             errors: dict[str, BaseException] = {}
             for side, child in targets:
+                if any(
+                    self._pair_command_was_cancelled(
+                        target_side, resources, entry_cancel
+                    )
+                    for target_side, _ in targets
+                ):
+                    return
                 try:
                     await op(child)
                 except Exception as err:  # noqa: BLE001
@@ -1324,6 +1456,30 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
             and len({child for _, child in targets}) == 1
         ):
             targets = [(SIDE_BOTH, targets[0][1])]
+        elif len(targets) > 1 and all(
+            isinstance(child, SingleAddressSideCoordinator)
+            for _, child in targets
+        ):
+            # The logical sides share one scheduler. Cancel its existing work
+            # once, then preserve and serialize both side-bound STOP writes.
+            # Letting each wrapper cancel independently can remove the STOP that
+            # the previous wrapper just queued.
+            self._single_inner.request_command_cancel()
+            errors: dict[str, BaseException] = {}
+            for side, child in targets:
+                assert isinstance(child, SingleAddressSideCoordinator)
+                logical_child: Any = child
+                try:
+                    await logical_child.async_stop_command(cancel_running=False)
+                except BaseException as err:
+                    errors[side] = err
+                    _LOGGER.warning(
+                        "STOP failed on %s logical side (%s): %s",
+                        side,
+                        child.address,
+                        err,
+                    )
+            return errors
         return await super()._stop_children(targets)
 
     async def async_connect(self) -> bool:

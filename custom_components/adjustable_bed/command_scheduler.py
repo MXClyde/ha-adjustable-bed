@@ -139,7 +139,19 @@ def command_resources(*resources: str) -> frozenset[str]:
 
 
 def _resources_overlap(left: Collection[str], right: Collection[str]) -> bool:
-    return "*" in left or "*" in right or not set(left).isdisjoint(right)
+    if "*" in left or "*" in right:
+        return True
+
+    def matches(pattern: str, resource: str) -> bool:
+        return pattern.endswith(":*") and resource.startswith(pattern[:-1])
+
+    return any(
+        left_resource == right_resource
+        or matches(left_resource, right_resource)
+        or matches(right_resource, left_resource)
+        for left_resource in left
+        for right_resource in right
+    )
 
 
 class DeviceCommandScheduler:

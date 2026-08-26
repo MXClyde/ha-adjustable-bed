@@ -17,6 +17,7 @@ from custom_components.adjustable_bed.bluetooth_transport import (
     ConnectionPath,
     TransportClass,
 )
+from custom_components.adjustable_bed.command_scheduler import current_command_context
 from custom_components.adjustable_bed.const import (
     BED_MOTOR_PULSE_DEFAULTS,
     BED_TYPE_BEDTECH,
@@ -2873,6 +2874,72 @@ class TestDisconnectCommandSerialization:
         await disconnect
 
         assert disconnected_during_command is False
+        assert coordinator._client is None
+
+    async def test_disconnect_invalidates_queued_and_teardown_race_commands(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ):
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        active_started = asyncio.Event()
+        active_cancelled = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        queued_ran = False
+        teardown_race_ran = False
+
+        async def active(_controller):
+            context = current_command_context()
+            assert context is not None
+            active_started.set()
+            await context.cancel_event.wait()
+            active_cancelled.set()
+            await release_cleanup.wait()
+
+        async def queued(_controller):
+            nonlocal queued_ran
+            queued_ran = True
+
+        async def teardown_race(_controller):
+            nonlocal teardown_race_ran
+            teardown_race_ran = True
+
+        active_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(active)
+        )
+        await active_started.wait()
+        queued_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(
+                queued,
+                cancel_running=False,
+                resource="motor:legs",
+            )
+        )
+        while not coordinator._command_scheduler.has_pending:
+            await asyncio.sleep(0)
+
+        disconnect_task = asyncio.create_task(
+            coordinator.async_disconnect(serialize_with_commands=True)
+        )
+        await active_cancelled.wait()
+        teardown_race_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(
+                teardown_race,
+                cancel_running=False,
+            )
+        )
+        release_cleanup.set()
+
+        await asyncio.gather(
+            active_task,
+            queued_task,
+            teardown_race_task,
+            disconnect_task,
+        )
+        assert not queued_ran
+        assert not teardown_race_ran
         assert coordinator._client is None
 
     async def test_idle_disconnect_skipped_when_timer_rearmed(
