@@ -4148,19 +4148,18 @@ class TestDeviceInfoCache:
             assert coordinator._ble_model == "Model X"
 
     @pytest.mark.parametrize(
-        ("bed_type", "expected_read_done"),
+        "bed_type",
         [
-            (BED_TYPE_OKIMAT, False),
-            (BED_TYPE_OKIN_CST, True),
+            BED_TYPE_OKIMAT,
+            BED_TYPE_OKIN_CST,
         ],
     )
     def test_missing_device_info_cache_policy(
         self,
         hass: HomeAssistant,
         bed_type: str,
-        expected_read_done: bool,
     ):
-        """Only the known-unresponsive explicit protocol uses a negative cache."""
+        """Shared-UUID profiles retry when a missing model could correct routing."""
         entry = MockConfigEntry(
             domain=DOMAIN,
             title=TEST_NAME,
@@ -4181,7 +4180,7 @@ class TestDeviceInfoCache:
         coordinator = AdjustableBedCoordinator(hass, entry)
         coordinator._store_ble_device_info(None, None)
 
-        assert coordinator._device_info_read_done is expected_read_done
+        assert coordinator._device_info_read_done is False
 
     def test_useful_device_info_is_cached_for_refinable_bed(
         self,

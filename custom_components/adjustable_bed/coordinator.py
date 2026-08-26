@@ -1453,18 +1453,12 @@ class AdjustableBedCoordinator:
         # every reconnect. Require the model before we stop retrying; a genuinely
         # model-less bed re-reads cheaply (an absent characteristic errors fast,
         # only a transient timeout costs the read budget, which is what we want
-        # to retry). OKIN CST is exempted below via the negative cache.
+        # to retry).
         required_fields_present = (
             not self._bed_type_needs_ble_model() or model_useful
         )
 
-        # Certain OKIN CST receivers consistently never answer DIS reads. Their
-        # protocol is already explicit and does not depend on Device Information,
-        # so a negative session cache is safe and avoids 10s on every reconnect.
-        negative_cache_is_safe = self._bed_type == BED_TYPE_OKIN_CST
-        self._device_info_read_done = (
-            has_useful_value and required_fields_present
-        ) or negative_cache_is_safe
+        self._device_info_read_done = has_useful_value and required_fields_present
 
         if not self._device_info_read_done:
             if has_useful_value and not required_fields_present:

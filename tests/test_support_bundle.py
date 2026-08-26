@@ -370,11 +370,12 @@ class TestBleDiagnosticsRunner:
         assert "gatt_char:okin_smart_remote_css_write" in report.detection["signals"]
 
     @pytest.mark.parametrize(
-        ("snapshot_name", "selected_device_name", "expected_bed_type"),
+        ("snapshot_name", "selected_device_name", "ble_model", "expected_bed_type"),
         [
-            ("OKIN-441954", "OKIN-441954", BED_TYPE_OKIN_CST),
-            ("LP BED CONTROL", "LP BED CONTROL", BED_TYPE_LEGGETT_OKIN),
-            (None, "LP BED CONTROL", BED_TYPE_LEGGETT_OKIN),
+            ("OKIN-441954", "OKIN-441954", None, BED_TYPE_OKIN_CST),
+            ("OKIN-050226", "OKIN-050226", "MEGAMAT MBZ", BED_TYPE_OKIN_RF_ECO_BT),
+            ("LP BED CONTROL", "LP BED CONTROL", None, BED_TYPE_LEGGETT_OKIN),
+            (None, "LP BED CONTROL", None, BED_TYPE_LEGGETT_OKIN),
         ],
     )
     async def test_run_diagnostics_disambiguates_okin_dual_stack_by_name(
@@ -383,6 +384,7 @@ class TestBleDiagnosticsRunner:
         enable_custom_integrations,
         snapshot_name: str | None,
         selected_device_name: str,
+        ble_model: str | None,
         expected_bed_type: str,
     ):
         """Diagnostics should combine the dual-stack signature with receiver identity."""
@@ -476,6 +478,13 @@ class TestBleDiagnosticsRunner:
                 "custom_components.adjustable_bed.ble_diagnostics.bluetooth.async_scanner_count",
                 return_value=1,
             ),
+            patch.object(
+                BLEDiagnosticRunner,
+                "_read_device_information",
+                new=AsyncMock(
+                    return_value={"model_number": ble_model} if ble_model is not None else {}
+                ),
+            ),
         ):
             report = await BLEDiagnosticRunner(
                 hass,
@@ -487,8 +496,10 @@ class TestBleDiagnosticsRunner:
         assert report.detection["supported_match"] is True
         if expected_bed_type == BED_TYPE_OKIN_CST:
             assert "gatt_service:nordic_dfu" in report.detection["signals"]
-        else:
+        elif expected_bed_type == BED_TYPE_LEGGETT_OKIN:
             assert "name:leggett_okin" in report.detection["signals"]
+        else:
+            assert "device_info:model_number" in report.detection["signals"]
 
     async def test_run_diagnostics_reconnects_after_mid_enumeration_disconnect(
         self,

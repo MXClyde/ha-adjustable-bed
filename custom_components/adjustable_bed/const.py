@@ -2047,13 +2047,14 @@ def bed_type_has_position_feedback(
         return True
     return bed_type == BED_TYPE_KEESON and protocol_variant == KEESON_VARIANT_ERGOMOTION
 
-# Bed types that may have angle sensing enabled but report NO degree-angle data.
-# Sleep Number MCR/BAM beds only report sleep-number values and bed presence over BLE
-# (no motor angle feedback at all), so degree angle sensors would sit at "unknown"
-# forever. These are skipped during angle-sensor creation regardless of the
-# disable_angle_sensing option, which also fixes existing installs whose stored config
-# still has angle sensing enabled (#322).
-BEDS_WITHOUT_ANGLE_FEEDBACK: Final = frozenset({BED_TYPE_SLEEP_NUMBER_MCR})
+# Bed types that report no degree-angle data. Sleep Number MCR/BAM only reports
+# sleep-number values and bed presence, while RF ECO BT controls a single stair
+# actuator without position feedback. Degree angle sensors would sit at "unknown"
+# forever, so these types skip angle-sensor creation and remove stale entities from
+# previously selected profiles (#322, #344).
+BEDS_WITHOUT_ANGLE_FEEDBACK: Final = frozenset(
+    {BED_TYPE_OKIN_RF_ECO_BT, BED_TYPE_SLEEP_NUMBER_MCR}
+)
 
 # Bed types that report positions as 0-100 percentages (not angle degrees)
 # These bed types return percentage values directly, so no angle-to-percent conversion is needed.

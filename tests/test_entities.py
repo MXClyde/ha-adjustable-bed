@@ -2833,6 +2833,62 @@ class TestSensorEntities:
                 is None
             )
 
+    async def test_okin_rf_eco_bt_removes_pre_existing_cst_position_entities(
+        self,
+        hass: HomeAssistant,
+        mock_coordinator_connected,
+        enable_custom_integrations,
+    ):
+        """A CST entry corrected to RF ECO BT must remove stale position entities."""
+        del mock_coordinator_connected, enable_custom_integrations
+        from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(hass)
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="RF ECO BT Stair",
+            data={
+                CONF_ADDRESS: "AA:BB:CC:DD:EE:62",
+                CONF_NAME: "RF ECO BT Stair",
+                CONF_BED_TYPE: BED_TYPE_OKIN_RF_ECO_BT,
+                CONF_MOTOR_COUNT: 1,
+                CONF_HAS_MASSAGE: False,
+                CONF_DISABLE_ANGLE_SENSING: False,
+                CONF_PREFERRED_ADAPTER: "auto",
+            },
+            unique_id="AA:BB:CC:DD:EE:62",
+            entry_id="okin_rf_eco_bt_stale_position_entry",
+        )
+        entry.add_to_hass(hass)
+
+        # Simulate the back/legs entities registered while this entry used CST.
+        for axis in ("back", "legs"):
+            registry.async_get_or_create(
+                "sensor",
+                DOMAIN,
+                f"AA:BB:CC:DD:EE:62_{axis}_angle",
+                config_entry=entry,
+            )
+            registry.async_get_or_create(
+                "number",
+                DOMAIN,
+                f"AA:BB:CC:DD:EE:62_{axis}_position",
+                config_entry=entry,
+            )
+
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        for axis in ("back", "legs"):
+            assert (
+                registry.async_get_entity_id("sensor", DOMAIN, f"AA:BB:CC:DD:EE:62_{axis}_angle")
+                is None
+            )
+            assert (
+                registry.async_get_entity_id("number", DOMAIN, f"AA:BB:CC:DD:EE:62_{axis}_position")
+                is None
+            )
+
 
 class TestEntityAvailability:
     """Test entity availability."""
