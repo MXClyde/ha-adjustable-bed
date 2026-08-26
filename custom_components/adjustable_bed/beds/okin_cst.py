@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from bleak.exc import BleakError
 
-from ..const import OKIMAT_WRITE_CHAR_UUID
+from ..const import OKIMAT_NOTIFY_CHAR_UUID, OKIMAT_WRITE_CHAR_UUID
 from .base import BedController, MotorControlSpec
 from .okin_protocol import build_cst_command
 
@@ -187,6 +188,41 @@ class OkinCstController(BedController):
     def stale_motor_entity_keys(self) -> frozenset[str]:
         """Remove motor covers exposed by the former four-axis assumption."""
         return frozenset({"back", "legs", "tilt"})
+
+    async def start_notify(
+        self, callback: Callable[[str, float], None] | None = None
+    ) -> None:
+        """Subscribe to CST notifications for raw diagnostic capture."""
+        self._notify_callback = callback
+        client = self.client
+        if client is None or not client.is_connected:
+            _LOGGER.warning("Cannot start CST notifications: not connected")
+            return
+
+        try:
+            async with self._ble_lock:
+                await client.start_notify(
+                    OKIMAT_NOTIFY_CHAR_UUID,
+                    self._handle_notification,
+                )
+        except BleakError as err:
+            _LOGGER.debug("Could not start CST notifications: %s", err)
+
+    def _handle_notification(self, _: object, data: bytearray) -> None:
+        """Forward CST notifications without interpreting them as positions."""
+        self.forward_raw_notification(OKIMAT_NOTIFY_CHAR_UUID, bytes(data))
+
+    async def stop_notify(self) -> None:
+        """Stop the raw CST diagnostic notification subscription."""
+        client = self.client
+        if client is None or not client.is_connected:
+            return
+
+        try:
+            async with self._ble_lock:
+                await client.stop_notify(OKIMAT_NOTIFY_CHAR_UUID)
+        except BleakError as err:
+            _LOGGER.debug("Could not stop CST notifications: %s", err)
 
     # Motor movement helpers
 

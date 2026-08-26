@@ -26,6 +26,7 @@ from custom_components.adjustable_bed.const import (
     CONF_MOTOR_COUNT,
     CONF_PREFERRED_ADAPTER,
     DOMAIN,
+    OKIMAT_NOTIFY_CHAR_UUID,
     OKIMAT_WRITE_CHAR_UUID,
 )
 from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
@@ -434,3 +435,29 @@ class TestOkinCstCommands:
 
         assert _payloads(mock_bleak_client) == [build_cst_command()] * 2
         assert mock_sleep.await_args_list == [call(0.1), call(0.1)]
+
+    async def test_notifications_are_forwarded_raw_without_position_updates(
+        self,
+        okin_cst_controller: OkinCstController,
+        mock_bleak_client: MagicMock,
+    ) -> None:
+        """Diagnostics should receive CST notifications without invented positions."""
+        raw_callback = MagicMock()
+        position_callback = MagicMock()
+        okin_cst_controller.set_raw_notify_callback(raw_callback)
+        mock_bleak_client.start_notify.reset_mock()
+
+        await okin_cst_controller.start_notify(position_callback)
+
+        mock_bleak_client.start_notify.assert_awaited_once()
+        notify_uuid, handler = mock_bleak_client.start_notify.await_args.args
+        assert notify_uuid == OKIMAT_NOTIFY_CHAR_UUID
+
+        payload = bytearray.fromhex("0c02000000000000000001000000")
+        handler(MagicMock(), payload)
+
+        raw_callback.assert_called_once_with(OKIMAT_NOTIFY_CHAR_UUID, bytes(payload))
+        position_callback.assert_not_called()
+
+        await okin_cst_controller.stop_notify()
+        mock_bleak_client.stop_notify.assert_awaited_once_with(OKIMAT_NOTIFY_CHAR_UUID)
