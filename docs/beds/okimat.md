@@ -69,7 +69,10 @@ Detection priority:
 1. Device name contains "nectar" → Nectar
 2. Device name contains "leggett", "l&p", or "adjustable base" → Leggett & Platt
 3. Device name contains "okimat", "okin rf", or "okin ble" → Okimat/Okin UUID
-4. Connected GATT has OKIN UUID + CSS + Nordic DFU → Okin CST
+4. Connected GATT has OKIN UUID + CSS → Okin CST or OKIN Smart Remote / RF
+   ECO BT. Nordic DFU is only an initial CST hint. Device Information model
+   `MEGAMAT MBZ` identifies RF ECO BT, while an `OKIMAT` model identifies a full
+   bed. Otherwise an already configured CST or RF ECO BT profile is preserved.
 5. Device name is `OKIN-Receiver` / `OKIN - Receiver` → prompt for Okin-family protocol
 6. Fallback → Okimat (with warning)
 

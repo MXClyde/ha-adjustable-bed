@@ -87,11 +87,13 @@ Several bed brands use Okin-based BLE controllers. While they share common roots
 3. Name contains "okimat", "okin rf", or "okin ble" → Okimat
 4. Name starts with `OKIN-` → prompt for Okin-family protocol (confirmed Nectar bases can advertise this way)
 5. Name is `OKIN-Receiver` / `OKIN - Receiver` → prompt for Okin-family protocol
-6. Connected GATT has `62741525-...` plus CSS `90311625-...` and Nordic DFU
-   `00001530-...` → Okin CST, unless the name begins `LP BED`, which identifies
-   LP Control's proven 6-byte Okin path
-7. Connected GATT has `62741525-...` plus CSS `90311625-...` without Nordic DFU → OKIN Smart Remote / RF ECO BT
-8. Fallback → Okimat (with warning logged)
+6. Connected GATT has `62741525-...` plus CSS `90311625-...` → Okin CST or
+   OKIN Smart Remote / RF ECO BT. Nordic DFU is an initial CST hint, not a safe
+   discriminator. Device Information model `MEGAMAT MBZ` identifies RF ECO BT,
+   an `OKIMAT` model identifies a full bed, and an already configured CST or RF
+   ECO BT profile is otherwise preserved. A name beginning `LP BED` identifies
+   LP Control's proven 6-byte Okin path.
+7. Fallback → Okimat (with warning logged)
 
 ---
 
@@ -139,7 +141,7 @@ These beds have their own dedicated integrations:
    - `Serta*` or `Motion Perfect*` → Serta
    - `Octo*` → Octo (Standard variant)
    - `iFlex*` → Mattress Firm 900
-   - `OKIN-*` with service `62741523-...` plus CSS service `90311623-...` and Nordic DFU `00001530-...` → [Okin CST](beds/okin-cst.md), including MFirm 900-O / Rize MF900-style bases
+   - `OKIN-*` with service `62741523-...` plus CSS service `90311623-...` → [Okin CST](beds/okin-cst.md) or [OKIN Smart Remote / RF ECO BT](beds/okin-rf-eco-bt.md); Nordic DFU alone does not distinguish them
    - `Malouf*`, `Structures*` → Malouf
    - `Smart bed *` → [Sleep Number](beds/sleep_number.md) (Climate 360 / FlexFit, Fuzion)
    - MAC-address-like name such as `64:DB:A0:07:DD:02` + service `ffffd1fd-...` → [Sleep Number](beds/sleep_number.md) (i8 / 360 FlexFit 2, BAM/MCR)
@@ -159,8 +161,7 @@ These beds have their own dedicated integrations:
 
 4. **Use the support bundle to find service UUIDs**: If unsure, use **Browse unsupported BLE devices** to find the MAC address, then run `adjustable_bed.generate_support_bundle` with `target_address`. The output includes service UUIDs:
    - Service `62741523-...` → Okin family (see [Okin Protocol Family](#okin-protocol-family))
-   - Service `62741523-...` plus CSS service `90311623-...`, write characteristic `90311625-...`, and Nordic DFU service `00001530-...` → [Okin CST](beds/okin-cst.md)
-   - Service `62741523-...` plus CSS service `90311623-...` and write characteristic `90311625-...` without Nordic DFU → [OKIN Smart Remote / RF ECO BT](beds/okin-rf-eco-bt.md)
+   - Service `62741523-...` plus CSS service `90311623-...` and write characteristic `90311625-...` → [Okin CST](beds/okin-cst.md) or [OKIN Smart Remote / RF ECO BT](beds/okin-rf-eco-bt.md); Nordic DFU is only an initial CST hint. Device Information model `MEGAMAT MBZ` identifies RF ECO BT, while an `OKIMAT` model identifies a full bed. Otherwise the integration preserves an already configured CST or RF ECO BT profile.
    - Service `45e25100-...` → Leggett & Platt Gen2
    - Service `0000aa5c-...` → Octo Star2 variant
    - Service `01000001-...` → Malouf/Lucid family (usually New OKIN; `OKIN-BLE` + `BTCB` uses Legacy OKIN)

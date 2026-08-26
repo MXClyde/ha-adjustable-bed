@@ -1515,6 +1515,36 @@ class TestOkinUUIDDisambiguation:
                 == BED_TYPE_OKIN_RF_ECO_BT
             )
 
+    def test_shared_okin_gatt_refinement_recovers_persisted_cst_stair(self):
+        """The #344 stair model repairs an entry previously persisted as CST."""
+        gatt_services = [
+            SimpleNamespace(
+                uuid=OKIMAT_SERVICE_UUID,
+                characteristics=[
+                    SimpleNamespace(uuid=OKIMAT_WRITE_CHAR_UUID),
+                ],
+            ),
+            SimpleNamespace(
+                uuid=OKIN_SMART_REMOTE_CSS_SERVICE_UUID,
+                characteristics=[
+                    SimpleNamespace(uuid=OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID),
+                ],
+            ),
+            SimpleNamespace(
+                uuid=NORDIC_DFU_SERVICE_UUID,
+                characteristics=[],
+            ),
+        ]
+
+        assert (
+            refine_okin_shared_uuid_protocol_from_gatt(
+                BED_TYPE_OKIN_CST,
+                gatt_services,
+                ble_model="MEGAMAT MBZ",
+            )
+            == BED_TYPE_OKIN_RF_ECO_BT
+        )
+
     def test_shared_okin_gatt_refinement_downgrades_non_okimat_model_to_rf_eco_bt(self):
         """The ELDA stair (#344, ``MEGAMAT MBZ``) keeps the RF ECO BT downgrade."""
         gatt_services = [

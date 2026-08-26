@@ -703,6 +703,11 @@ def _is_okimat_bed_model(ble_model: str | None) -> bool:
     return "okimat" in (ble_model or "").strip().lower()
 
 
+def _is_rf_eco_bt_stair_model(ble_model: str | None) -> bool:
+    """Return True when Device Info identifies the known RF ECO BT stair."""
+    return (ble_model or "").strip().lower() == "megamat mbz"
+
+
 def refine_okin_shared_uuid_protocol_from_gatt(
     bed_type: str,
     gatt_services: Any,
@@ -733,6 +738,15 @@ def refine_okin_shared_uuid_protocol_from_gatt(
                     ", ".join(gatt_detection.signals),
                 )
             return BED_TYPE_LEGGETT_OKIN
+        if _is_rf_eco_bt_stair_model(ble_model):
+            if bed_type != BED_TYPE_OKIN_RF_ECO_BT:
+                _LOGGER.info(
+                    "Refined shared OKIN protocol from %s to %s using stair model %r",
+                    bed_type,
+                    BED_TYPE_OKIN_RF_ECO_BT,
+                    ble_model,
+                )
+            return BED_TYPE_OKIN_RF_ECO_BT
         if gatt_detection.bed_type in {
             BED_TYPE_OKIN_CST,
             BED_TYPE_OKIN_RF_ECO_BT,
