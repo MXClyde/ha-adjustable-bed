@@ -71,6 +71,7 @@ from .const import (
     BED_TYPE_OKIN_FFE,
     BED_TYPE_OKIN_HANDLE,
     BED_TYPE_OKIN_NORDIC,
+    BED_TYPE_OKIN_RF_ECO_BT,
     BED_TYPE_OKIN_UUID,
     BED_TYPE_REVERIE,
     BED_TYPE_REVERIE_NIGHTSTAND,
@@ -128,9 +129,6 @@ from .const import (
     MALOUF_LAYOUT_AUTO,
     MALOUF_MEMORY_SLOTS_AUTO,
     OKIMAT_SERVICE_UUID,
-    OKIN_CST_POSITION_AXES,
-    OKIN_FOOT_MAX_ANGLE,
-    OKIN_HEAD_MAX_ANGLE,
     POSITION_MODE_ACCURACY,
     POSITION_OVERSHOOT_TOLERANCE,
     POSITION_SEEK_TIMEOUT,
@@ -177,6 +175,10 @@ _INITIAL_POSITION_READ_TIMEOUT = 10.0
 _INITIAL_POSITION_READ_RETRY_DELAY = 3.0
 _INITIAL_POSITION_READ_MAX_ATTEMPTS = 6
 _PASSIVE_POSITION_RECONCILIATION_IDLE_MARGIN = 15.0
+# One reconnect gives a stale preserved OKIN profile another chance to reveal
+# the CST/RF ECO BT discriminator without making known receivers pay DIS
+# timeouts forever.
+_OKIN_PRESERVED_PROFILE_DEVICE_INFO_MAX_READ_ATTEMPTS = 2
 
 MAX_COMMAND_TRACE_ENTRIES = 100
 
@@ -335,6 +337,7 @@ class AdjustableBedCoordinator:
         self._ble_manufacturer: str | None = None
         self._ble_model: str | None = None
         self._device_info_read_done: bool = False
+        self._device_info_read_attempts: int = 0
         self._bond_probe_timed_out: bool = False
 
         # Track if pairing is supported by the Bluetooth adapter (None = unknown)
@@ -491,10 +494,7 @@ class AdjustableBedCoordinator:
             entry_data.pop(CONF_RICHMAT_REMOTE, None)
         angle_sensing_defaulted = CONF_DISABLE_ANGLE_SENSING not in self.entry.data or (
             self.entry.data.get(CONF_DISABLE_ANGLE_SENSING) is True
-            and (
-                previous_bed_type not in BEDS_WITH_POSITION_FEEDBACK
-                or previous_bed_type == BED_TYPE_OKIN_CST
-            )
+            and previous_bed_type not in BEDS_WITH_POSITION_FEEDBACK
         )
         # Config flow defaults disable_angle_sensing from BEDS_WITH_POSITION_FEEDBACK,
         # so the correction must use the same set: a repaired entry (e.g. CB35 ->
@@ -630,14 +630,10 @@ class AdjustableBedCoordinator:
         # set_position validation still rejects a target the frame cannot reach
         # when the controller is momentarily absent.
         if position_key in ("back", "head"):
-            if self._bed_type == BED_TYPE_OKIN_CST:
-                return OKIN_HEAD_MAX_ANGLE
             if self._bed_type in (BED_TYPE_REVERIE, BED_TYPE_REVERIE_NIGHTSTAND):
                 return REVERIE_BACK_MAX_ANGLE
             return self.back_max_angle
         if position_key in ("legs", "feet"):
-            if self._bed_type == BED_TYPE_OKIN_CST:
-                return OKIN_FOOT_MAX_ANGLE
             return self.legs_max_angle
         # Unknown motor, return back max as default
         return self.back_max_angle
@@ -1439,6 +1435,7 @@ class AdjustableBedCoordinator:
         model: str | None,
     ) -> None:
         """Store Device Information and decide whether reconnects should retry it."""
+        self._device_info_read_attempts += 1
         self._ble_manufacturer = manufacturer
         self._ble_model = model
 
@@ -1453,20 +1450,28 @@ class AdjustableBedCoordinator:
         # every reconnect. Require the model before we stop retrying; a genuinely
         # model-less bed re-reads cheaply (an absent characteristic errors fast,
         # only a transient timeout costs the read budget, which is what we want
-        # to retry). OKIN CST is exempted below via the negative cache.
+        # to retry).
         required_fields_present = (
             not self._bed_type_needs_ble_model() or model_useful
         )
 
-        # Certain OKIN CST receivers consistently never answer DIS reads. Their
-        # protocol is already explicit and does not depend on Device Information,
-        # so a negative session cache is safe and avoids 10s on every reconnect.
-        negative_cache_is_safe = self._bed_type == BED_TYPE_OKIN_CST
-        self._device_info_read_done = (
-            has_useful_value and required_fields_present
-        ) or negative_cache_is_safe
+        read_succeeded = has_useful_value and required_fields_present
+        profile_retry_exhausted = (
+            self._bed_type in {BED_TYPE_OKIN_CST, BED_TYPE_OKIN_RF_ECO_BT}
+            and self._device_info_read_attempts
+            >= _OKIN_PRESERVED_PROFILE_DEVICE_INFO_MAX_READ_ATTEMPTS
+        )
+        self._device_info_read_done = read_succeeded or profile_retry_exhausted
 
-        if not self._device_info_read_done:
+        if profile_retry_exhausted and not read_succeeded:
+            _LOGGER.debug(
+                "Device Information read for %s did not return the model after "
+                "%d attempts; caching the %s profile for this coordinator session.",
+                self._address,
+                self._device_info_read_attempts,
+                self._bed_type,
+            )
+        elif not self._device_info_read_done:
             if has_useful_value and not required_fields_present:
                 _LOGGER.debug(
                     "Device Information read for %s is missing the model this "
@@ -2953,9 +2958,6 @@ class AdjustableBedCoordinator:
         """Return the logical position axes that startup hydration should populate."""
         if self._motor_count <= 0:
             return set()
-        if self._bed_type == BED_TYPE_OKIN_CST:
-            return set(OKIN_CST_POSITION_AXES)
-
         expected_axes = {"back", "legs"}
         if self._motor_count > 2:
             expected_axes.add("head")

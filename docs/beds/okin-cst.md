@@ -1,7 +1,7 @@
 # Okin CST (CSTProtocol)
 
-**Status:** Needs testing
-**Ref:** Reverse-engineered from `com.okin.bedding.rizemf900` APK
+**Status:** Static analysis complete; hardware validation pending
+**Ref:** Phase 4 clean-room analysis of `com.okin.bedding.rizemf900` 1.1.2
 
 ## Known Brands
 
@@ -15,14 +15,14 @@
 |--------|-------|
 | Service UUID | `62741523-52f9-8864-b1ab-3b3a8d65950b` (standard OKIN) |
 | Name patterns | Varies (shared UUID requires disambiguation; some report as `OKIN-XXXXXX`) |
-| Connected GATT hint | CSS `90311623-...` plus Nordic DFU `00001530-...`, unless a stronger device identity selects another shared-UUID protocol |
+| Connected GATT hint | CSS `90311623-...` plus Nordic DFU `00001530-...` is ambiguous and requires another identity signal |
 | BLE Pairing | Required |
 
 Manual selection may be needed since the service UUID is shared with other Okin protocols.
-Choose this profile for Nectar Motion style `OKIN-*` bases when diagnostics show
-both the CSS service and Nordic DFU service.
-This also applies to Mattress Firm 900-O / MFirm 900-O bases advertising as
-`OKIN-XXXXXX` with the same connected GATT signature.
+Do not choose CST solely because diagnostics show both the CSS and Nordic DFU
+services. That connected GATT signature is also exposed by RF ECO BT stair
+actuators. Device Information model `MEGAMAT MBZ` identifies RF ECO BT. Choose
+CST only when the known base or app identity corroborates the CST protocol.
 
 Do not select CST for `LP BED...` receivers. LP Control 2.9.0 identifies those
 as its Okin profile and sends 6-byte commands, even when the receiver also
@@ -30,13 +30,12 @@ exposes CSS and Nordic DFU services. See [Leggett & Platt](leggett-platt.md).
 
 ## Pairing
 
-These bases require an OS-level Bluetooth **bond** before commands are accepted.
-Pairing is "Just Works" — **no PIN** and **no dedicated Bluetooth pairing button**.
-The bond is negotiated automatically by the OS when a client accesses one of the
-firmware's encrypted characteristics; on a real device every read/notify and
-Device Information characteristic returns GATT `error=5` "Insufficient
-authentication" until the link is bonded, while the command write characteristic
-(`62741525-…`) is reachable unbonded.
+The captured MFirm receiver gates its reads and notification characteristics behind
+an OS-level Bluetooth **bond**. Pairing is "Just Works": **no PIN** and **no
+dedicated Bluetooth pairing button**. Before bonding, those characteristics return
+GATT `error=5` "Insufficient authentication". The command characteristic
+(`62741525-...`) itself was readable unbonded, but the integration still establishes
+the bond so the connection matches the official app's full GATT session.
 
 **To enter pairing mode, power-cycle the control box:** unplug it for ~30 seconds,
 then plug it back in. The status light blinks blue, then turns green after ~20 s —
@@ -58,12 +57,14 @@ Uses a 14-byte command format with two separate 32-bit fields:
 [0x0C, 0x02, primary[4], secondary[4], 0x00, 0x00, 0x00, 0x00]
 ```
 
-- **Primary field** (bytes 2-5): Head, foot, tilt, lumbar motor control plus
-  several remote actions, including presets, memory, light toggle, and most
-  massage controls
+- **Primary field** (bytes 2-5): Head, foot, and lumbar motor control plus
+  presets, memory-save chords, light toggle, massage stop, and intensity
 - **Secondary field** (bytes 6-9): Discrete light on/off and massage wave modes
-- **Write characteristic:** `62741525-...` (write-with-response)
-- **Position notify:** `62741524-...` (same as Okimat)
+- **Write characteristic:** `62741525-...`; the app leaves the characteristic's
+  runtime/default write type unchanged, while the captured hardware advertises
+  the `write` property
+- **Notify characteristic:** `62741625-...`; the app only watches byte 10 for a
+  generic change and does not decode motor positions
 
 Field placement is app-specific. Do not assume all presets, lights, or massage
 commands use the secondary field.
@@ -77,10 +78,8 @@ commands use the secondary field.
 | Head Down | `0x00000002` |
 | Foot Up | `0x00000004` |
 | Foot Down | `0x00000008` |
-| Head Tilt Up | `0x00000010` |
-| Head Tilt Down | `0x00000020` |
-| Lumbar Up | `0x00000040` |
-| Lumbar Down | `0x00000080` |
+| Lumbar Up | `0x00000010` |
+| Lumbar Down | `0x00000020` |
 
 Multiple motor bits can be OR'd together for simultaneous movement.
 
@@ -93,19 +92,13 @@ Multiple motor bits can be OR'd together for simultaneous movement.
 | Lounge | `0x00002000` |
 | Incline / TV | `0x00004000` |
 | Anti-snore | `0x00008000` |
-| App Memory button | `0x00010000` |
 | Save Zero-G | `0x08001000` |
 | Save Lounge | `0x08002000` |
 | Save Incline | `0x08004000` |
 | Light Toggle | `0x00020000` |
-| Massage Toggle | `0x04000000` |
 | Massage Off | `0x02000000` |
 | Massage All + | `0x00000C00` |
 | Massage All - | `0x01800000` |
-| Massage Head + | `0x00000800` |
-| Massage Head - | `0x00800000` |
-| Massage Feet + | `0x00000400` |
-| Massage Feet - | `0x01000000` |
 
 ### Remote Actions (secondary field)
 
@@ -119,11 +112,12 @@ Multiple motor bits can be OR'd together for simultaneous movement.
 
 ### Timing
 
-The Android app repeats the active remote button command while the button is
-held, then sends STOP twice after release. The integration mirrors that behavior
-by sending cleanup STOP packets after movement, preset, light, and massage
-commands. Preset recalls are held longer so a Home Assistant button press can
-complete the move; light and massage controls use a short simulated press.
+The Android app sends the active command immediately and every 100 ms while a
+button is held. On release it sends the all-zero STOP frame twice, at +100 ms and
++200 ms. For one-shot voice actions such as presets, lights, and massage, the app
+streams for 500 ms before the same delayed STOP cleanup. Home Assistant uses that
+fixed one-shot cadence for button entities and keeps motor movement duration
+configurable.
 
 ### Memory Slots
 
@@ -138,12 +132,13 @@ memories. Home Assistant exposes those as numbered memory slots:
 
 ## Features
 
-- 4 motors: head, foot, tilt, lumbar
+- 3 motors: head, foot, lumbar
 - Flat, Zero-G, anti-snore, lounge, and incline presets
 - 3 programmable preset memory slots: Zero-G, Incline, and Lounge
 - Discrete light on/off plus toggle
-- Massage with head/foot intensity control and wave modes
-- Position feedback (same as Okimat)
+- Massage with global intensity control, stop, and three wave modes
+- Under-bed light toggle and discrete on/off; no RGB command was found in the app
+- No decoded motor-position feedback
 
 ## Relationship to Other Okin Protocols
 
@@ -153,9 +148,14 @@ and in which 32-bit field carries each remote action.
 ## App
 
 - **Android:** Mattress Firm 900 - O / MFirm 900-O (`com.okin.bedding.rizemf900`)
-- **Android:** `com.okin.bedding.nectarmotion`
+- **Android:** `com.okin.bedding.nectarmotion` (historically associated with this
+  profile; not part of this clean-room run)
 
 ## Source
 
-Protocol reverse-engineered from `CSTProtocol.java` in the Rize MF900 and
-Nectar Motion APKs.
+The command table and timing above come from a COMPLETE Phase 4 clean-room
+analysis of the frozen MFirm 900-O 1.1.2 XAPK, archive SHA-256
+`a4f5ae67b2b9b870e6413d08597364041ac6947c7ba5445eb1979498895ff46f`.
+The analysis covered all 24 reachable control frames and independently checked
+the Java decompilation against smali bytecode. Physical behavior still needs
+validation on target hardware.

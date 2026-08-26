@@ -178,6 +178,8 @@ def _motor_count_options(
     """Return motor counts supported by the selected protocol."""
     if bed_type == BED_TYPE_OCTO and protocol_variant != OCTO_VARIANT_STAR2:
         return [1, 2, 3, 4]
+    if bed_type == BED_TYPE_OKIN_CST:
+        return [3]
     return [2, 3, 4]
 
 
@@ -215,6 +217,8 @@ def _default_motor_count(
         and device_name.strip().lower().startswith("rtv")
     ):
         return 1
+    if bed_type == BED_TYPE_OKIN_CST:
+        return 3
     return DEFAULT_MOTOR_COUNT
 
 

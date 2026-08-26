@@ -148,8 +148,6 @@ BED_TYPE_LEGGETT_GEN2: Final = "leggett_gen2"  # Leggett Gen2 ASCII protocol
 BED_TYPE_LEGGETT_OKIN: Final = "leggett_okin"  # Leggett Okin binary protocol
 BED_TYPE_LEGGETT_WILINKE: Final = "leggett_wilinke"  # Leggett WiLinke 5-byte
 
-OKIN_CST_POSITION_AXES: Final = frozenset({"back", "legs"})
-
 # Bed types - Legacy naming (backwards compatibility)
 # These map to the protocol-based types above
 BED_TYPE_LINAK: Final = "linak"
@@ -1997,7 +1995,6 @@ BEDS_WITH_ANGLE_SENSING: Final = frozenset(
     {
         BED_TYPE_LINAK,
         BED_TYPE_OKIMAT,
-        BED_TYPE_OKIN_CST,
         BED_TYPE_OKIN_UUID,  # Same protocol as Okimat
         BED_TYPE_REVERIE,
         BED_TYPE_REVERIE_NIGHTSTAND,
@@ -2015,7 +2012,6 @@ BEDS_WITH_POSITION_FEEDBACK: Final = frozenset(
     {
         BED_TYPE_LINAK,
         BED_TYPE_OKIMAT,
-        BED_TYPE_OKIN_CST,
         BED_TYPE_OKIN_UUID,  # Same protocol as Okimat
         BED_TYPE_REVERIE,
         BED_TYPE_REVERIE_NIGHTSTAND,
@@ -2047,13 +2043,14 @@ def bed_type_has_position_feedback(
         return True
     return bed_type == BED_TYPE_KEESON and protocol_variant == KEESON_VARIANT_ERGOMOTION
 
-# Bed types that may have angle sensing enabled but report NO degree-angle data.
-# Sleep Number MCR/BAM beds only report sleep-number values and bed presence over BLE
-# (no motor angle feedback at all), so degree angle sensors would sit at "unknown"
-# forever. These are skipped during angle-sensor creation regardless of the
-# disable_angle_sensing option, which also fixes existing installs whose stored config
-# still has angle sensing enabled (#322).
-BEDS_WITHOUT_ANGLE_FEEDBACK: Final = frozenset({BED_TYPE_SLEEP_NUMBER_MCR})
+# Bed types that may have angle sensing enabled in an existing entry but report no
+# degree-angle data. Sleep Number MCR/BAM reports only sleep-number values and bed
+# presence, while CST and RF ECO BT expose no reliable position feedback. Skip
+# their entity creation and remove stale sensors from earlier profiles so they do
+# not remain "unknown" forever (#322, #344, #501).
+BEDS_WITHOUT_ANGLE_FEEDBACK: Final = frozenset(
+    {BED_TYPE_OKIN_CST, BED_TYPE_OKIN_RF_ECO_BT, BED_TYPE_SLEEP_NUMBER_MCR}
+)
 
 # Bed types that report positions as 0-100 percentages (not angle degrees)
 # These bed types return percentage values directly, so no angle-to-percent conversion is needed.

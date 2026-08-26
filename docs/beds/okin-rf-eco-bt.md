@@ -38,8 +38,10 @@ can identify it after connecting when this GATT signature is present:
 - CSS write characteristic `90311625-25fa-3346-12ef-3cfb7a2556ac`
 
 If the same device also exposes Nordic DFU service
-`00001530-1212-efde-1523-785feabcd123`, it may be a full bed controller using
-[Okin CST](okin-cst.md), not this single-actuator stair profile.
+`00001530-1212-efde-1523-785feabcd123`, it may be either this profile or a full
+bed controller using [Okin CST](okin-cst.md). That service is not a safe
+discriminator: the integration preserves an already configured RF ECO BT or
+CST profile when these GATT signals disagree with it.
 
 Full OKIMAT beds expose the **same** OKIN write + CSS GATT signature as this
 stair profile (see [issue #406](https://github.com/kristofferR/ha-adjustable-bed/issues/406),
