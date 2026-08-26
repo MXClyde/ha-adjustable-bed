@@ -6,7 +6,7 @@
 // layout, the per-section on/off + reordering, and the memory options — and
 // avoid ha-form's expandable/flatten quirks entirely.
 import { LitElement, type TemplateResult, css, html, nothing } from "lit";
-import { customElement, property, state } from "lit/decorators.js";
+import { property, state } from "lit/decorators.js";
 import { SECTION_ORDER, bedEntitiesForDevice } from "./discovery";
 import { localize } from "./localize";
 import type {
@@ -60,7 +60,6 @@ function presentSections(bed: BedEntities): Record<string, boolean> {
 const arraysEqual = (a: string[], b: string[]): boolean =>
   a.length === b.length && a.every((v, i) => v === b[i]);
 
-@customElement("adjustable-bed-card-editor")
 export class AdjustableBedCardEditor
   extends LitElement
   implements LovelaceCardEditor
@@ -396,6 +395,10 @@ export class AdjustableBedCardEditor
       cursor: pointer;
     }
   `;
+}
+
+if (!customElements.get("adjustable-bed-card-editor")) {
+  customElements.define("adjustable-bed-card-editor", AdjustableBedCardEditor);
 }
 
 declare global {

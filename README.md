@@ -181,7 +181,8 @@ during an integration update, reload that page once after restarting Home
 Assistant so the browser picks up the updated card module.
 
 To add it: edit a dashboard → **Add Card** → search for **Adjustable Bed**, then
-pick your bed device. Or in YAML:
+pick your bed device. On Home Assistant 2026.6 or newer, selecting one of the
+bed's entities first also suggests the Adjustable Bed Card. Or in YAML:
 
 ```yaml
 type: custom:adjustable-bed-card
