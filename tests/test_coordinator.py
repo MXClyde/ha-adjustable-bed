@@ -4102,19 +4102,19 @@ class TestDeviceInfoCache:
             assert coordinator._ble_model == "Model X"
 
     @pytest.mark.parametrize(
-        ("bed_type", "expected_read_done"),
+        "bed_type",
         [
-            (BED_TYPE_OKIMAT, False),
-            (BED_TYPE_OKIN_CST, True),
+            BED_TYPE_OKIMAT,
+            BED_TYPE_OKIN_CST,
+            BED_TYPE_OKIN_RF_ECO_BT,
         ],
     )
     def test_missing_device_info_cache_policy(
         self,
         hass: HomeAssistant,
         bed_type: str,
-        expected_read_done: bool,
     ):
-        """Only the known-unresponsive explicit protocol uses a negative cache."""
+        """Shared-UUID profiles retry when a missing model could correct routing."""
         entry = MockConfigEntry(
             domain=DOMAIN,
             title=TEST_NAME,
@@ -4135,7 +4135,43 @@ class TestDeviceInfoCache:
         coordinator = AdjustableBedCoordinator(hass, entry)
         coordinator._store_ble_device_info(None, None)
 
-        assert coordinator._device_info_read_done is expected_read_done
+        assert coordinator._device_info_read_done is False
+
+    @pytest.mark.parametrize(
+        "bed_type",
+        [BED_TYPE_OKIN_CST, BED_TYPE_OKIN_RF_ECO_BT],
+    )
+    def test_preserved_okin_profile_missing_device_info_is_cached_after_bounded_retry(
+        self,
+        hass: HomeAssistant,
+        bed_type: str,
+    ):
+        """Preserved OKIN profiles should not pay DIS timeouts on every reconnect."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title=TEST_NAME,
+            data={
+                CONF_ADDRESS: TEST_ADDRESS,
+                CONF_NAME: TEST_NAME,
+                CONF_BED_TYPE: bed_type,
+                CONF_MOTOR_COUNT: 2,
+                CONF_HAS_MASSAGE: False,
+                CONF_DISABLE_ANGLE_SENSING: True,
+                CONF_PREFERRED_ADAPTER: "auto",
+            },
+            unique_id=TEST_ADDRESS,
+            entry_id=f"{bed_type}_bounded_device_info_retry_test",
+        )
+        entry.add_to_hass(hass)
+
+        coordinator = AdjustableBedCoordinator(hass, entry)
+        coordinator._store_ble_device_info(None, None)
+        assert coordinator._device_info_read_done is False
+
+        coordinator._store_ble_device_info(None, None)
+
+        assert coordinator._device_info_read_attempts == 2
+        assert coordinator._device_info_read_done is True
 
     def test_useful_device_info_is_cached_for_refinable_bed(
         self,

@@ -139,10 +139,9 @@ async def async_setup_entry(
 
     entities: list[SensorEntity] = []
 
-    # Beds that never report degree angles (e.g. Sleep Number MCR/BAM) must not keep
-    # angle sensors. Remove any an earlier version registered (when angle sensing was
-    # enabled by default) so existing installs stop showing dead "unknown" entities
-    # after upgrading, regardless of the current disable_angle_sensing value (#322).
+    # Beds that never report degree angles must not keep angle sensors. Remove any
+    # registered by an earlier version or a previously selected profile so existing
+    # installs stop showing dead "unknown" entities after upgrading (#322, #344).
     if bed_type in BEDS_WITHOUT_ANGLE_FEEDBACK:
         _async_remove_stale_angle_entities(hass, coordinator)
 
@@ -152,8 +151,8 @@ async def async_setup_entry(
         # (Keeson/Ergomotion/Serta report 0-100% position, not degrees)
         if bed_type in BEDS_WITH_PERCENTAGE_POSITIONS:
             _LOGGER.debug("Skipping angle sensors for %s - reports percentage, not angle", bed_type)
-        # Skip beds that report no degree-angle data at all (e.g. Sleep Number MCR/BAM),
-        # which would otherwise create sensors stuck at "unknown" forever (#322).
+        # Skip beds that report no degree-angle data at all, which would otherwise
+        # create sensors stuck at "unknown" forever (#322, #344).
         elif bed_type in BEDS_WITHOUT_ANGLE_FEEDBACK:
             _LOGGER.debug("Skipping angle sensors for %s - no angle feedback", bed_type)
         else:
@@ -191,9 +190,9 @@ def _async_remove_stale_angle_entities(
 ) -> None:
     """Remove angle sensor entities the integration no longer creates.
 
-    Beds in BEDS_WITHOUT_ANGLE_FEEDBACK (e.g. Sleep Number MCR/BAM) report no
-    angles, but an earlier version registered back/legs/head/feet angle sensors
-    for them; those would otherwise linger as dead "unknown" entities (#322).
+    Beds in BEDS_WITHOUT_ANGLE_FEEDBACK report no angles, but an earlier version
+    or profile may have registered back/legs/head/feet angle sensors for them;
+    those would otherwise linger as dead "unknown" entities (#322, #344).
     """
     registry = er.async_get(hass)
     for description in SENSOR_DESCRIPTIONS:

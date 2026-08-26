@@ -15,14 +15,14 @@
 |--------|-------|
 | Service UUID | `62741523-52f9-8864-b1ab-3b3a8d65950b` (standard OKIN) |
 | Name patterns | Varies (shared UUID requires disambiguation; some report as `OKIN-XXXXXX`) |
-| Connected GATT hint | CSS `90311623-...` plus Nordic DFU `00001530-...`, unless a stronger device identity selects another shared-UUID protocol |
+| Connected GATT hint | CSS `90311623-...` plus Nordic DFU `00001530-...` is ambiguous and requires another identity signal |
 | BLE Pairing | Required |
 
 Manual selection may be needed since the service UUID is shared with other Okin protocols.
-Choose this profile for Nectar Motion style `OKIN-*` bases when diagnostics show
-both the CSS service and Nordic DFU service.
-This also applies to Mattress Firm 900-O / MFirm 900-O bases advertising as
-`OKIN-XXXXXX` with the same connected GATT signature.
+Do not choose CST solely because diagnostics show both the CSS and Nordic DFU
+services. That connected GATT signature is also exposed by RF ECO BT stair
+actuators. Device Information model `MEGAMAT MBZ` identifies RF ECO BT. Choose
+CST only when the known base or app identity corroborates the CST protocol.
 
 Do not select CST for `LP BED...` receivers. LP Control 2.9.0 identifies those
 as its Okin profile and sends 6-byte commands, even when the receiver also

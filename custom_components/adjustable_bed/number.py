@@ -272,9 +272,9 @@ async def async_setup_entry(
 
     entities: list[NumberEntity] = []
 
-    # Beds with no angle/position feedback (e.g. Sleep Number MCR/BAM) were briefly
-    # in BEDS_WITH_POSITION_FEEDBACK and may have registered position number sliders;
-    # remove any so existing installs don't keep dead orphaned numbers (#322).
+    # Beds with no angle/position feedback may have registered position sliders
+    # under an earlier version or a previously selected profile. Remove any so
+    # existing installs do not keep dead orphaned numbers (#322, #344).
     if bed_type in BEDS_WITHOUT_ANGLE_FEEDBACK:
         _async_remove_stale_position_entities(hass, coordinator)
     elif bed_type == BED_TYPE_SLEEPSTAR:
@@ -437,10 +437,9 @@ def _async_remove_stale_position_entities(
 ) -> None:
     """Remove position number entities the integration no longer creates.
 
-    Beds in BEDS_WITHOUT_ANGLE_FEEDBACK (e.g. Sleep Number MCR/BAM) have no
-    position feedback, but were briefly in BEDS_WITH_POSITION_FEEDBACK and so
-    registered *_back_position/*_legs_position sliders that now linger as dead
-    orphaned numbers (#322).
+    Beds in BEDS_WITHOUT_ANGLE_FEEDBACK have no position feedback, but an earlier
+    version or profile may have registered *_back_position/*_legs_position sliders
+    that now linger as dead orphaned numbers (#322, #344).
     """
     registry = er.async_get(hass)
     for description in NUMBER_DESCRIPTIONS:

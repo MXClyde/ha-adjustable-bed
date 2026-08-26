@@ -2044,10 +2044,12 @@ def bed_type_has_position_feedback(
     return bed_type == BED_TYPE_KEESON and protocol_variant == KEESON_VARIANT_ERGOMOTION
 
 # Bed types that may have angle sensing enabled in an existing entry but report no
-# degree-angle data. These are skipped during entity creation so stale sensors do
-# not remain "unknown" forever (#322, #501).
+# degree-angle data. Sleep Number MCR/BAM reports only sleep-number values and bed
+# presence, while CST and RF ECO BT expose no reliable position feedback. Skip
+# their entity creation and remove stale sensors from earlier profiles so they do
+# not remain "unknown" forever (#322, #344, #501).
 BEDS_WITHOUT_ANGLE_FEEDBACK: Final = frozenset(
-    {BED_TYPE_OKIN_CST, BED_TYPE_SLEEP_NUMBER_MCR}
+    {BED_TYPE_OKIN_CST, BED_TYPE_OKIN_RF_ECO_BT, BED_TYPE_SLEEP_NUMBER_MCR}
 )
 
 # Bed types that report positions as 0-100 percentages (not angle degrees)
