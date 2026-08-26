@@ -2,6 +2,7 @@
 // supported bed types: it discovers a device's entities (by translation_key) and
 // renders only the sections that exist. Styling comes entirely from Home
 // Assistant theme variables so it inherits the user's theme.
+import "./registration";
 import {
   LitElement,
   type PropertyValues,
@@ -10,7 +11,7 @@ import {
   html,
   nothing,
 } from "lit";
-import { customElement, property, state } from "lit/decorators.js";
+import { property, state } from "lit/decorators.js";
 import { renderBedGraphic } from "./bed-graphic";
 import {
   PLATFORM,
@@ -32,7 +33,6 @@ import {
 // Side-effect import: registers <adjustable-bed-card-editor> in the same bundle.
 import "./editor";
 
-@customElement("adjustable-bed-card")
 export class AdjustableBedCard extends LitElement {
   @property({ attribute: false }) public hass?: HomeAssistant;
   @state() private _config?: AdjustableBedCardConfig;
@@ -1104,23 +1104,9 @@ export class AdjustableBedCard extends LitElement {
   `;
 }
 
-// Register the card with Home Assistant's card picker.
-interface CustomCard {
-  type: string;
-  name: string;
-  description: string;
-  preview?: boolean;
-  documentationURL?: string;
+if (!customElements.get("adjustable-bed-card")) {
+  customElements.define("adjustable-bed-card", AdjustableBedCard);
 }
-const w = window as unknown as { customCards?: CustomCard[] };
-w.customCards = w.customCards || [];
-w.customCards.push({
-  type: "adjustable-bed-card",
-  name: "Adjustable Bed Card",
-  description: "Native control card for the Adjustable Bed integration.",
-  preview: true,
-  documentationURL: "https://github.com/kristofferR/ha-adjustable-bed",
-});
 
 // eslint-disable-next-line no-console
 console.info(
