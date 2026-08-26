@@ -56,8 +56,6 @@ from custom_components.adjustable_bed.const import (
     NORDIC_DFU_SERVICE_UUID,
     OKIMAT_SERVICE_UUID,
     OKIMAT_WRITE_CHAR_UUID,
-    OKIN_FOOT_MAX_ANGLE,
-    OKIN_HEAD_MAX_ANGLE,
     OKIN_SMART_REMOTE_CSS_SERVICE_UUID,
     OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID,
     RICHMAT_REMOTE_AUTO,
@@ -809,50 +807,6 @@ class TestCoordinatorConnection:
         assert mock_read_positions.await_count == 2
         assert controller.prepare_for_position_read.await_count == 2
         mock_sleep.assert_awaited_once()
-
-    async def test_cst_initial_position_axes_ignore_unreported_extra_motors(
-        self,
-        hass: HomeAssistant,
-        mock_config_entry_data: dict,
-    ) -> None:
-        """CST startup hydration should not wait for head/feet axes."""
-        mock_config_entry_data[CONF_BED_TYPE] = BED_TYPE_OKIN_CST
-        mock_config_entry_data[CONF_MOTOR_COUNT] = 4
-        coordinator = AdjustableBedCoordinator(
-            hass,
-            MockConfigEntry(
-                domain=DOMAIN,
-                title=TEST_NAME,
-                data=mock_config_entry_data,
-                unique_id=TEST_ADDRESS,
-                entry_id="cst_expected_axes",
-            ),
-        )
-
-        assert coordinator._expected_initial_position_axes() == {"back", "legs"}
-
-    async def test_cst_max_angles_use_reported_position_ranges(
-        self,
-        hass: HomeAssistant,
-        mock_config_entry_data: dict,
-    ) -> None:
-        """CST seek limits should match the angles reported by notifications."""
-        mock_config_entry_data[CONF_BED_TYPE] = BED_TYPE_OKIN_CST
-        coordinator = AdjustableBedCoordinator(
-            hass,
-            MockConfigEntry(
-                domain=DOMAIN,
-                title=TEST_NAME,
-                data=mock_config_entry_data,
-                unique_id=TEST_ADDRESS,
-                entry_id="cst_max_angles",
-            ),
-        )
-
-        assert coordinator.get_max_angle("back") == OKIN_HEAD_MAX_ANGLE
-        assert coordinator.get_max_angle("head") == OKIN_HEAD_MAX_ANGLE
-        assert coordinator.get_max_angle("legs") == OKIN_FOOT_MAX_ANGLE
-        assert coordinator.get_max_angle("feet") == OKIN_FOOT_MAX_ANGLE
 
     async def test_passive_position_reconciliation_reads_positions_when_idle(
         self,
@@ -3549,12 +3503,12 @@ class TestRuntimeBedTypeCorrection:
         assert coordinator.bed_type == BED_TYPE_OKIN_CST
         assert coordinator.entry.data[CONF_BED_TYPE] == BED_TYPE_OKIN_CST
 
-    async def test_correction_to_cst_preserves_enabled_angle_sensing(
+    async def test_correction_to_cst_disables_enabled_angle_sensing(
         self,
         hass: HomeAssistant,
         mock_config_entry_data: dict,
     ):
-        """CST corrections should keep position sensors and position controls enabled."""
+        """CST corrections should disable unsupported position feedback."""
         coordinator = self._make_coordinator(
             hass,
             mock_config_entry_data,
@@ -3565,15 +3519,15 @@ class TestRuntimeBedTypeCorrection:
         coordinator._apply_runtime_bed_type_correction(BED_TYPE_OKIN_CST)
 
         assert coordinator.bed_type == BED_TYPE_OKIN_CST
-        assert coordinator.disable_angle_sensing is False
-        assert coordinator.entry.data[CONF_DISABLE_ANGLE_SENSING] is False
+        assert coordinator.disable_angle_sensing is True
+        assert coordinator.entry.data[CONF_DISABLE_ANGLE_SENSING] is True
 
-    async def test_correction_to_cst_enables_defaulted_angle_sensing(
+    async def test_correction_to_cst_keeps_defaulted_angle_sensing_disabled(
         self,
         hass: HomeAssistant,
         mock_config_entry_data: dict,
     ):
-        """Legacy entries missing the angle key should gain CST position features."""
+        """Legacy entries missing the angle key should retain the disabled default."""
         legacy_data = dict(mock_config_entry_data)
         legacy_data.pop(CONF_DISABLE_ANGLE_SENSING, None)
         coordinator = self._make_coordinator(
@@ -3588,15 +3542,15 @@ class TestRuntimeBedTypeCorrection:
         coordinator._apply_runtime_bed_type_correction(BED_TYPE_OKIN_CST)
 
         assert coordinator.bed_type == BED_TYPE_OKIN_CST
-        assert coordinator.disable_angle_sensing is False
-        assert coordinator.entry.data[CONF_DISABLE_ANGLE_SENSING] is False
+        assert coordinator.disable_angle_sensing is True
+        assert CONF_DISABLE_ANGLE_SENSING not in coordinator.entry.data
 
-    async def test_correction_to_cst_enables_stored_no_feedback_default_angle_sensing(
+    async def test_correction_to_cst_preserves_stored_no_feedback_default(
         self,
         hass: HomeAssistant,
         mock_config_entry_data: dict,
     ):
-        """Saved no-feedback defaults should not suppress corrected CST position features."""
+        """Saved no-feedback defaults should remain disabled after correction."""
         coordinator = self._make_coordinator(
             hass,
             mock_config_entry_data,
@@ -3609,15 +3563,15 @@ class TestRuntimeBedTypeCorrection:
         coordinator._apply_runtime_bed_type_correction(BED_TYPE_OKIN_CST)
 
         assert coordinator.bed_type == BED_TYPE_OKIN_CST
-        assert coordinator.disable_angle_sensing is False
-        assert coordinator.entry.data[CONF_DISABLE_ANGLE_SENSING] is False
+        assert coordinator.disable_angle_sensing is True
+        assert coordinator.entry.data[CONF_DISABLE_ANGLE_SENSING] is True
 
-    async def test_correction_to_cst_repairs_same_type_stored_default_angle_sensing(
+    async def test_correction_to_cst_same_type_keeps_angle_sensing_disabled(
         self,
         hass: HomeAssistant,
         mock_config_entry_data: dict,
     ):
-        """Saved CST entries with the old no-feedback default should be repaired."""
+        """Saved CST entries should keep unsupported angle sensing disabled."""
         coordinator = self._make_coordinator(
             hass,
             mock_config_entry_data,
@@ -3629,10 +3583,10 @@ class TestRuntimeBedTypeCorrection:
 
         changed = coordinator._apply_runtime_bed_type_correction(BED_TYPE_OKIN_CST)
 
-        assert changed is True
+        assert changed is False
         assert coordinator.bed_type == BED_TYPE_OKIN_CST
-        assert coordinator.disable_angle_sensing is False
-        assert coordinator.entry.data[CONF_DISABLE_ANGLE_SENSING] is False
+        assert coordinator.disable_angle_sensing is True
+        assert coordinator.entry.data[CONF_DISABLE_ANGLE_SENSING] is True
 
     async def test_correction_to_cst_preserves_explicit_disabled_angle_sensing(
         self,

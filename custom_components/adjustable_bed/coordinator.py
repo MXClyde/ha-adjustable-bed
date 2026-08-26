@@ -129,9 +129,6 @@ from .const import (
     MALOUF_LAYOUT_AUTO,
     MALOUF_MEMORY_SLOTS_AUTO,
     OKIMAT_SERVICE_UUID,
-    OKIN_CST_POSITION_AXES,
-    OKIN_FOOT_MAX_ANGLE,
-    OKIN_HEAD_MAX_ANGLE,
     POSITION_MODE_ACCURACY,
     POSITION_OVERSHOOT_TOLERANCE,
     POSITION_SEEK_TIMEOUT,
@@ -497,10 +494,7 @@ class AdjustableBedCoordinator:
             entry_data.pop(CONF_RICHMAT_REMOTE, None)
         angle_sensing_defaulted = CONF_DISABLE_ANGLE_SENSING not in self.entry.data or (
             self.entry.data.get(CONF_DISABLE_ANGLE_SENSING) is True
-            and (
-                previous_bed_type not in BEDS_WITH_POSITION_FEEDBACK
-                or previous_bed_type == BED_TYPE_OKIN_CST
-            )
+            and previous_bed_type not in BEDS_WITH_POSITION_FEEDBACK
         )
         # Config flow defaults disable_angle_sensing from BEDS_WITH_POSITION_FEEDBACK,
         # so the correction must use the same set: a repaired entry (e.g. CB35 ->
@@ -636,14 +630,10 @@ class AdjustableBedCoordinator:
         # set_position validation still rejects a target the frame cannot reach
         # when the controller is momentarily absent.
         if position_key in ("back", "head"):
-            if self._bed_type == BED_TYPE_OKIN_CST:
-                return OKIN_HEAD_MAX_ANGLE
             if self._bed_type in (BED_TYPE_REVERIE, BED_TYPE_REVERIE_NIGHTSTAND):
                 return REVERIE_BACK_MAX_ANGLE
             return self.back_max_angle
         if position_key in ("legs", "feet"):
-            if self._bed_type == BED_TYPE_OKIN_CST:
-                return OKIN_FOOT_MAX_ANGLE
             return self.legs_max_angle
         # Unknown motor, return back max as default
         return self.back_max_angle
@@ -2968,9 +2958,6 @@ class AdjustableBedCoordinator:
         """Return the logical position axes that startup hydration should populate."""
         if self._motor_count <= 0:
             return set()
-        if self._bed_type == BED_TYPE_OKIN_CST:
-            return set(OKIN_CST_POSITION_AXES)
-
         expected_axes = {"back", "legs"}
         if self._motor_count > 2:
             expected_axes.add("head")
