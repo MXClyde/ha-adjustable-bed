@@ -18,6 +18,7 @@ from custom_components.adjustable_bed import (
     SERVICE_GOTO_PRESET,
     SERVICE_SAVE_PRESET,
     SERVICE_SET_POSITION,
+    SERVICE_SET_POSITIONS,
     SERVICE_STOP_ALL,
     SERVICE_TIMED_MOVE,
     async_migrate_entry,
@@ -95,6 +96,7 @@ class TestIntegrationSetup:
         assert hass.services.has_service(DOMAIN, SERVICE_SAVE_PRESET)
         assert hass.services.has_service(DOMAIN, SERVICE_STOP_ALL)
         assert hass.services.has_service(DOMAIN, SERVICE_GENERATE_SUPPORT_BUNDLE)
+        assert hass.services.has_service(DOMAIN, SERVICE_SET_POSITIONS)
 
     async def test_setup_entry_connection_timeout(
         self,
@@ -1356,6 +1358,10 @@ class TestServices:
                 response=True,
             )
         ] * 4
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        assert {tuple(item["resources"]) for item in coordinator.command_trace} == {
+            ("motor:back",)
+        }
 
     async def test_timed_move_service_accepts_okin_rf_eco_bt_stair(
         self,
@@ -1524,6 +1530,8 @@ class TestServices:
         enable_custom_integrations,
     ):
         """BOX25 set_position should accept head and feet only."""
+        from homeassistant.exceptions import ServiceValidationError
+
         entry = MockConfigEntry(
             domain=DOMAIN,
             title="Sleepy's BOX25 Service Bed",
@@ -1580,7 +1588,36 @@ class TestServices:
             blocking=True,
         )
 
-        assert coordinator.async_seek_position.await_count == 2
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_SET_POSITIONS,
+            {
+                "device_id": [device_id],
+                "positions": [
+                    {"motor": "head", "position": 25},
+                    {"motor": "feet", "position": 15},
+                ],
+            },
+            blocking=True,
+        )
+
+        assert coordinator.async_seek_position.await_count == 4
+
+        coordinator.async_seek_position.reset_mock()
+        with pytest.raises(ServiceValidationError, match="out of range"):
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_SET_POSITIONS,
+                {
+                    "device_id": [device_id],
+                    "positions": [
+                        {"motor": "head", "position": 25},
+                        {"motor": "feet", "position": 999},
+                    ],
+                },
+                blocking=True,
+            )
+        coordinator.async_seek_position.assert_not_awaited()
 
     async def test_set_position_service_rejects_box25_back_and_legs(
         self,
@@ -1803,6 +1840,12 @@ class TestServices:
             "feet": 45.0,
         }[motor]
         coordinator.async_seek_position = AsyncMock()
+
+        async def run_group(operations, **_kwargs):
+            for operation in operations:
+                await operation()
+
+        coordinator.async_execute_command_group = AsyncMock(side_effect=run_group)
         hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
         await async_register_services(hass)

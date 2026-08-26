@@ -2338,6 +2338,7 @@ class TestSideServiceRouting:
             open_fn=motor3_up,
             close_fn=MagicMock(),
             stop_fn=MagicMock(),
+            position_key="back",
         )
         back_spec = MotorControlSpec(
             key="back",
@@ -2352,6 +2353,7 @@ class TestSideServiceRouting:
         coord = MagicMock(pair_id="pair_x", device_info={})
         btn = PairedBedCombinedMotorButton(coord, head_spec, "up")
         assert btn._move_fn is motor3_up
+        assert btn._resource == "motor:back"
         assert btn._attr_unique_id == "pair_x_head_up_both"
 
         # The builder intersects each side's specs and builds from THEM, not from

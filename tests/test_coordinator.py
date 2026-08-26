@@ -17,6 +17,7 @@ from custom_components.adjustable_bed.bluetooth_transport import (
     ConnectionPath,
     TransportClass,
 )
+from custom_components.adjustable_bed.command_scheduler import current_command_context
 from custom_components.adjustable_bed.const import (
     BED_MOTOR_PULSE_DEFAULTS,
     BED_TYPE_BEDTECH,
@@ -2875,6 +2876,72 @@ class TestDisconnectCommandSerialization:
         assert disconnected_during_command is False
         assert coordinator._client is None
 
+    async def test_disconnect_invalidates_queued_and_teardown_race_commands(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ):
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        active_started = asyncio.Event()
+        active_cancelled = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        queued_ran = False
+        teardown_race_ran = False
+
+        async def active(_controller):
+            context = current_command_context()
+            assert context is not None
+            active_started.set()
+            await context.cancel_event.wait()
+            active_cancelled.set()
+            await release_cleanup.wait()
+
+        async def queued(_controller):
+            nonlocal queued_ran
+            queued_ran = True
+
+        async def teardown_race(_controller):
+            nonlocal teardown_race_ran
+            teardown_race_ran = True
+
+        active_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(active)
+        )
+        await active_started.wait()
+        queued_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(
+                queued,
+                cancel_running=False,
+                resource="motor:legs",
+            )
+        )
+        while not coordinator._command_scheduler.has_pending:
+            await asyncio.sleep(0)
+
+        disconnect_task = asyncio.create_task(
+            coordinator.async_disconnect(serialize_with_commands=True)
+        )
+        await active_cancelled.wait()
+        teardown_race_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(
+                teardown_race,
+                cancel_running=False,
+            )
+        )
+        release_cleanup.set()
+
+        await asyncio.gather(
+            active_task,
+            queued_task,
+            teardown_race_task,
+            disconnect_task,
+        )
+        assert not queued_ran
+        assert not teardown_race_ran
+        assert coordinator._client is None
+
     async def test_idle_disconnect_skipped_when_timer_rearmed(
         self,
         hass: HomeAssistant,
@@ -5136,6 +5203,36 @@ class TestStopAfterCancel:
 
         coordinator._controller.stop_all.assert_awaited_once()
 
+    async def test_stop_command_settles_after_caller_cancellation(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """An accepted safety STOP must finish before caller cancellation propagates."""
+        del mock_bleak_client
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        stop_started = asyncio.Event()
+        release_stop = asyncio.Event()
+
+        async def blocking_stop() -> None:
+            stop_started.set()
+            await release_stop.wait()
+
+        coordinator._controller.stop_all = AsyncMock(side_effect=blocking_stop)
+        stop_task = asyncio.create_task(coordinator.async_stop_command())
+        await stop_started.wait()
+        stop_task.cancel()
+        await asyncio.sleep(0)
+        assert not stop_task.done()
+
+        release_stop.set()
+        with pytest.raises(asyncio.CancelledError):
+            await stop_task
+        assert coordinator._command_scheduler._stop_barrier.is_set()
+
     async def test_stop_command_when_not_connected(
         self,
         hass: HomeAssistant,
@@ -5197,6 +5294,179 @@ class TestStopAfterCancel:
 
         # Counter should NOT have incremented
         assert coordinator._cancel_counter == initial_counter
+
+    async def test_different_motor_command_queues_without_cancelling_active_motor(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ) -> None:
+        """A legs request must not truncate an in-flight back operation."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        back_started = asyncio.Event()
+        release_back = asyncio.Event()
+        events: list[str] = []
+
+        async def move_back(_controller) -> None:
+            events.append("back:start")
+            back_started.set()
+            await release_back.wait()
+            assert not coordinator.cancel_command.is_set()
+            events.append("back:end")
+
+        async def move_legs(_controller) -> None:
+            events.append("legs")
+
+        back_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(
+                move_back,
+                resource="motor:back",
+            )
+        )
+        await back_started.wait()
+        legs_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(
+                move_legs,
+                resource="motor:legs",
+            )
+        )
+        await asyncio.sleep(0.01)
+
+        assert events == ["back:start"]
+        release_back.set()
+        await asyncio.gather(back_task, legs_task)
+        assert events == ["back:start", "back:end", "legs"]
+
+    async def test_same_motor_command_replaces_active_motor_after_cleanup(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ) -> None:
+        """A newer target for one motor retains b3 replacement semantics."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        first_started = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        events: list[str] = []
+
+        async def first(_controller) -> None:
+            events.append("first:start")
+            first_started.set()
+            await coordinator.cancel_command.wait()
+            events.append("first:cleanup")
+            cleanup_started.set()
+            await release_cleanup.wait()
+
+        async def replacement(_controller) -> None:
+            events.append("replacement")
+
+        first_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(
+                first,
+                resource="motor:back",
+            )
+        )
+        await first_started.wait()
+        replacement_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(
+                replacement,
+                resource="motor:back",
+            )
+        )
+        await cleanup_started.wait()
+        assert "replacement" not in events
+
+        release_cleanup.set()
+        await asyncio.gather(first_task, replacement_task)
+        assert events == ["first:start", "first:cleanup", "replacement"]
+
+    async def test_command_group_is_one_non_interleaved_scheduler_intent(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ) -> None:
+        """Composite targets remain contiguous on the SerialOpaque strategy."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        events: list[str] = []
+
+        async def first() -> None:
+            events.append("group:first")
+            first_started.set()
+            await release_first.wait()
+
+        async def second() -> None:
+            events.append("group:second")
+
+        async def other(_controller) -> None:
+            events.append("other")
+
+        group_task = asyncio.create_task(
+            coordinator.async_execute_command_group(
+                [first, second],
+                resources=["motor:back", "motor:legs"],
+            )
+        )
+        await first_started.wait()
+        other_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(
+                other,
+                resource="massage:all",
+            )
+        )
+        await asyncio.sleep(0)
+        assert events == ["group:first"]
+
+        release_first.set()
+        await asyncio.gather(group_task, other_task)
+        assert events == ["group:first", "group:second", "other"]
+
+    async def test_command_group_keeps_connection_until_final_member(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ) -> None:
+        """Disconnect-after-command applies once at a composite boundary."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title=mock_config_entry.title,
+            data={
+                **mock_config_entry.data,
+                CONF_DISCONNECT_AFTER_COMMAND: True,
+            },
+            unique_id=mock_config_entry.unique_id,
+            entry_id="group_connection_lease_test",
+        )
+        entry.add_to_hass(hass)
+        coordinator = AdjustableBedCoordinator(hass, entry)
+        await coordinator.async_connect()
+        coordinator.async_disconnect = AsyncMock()
+
+        async def command(_controller) -> None:
+            return None
+
+        await coordinator.async_execute_command_group(
+            [
+                lambda: coordinator.async_execute_controller_command(
+                    command,
+                    resource="motor:back",
+                ),
+                lambda: coordinator.async_execute_controller_command(
+                    command,
+                    resource="motor:legs",
+                ),
+            ],
+            resources=["motor:back", "motor:legs"],
+        )
+
+        coordinator.async_disconnect.assert_awaited_once()
 
     async def test_non_preemptible_controller_query_finishes_before_new_command(
         self,

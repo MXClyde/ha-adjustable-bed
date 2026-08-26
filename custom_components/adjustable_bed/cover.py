@@ -327,6 +327,11 @@ class AdjustableBedCover(AdjustableBedEntity, CoverEntity):
         return self.entity_description.position_key or self.entity_description.key
 
     @property
+    def _motor_resource(self) -> str:
+        """Return the scheduler resource for this physical position axis."""
+        return f"motor:{self._position_key}"
+
+    @property
     def is_closed(self) -> bool | None:
         """Return if the cover is closed (flat position)."""
         if self._coordinator.disable_angle_sensing:
@@ -406,11 +411,13 @@ class AdjustableBedCover(AdjustableBedEntity, CoverEntity):
             )
             if direction == "open":
                 await self._coordinator.async_execute_controller_command(
-                    self.entity_description.open_fn
+                    self.entity_description.open_fn,
+                    resource=self._motor_resource,
                 )
             else:
                 await self._coordinator.async_execute_controller_command(
-                    self.entity_description.close_fn
+                    self.entity_description.close_fn,
+                    resource=self._motor_resource,
                 )
             _LOGGER.debug(
                 "Movement command sent for %s %s",
@@ -450,7 +457,8 @@ class AdjustableBedCover(AdjustableBedEntity, CoverEntity):
             # (round-16 cancel) before the lock, so the stop is both immediate and
             # motor-specific (not a side-wide stop_all).
             await self._coordinator.async_execute_controller_command(
-                self.entity_description.stop_fn
+                self.entity_description.stop_fn,
+                resource=self._motor_resource,
             )
             _LOGGER.debug("Stop command sent for %s", self.entity_description.key)
         except Exception:

@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -19,6 +20,15 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from custom_components.adjustable_bed.beds.okin_cb24 import OkinCB24Controller
 from custom_components.adjustable_bed.beds.sbi import SBIController
 from custom_components.adjustable_bed.beds.sleep_number import SleepNumberController
+from custom_components.adjustable_bed.command_scheduler import (
+    CommandContext,
+    CommandHandle,
+    CommandIntent,
+    CommandOutcome,
+    DeviceCommandScheduler,
+    command_resources,
+    current_command_context,
+)
 from custom_components.adjustable_bed.const import (
     BED_TYPE_LINAK,
     BED_TYPE_OCTO,
@@ -81,7 +91,8 @@ class RecordingChild:
         self._connect_gate = asyncio.Event()
         self._block_connect = block_connect
 
-    def request_command_cancel(self) -> None:
+    def request_command_cancel(self, resource=None, *, resources=None) -> None:
+        del resource, resources
         self.log.append((self.side, "cancel"))
         self._gate.set()
 
@@ -98,8 +109,13 @@ class RecordingChild:
         )
 
     async def async_execute_controller_command(
-        self, command_fn, cancel_running=True, skip_disconnect=False
+        self,
+        command_fn,
+        cancel_running=True,
+        skip_disconnect=False,
+        resource=None,
     ) -> None:
+        del command_fn, cancel_running, skip_disconnect, resource
         self.log.append((self.side, "command"))
         if self._block:
             await self._gate.wait()
@@ -146,6 +162,72 @@ class RecordingChild:
         return lambda: None
 
 
+class ScheduledRecordingChild(RecordingChild):
+    """Recording child with the production prepare/commit scheduler surface."""
+
+    def __init__(self, side: str, log: list[tuple[str, str]], **kwargs) -> None:
+        super().__init__(side, log, **kwargs)
+        self.scheduler = DeviceCommandScheduler(side)
+        self.prepared_scopes: list[frozenset[str]] = []
+
+    def request_command_cancel(self, resource=None, *, resources=None) -> None:
+        scope = (
+            command_resources(*resources)
+            if resources is not None
+            else command_resources(resource or "*")
+        )
+        self.scheduler.request_cancel(scope)
+        super().request_command_cancel(resource, resources=resources)
+
+    async def async_prepare_command_operation(
+        self,
+        operation,
+        *,
+        resource=None,
+        resources=None,
+        cancel_running=True,
+        group_id,
+    ) -> CommandHandle:
+        async def scheduled(_context: CommandContext) -> None:
+            await operation()
+
+        command_scope = (
+            command_resources(*resources)
+            if resources is not None
+            else command_resources(resource or "*")
+        )
+        self.prepared_scopes.append(command_scope)
+        return await self.scheduler.enqueue(
+            CommandIntent(
+                scheduled,
+                resources=command_scope,
+                replacement_key=(resource or "*") if resources is None else None,
+                cancel_running=cancel_running,
+                group_id=group_id,
+            ),
+            prepared=True,
+        )
+
+    async def async_wait_prepared_command(self, handle: CommandHandle) -> None:
+        await self.scheduler.wait_ready(handle)
+
+    def commit_prepared_command(self, handle: CommandHandle) -> None:
+        self.scheduler.commit(handle)
+
+    async def async_wait_prepared_command_result(self, handle: CommandHandle) -> None:
+        await self.scheduler.wait_prepared_result(handle)
+
+    async def async_abort_prepared_command(self, handle: CommandHandle) -> None:
+        await self.scheduler.cancel(handle, CommandOutcome.GROUP_ABORTED)
+
+    async def async_stop_command(self) -> None:
+        stop_epoch = self.scheduler.request_stop()
+        try:
+            await super().async_stop_command()
+        finally:
+            self.scheduler.finish_stop(stop_epoch)
+
+
 def _make(children, *, connection_mode=None, name="Master Bed"):
     entry = SimpleNamespace(data={CONF_PAIR_ID: "pair_abc123", "name": name})
     return PairedBedCoordinator(
@@ -170,6 +252,465 @@ class TestSideRouting:
         coord, _, _ = _pair(log)
         await coord.async_execute_controller_command(_noop, side=SIDE_BOTH)
         assert log == [(SIDE_LEFT, "command"), (SIDE_RIGHT, "command")]
+
+    async def test_both_waits_until_every_device_scheduler_is_ready(self):
+        log: list[tuple[str, str]] = []
+        left = ScheduledRecordingChild(SIDE_LEFT, log)
+        right = ScheduledRecordingChild(SIDE_RIGHT, log)
+        coord = _make({SIDE_LEFT: left, SIDE_RIGHT: right})
+        blocker_started = asyncio.Event()
+        release_blocker = asyncio.Event()
+
+        async def blocker(_context: CommandContext) -> None:
+            blocker_started.set()
+            await release_blocker.wait()
+
+        blocker_task = asyncio.create_task(
+            right.scheduler.execute(
+                CommandIntent(
+                    blocker,
+                    resources=command_resources("maintenance"),
+                    cancel_running=False,
+                )
+            )
+        )
+        await blocker_started.wait()
+
+        both_task = asyncio.create_task(
+            coord.async_execute_controller_command(
+                _noop,
+                side=SIDE_BOTH,
+                resource="motor:back",
+            )
+        )
+        await asyncio.sleep(0.01)
+        assert (SIDE_LEFT, "command") not in log
+        assert (SIDE_RIGHT, "command") not in log
+
+        release_blocker.set()
+        await blocker_task
+        await both_task
+        assert log.count((SIDE_LEFT, "command")) == 1
+        assert log.count((SIDE_RIGHT, "command")) == 1
+
+    async def test_single_queued_behind_prepared_group_does_not_block_commit(self):
+        log: list[tuple[str, str]] = []
+        left = ScheduledRecordingChild(SIDE_LEFT, log)
+        right = ScheduledRecordingChild(SIDE_RIGHT, log)
+        coord = _make({SIDE_LEFT: left, SIDE_RIGHT: right})
+        blocker_started = asyncio.Event()
+        release_blocker = asyncio.Event()
+        operations: list[str] = []
+
+        async def blocker(_context: CommandContext) -> None:
+            blocker_started.set()
+            await release_blocker.wait()
+
+        async def both_back(child: RecordingChild) -> None:
+            operations.append(f"back:{child.side}")
+
+        async def left_legs(_child: RecordingChild) -> None:
+            operations.append("legs:left")
+
+        blocker_task = asyncio.create_task(
+            right.scheduler.execute(
+                CommandIntent(
+                    blocker,
+                    resources=command_resources("maintenance"),
+                    cancel_running=False,
+                )
+            )
+        )
+        await blocker_started.wait()
+        both_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "back",
+                both_back,
+                side=SIDE_BOTH,
+                resource="motor:back",
+            )
+        )
+        while not right.scheduler.has_pending:
+            await asyncio.sleep(0)
+
+        legs_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "legs",
+                left_legs,
+                side=SIDE_LEFT,
+                resource="motor:legs",
+            )
+        )
+        await asyncio.sleep(0)
+        release_blocker.set()
+
+        await asyncio.wait_for(
+            asyncio.gather(blocker_task, both_task, legs_task), timeout=1
+        )
+        assert operations == ["back:left", "back:right", "legs:left"]
+
+    async def test_newer_same_axis_invalidates_prepared_single_side_command(self):
+        log: list[tuple[str, str]] = []
+        left = ScheduledRecordingChild(SIDE_LEFT, log)
+        coord = _make({SIDE_LEFT: left})
+        blocker_started = asyncio.Event()
+        release_blocker = asyncio.Event()
+        operations: list[str] = []
+
+        async def blocker(_context: CommandContext) -> None:
+            blocker_started.set()
+            await release_blocker.wait()
+
+        async def first(_child: RecordingChild) -> None:
+            operations.append("first")
+
+        async def replacement(_child: RecordingChild) -> None:
+            operations.append("replacement")
+
+        blocker_task = asyncio.create_task(
+            left.scheduler.execute(
+                CommandIntent(
+                    blocker,
+                    resources=command_resources("maintenance"),
+                    cancel_running=False,
+                )
+            )
+        )
+        await blocker_started.wait()
+        first_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "first",
+                first,
+                side=SIDE_LEFT,
+                resource="motor:back",
+            )
+        )
+        while not left.scheduler.has_pending:
+            await asyncio.sleep(0)
+        replacement_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "replacement",
+                replacement,
+                side=SIDE_LEFT,
+                resource="motor:back",
+            )
+        )
+
+        release_blocker.set()
+        await asyncio.gather(blocker_task, first_task, replacement_task)
+
+        assert operations == ["replacement"]
+
+    async def test_different_queued_axes_survive_prepared_single_side_wait(self):
+        log: list[tuple[str, str]] = []
+        left = ScheduledRecordingChild(SIDE_LEFT, log)
+        coord = _make({SIDE_LEFT: left})
+        blocker_started = asyncio.Event()
+        release_blocker = asyncio.Event()
+        operations: list[str] = []
+
+        async def blocker(_context: CommandContext) -> None:
+            blocker_started.set()
+            await release_blocker.wait()
+
+        async def back(_child: RecordingChild) -> None:
+            operations.append("back")
+
+        async def legs(_child: RecordingChild) -> None:
+            operations.append("legs")
+
+        blocker_task = asyncio.create_task(
+            left.scheduler.execute(
+                CommandIntent(
+                    blocker,
+                    resources=command_resources("maintenance"),
+                    cancel_running=False,
+                )
+            )
+        )
+        await blocker_started.wait()
+        back_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "back",
+                back,
+                side=SIDE_LEFT,
+                resource="motor:back",
+            )
+        )
+        while not left.scheduler.has_pending:
+            await asyncio.sleep(0)
+        legs_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "legs",
+                legs,
+                side=SIDE_LEFT,
+                resource="motor:legs",
+            )
+        )
+
+        release_blocker.set()
+        await asyncio.gather(blocker_task, back_task, legs_task)
+
+        assert operations == ["back", "legs"]
+
+    async def test_active_axis_replacement_bypasses_disjoint_waiting_group(self):
+        log: list[tuple[str, str]] = []
+        left = ScheduledRecordingChild(SIDE_LEFT, log)
+        right = ScheduledRecordingChild(SIDE_RIGHT, log)
+        coord = _make({SIDE_LEFT: left, SIDE_RIGHT: right})
+        legs_started = asyncio.Event()
+        operations: list[str] = []
+
+        async def active_legs(_child: RecordingChild) -> None:
+            context = current_command_context()
+            assert context is not None
+            operations.append("legs:start")
+            legs_started.set()
+            await context.cancel_event.wait()
+            operations.append("legs:cleanup")
+
+        async def both_back(child: RecordingChild) -> None:
+            operations.append(f"back:{child.side}")
+
+        async def stop_legs(_child: RecordingChild) -> None:
+            operations.append("legs:replacement")
+
+        legs_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "legs",
+                active_legs,
+                side=SIDE_RIGHT,
+                resource="motor:legs",
+            )
+        )
+        await legs_started.wait()
+        back_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "back",
+                both_back,
+                side=SIDE_BOTH,
+                resource="motor:back",
+            )
+        )
+        while not right.scheduler.has_pending:
+            await asyncio.sleep(0)
+
+        replacement_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "stop legs",
+                stop_legs,
+                side=SIDE_RIGHT,
+                resource="motor:legs",
+            )
+        )
+        await asyncio.wait_for(replacement_task, timeout=1)
+        await asyncio.gather(legs_task, back_task)
+
+        assert operations[:3] == [
+            "legs:start",
+            "legs:cleanup",
+            "legs:replacement",
+        ]
+        assert operations[3:] == ["back:left", "back:right"]
+
+    async def test_group_preemption_does_not_cancel_unrelated_child_axis(self):
+        log: list[tuple[str, str]] = []
+        left = ScheduledRecordingChild(SIDE_LEFT, log)
+        right = ScheduledRecordingChild(SIDE_RIGHT, log)
+        coord = _make({SIDE_LEFT: left, SIDE_RIGHT: right})
+        legs_started = asyncio.Event()
+        release_legs = asyncio.Event()
+        legs_context: CommandContext | None = None
+        operations: list[str] = []
+
+        async def active_legs(_child: RecordingChild) -> None:
+            nonlocal legs_context
+            legs_context = current_command_context()
+            assert legs_context is not None
+            operations.append("legs:start")
+            legs_started.set()
+            await release_legs.wait()
+            operations.append("legs:end")
+
+        async def both_back(child: RecordingChild) -> None:
+            operations.append(f"group:{child.side}")
+
+        async def replace_left_back(_child: RecordingChild) -> None:
+            operations.append("back:left")
+
+        legs_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "legs",
+                active_legs,
+                side=SIDE_RIGHT,
+                resource="motor:legs",
+            )
+        )
+        await legs_started.wait()
+        group_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "back group",
+                both_back,
+                side=SIDE_BOTH,
+                resource="motor:back",
+            )
+        )
+        while not right.scheduler.has_pending:
+            await asyncio.sleep(0)
+
+        await coord.async_run_child_operation(
+            "left back",
+            replace_left_back,
+            side=SIDE_LEFT,
+            resource="motor:back",
+        )
+        await group_task
+
+        assert legs_context is not None
+        assert not legs_context.cancel_event.is_set()
+        assert not legs_task.done()
+        assert operations == ["legs:start", "back:left"]
+
+        release_legs.set()
+        await legs_task
+        assert operations == ["legs:start", "back:left", "legs:end"]
+
+    async def test_group_enqueue_cancellation_aborts_completed_reservations(self):
+        log: list[tuple[str, str]] = []
+        left = ScheduledRecordingChild(SIDE_LEFT, log)
+        right = ScheduledRecordingChild(SIDE_RIGHT, log)
+        coord = _make({SIDE_LEFT: left, SIDE_RIGHT: right})
+        right_prepare_started = asyncio.Event()
+        original_prepare = right.async_prepare_command_operation
+
+        async def delayed_prepare(*args, **kwargs):
+            right_prepare_started.set()
+            await asyncio.Event().wait()
+            return await original_prepare(*args, **kwargs)
+
+        right.async_prepare_command_operation = delayed_prepare  # type: ignore[method-assign]
+        group_task = asyncio.create_task(
+            coord.async_execute_controller_command(
+                _noop,
+                side=SIDE_BOTH,
+                resource="motor:back",
+            )
+        )
+        await right_prepare_started.wait()
+        await asyncio.sleep(0)
+        group_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await group_task
+
+        ran = asyncio.Event()
+
+        async def later(_context: CommandContext) -> None:
+            ran.set()
+
+        await asyncio.wait_for(
+            left.scheduler.execute(CommandIntent(later, cancel_running=False)),
+            timeout=1,
+        )
+        assert ran.is_set()
+
+    async def test_linked_group_reserves_every_declared_resource(self):
+        log: list[tuple[str, str]] = []
+        left = ScheduledRecordingChild(SIDE_LEFT, log)
+        right = ScheduledRecordingChild(SIDE_RIGHT, log)
+        coord = _make({SIDE_LEFT: left, SIDE_RIGHT: right})
+        resources = {"motor:back", "motor:legs"}
+
+        await coord.async_run_child_operation(
+            "set positions",
+            _noop,
+            side=SIDE_BOTH,
+            resources=resources,
+        )
+
+        assert left.prepared_scopes == [frozenset(resources)]
+        assert right.prepared_scopes == [frozenset(resources)]
+
+    async def test_linked_group_replacement_is_normal_cancellation(self):
+        log: list[tuple[str, str]] = []
+        left = ScheduledRecordingChild(SIDE_LEFT, log, block=True)
+        right = ScheduledRecordingChild(SIDE_RIGHT, log, block=True)
+        coord = _make({SIDE_LEFT: left, SIDE_RIGHT: right})
+
+        both_task = asyncio.create_task(
+            coord.async_execute_controller_command(
+                _noop,
+                side=SIDE_BOTH,
+                resource="motor:back",
+            )
+        )
+        while log.count((SIDE_LEFT, "command")) < 1 or log.count(
+            (SIDE_RIGHT, "command")
+        ) < 1:
+            await asyncio.sleep(0)
+
+        replacement = asyncio.create_task(
+            coord.async_execute_controller_command(
+                _noop,
+                side=SIDE_LEFT,
+                resource="motor:back",
+            )
+        )
+        await asyncio.gather(both_task, replacement)
+
+        first_left = log.index((SIDE_LEFT, "command"))
+        second_left = log.index((SIDE_LEFT, "command"), first_left + 1)
+        assert first_left < second_left
+        assert (SIDE_LEFT, "stop") not in log
+        assert (SIDE_RIGHT, "stop") not in log
+
+    async def test_independent_single_sides_overlap(self):
+        log: list[tuple[str, str]] = []
+        coord, left, _right = _pair(log, left={"block": True})
+        left_task = asyncio.create_task(
+            coord.async_execute_controller_command(_noop, side=SIDE_LEFT)
+        )
+        while (SIDE_LEFT, "command") not in log:
+            await asyncio.sleep(0)
+
+        await asyncio.wait_for(
+            coord.async_execute_controller_command(_noop, side=SIDE_RIGHT),
+            timeout=1,
+        )
+        assert (SIDE_RIGHT, "command") in log
+
+        left._gate.set()
+        await left_task
+
+    async def test_different_axes_on_one_child_queue_without_cross_cancel(self):
+        log: list[tuple[str, str]] = []
+        left = ScheduledRecordingChild(SIDE_LEFT, log, block=True)
+        right = ScheduledRecordingChild(SIDE_RIGHT, log)
+        coord = _make({SIDE_LEFT: left, SIDE_RIGHT: right})
+
+        back = asyncio.create_task(
+            coord.async_execute_controller_command(
+                _noop,
+                side=SIDE_LEFT,
+                resource="motor:back",
+            )
+        )
+        while (SIDE_LEFT, "command") not in log:
+            await asyncio.sleep(0)
+
+        legs = asyncio.create_task(
+            coord.async_execute_controller_command(
+                _noop,
+                side=SIDE_LEFT,
+                resource="motor:legs",
+            )
+        )
+        await asyncio.sleep(0.01)
+        assert (SIDE_LEFT, "cancel") not in log
+        assert log.count((SIDE_LEFT, "command")) == 1
+
+        left._gate.set()
+        await asyncio.gather(back, legs)
+        assert log.count((SIDE_LEFT, "command")) == 2
 
     async def test_left_only_targets_left(self):
         log: list = []
@@ -393,20 +934,18 @@ class TestPreemption:
         assert coord._pair_cancel_counter[SIDE_LEFT] == before[SIDE_LEFT] + 1
         assert coord._pair_cancel_counter[SIDE_RIGHT] == before[SIDE_RIGHT]
 
-    async def test_movement_queued_when_stop_lands_is_dropped(self):
+    async def test_concurrent_single_side_does_not_take_pair_lock(self):
         log: list = []
         coord, _left, _right = _pair(log)
-        # Hold the lock, queue a LEFT movement, then bump LEFT's counter (a stop
-        # landed while it waited) before releasing.
+        # Concurrent-mode children own independent physical schedulers. The
+        # parent lock is now reserved for sequential connection switching, so a
+        # left-only request does not wait behind unrelated pair metadata work.
         async with coord._pair_command_lock:
-            queued = asyncio.ensure_future(
+            command = asyncio.ensure_future(
                 coord.async_execute_controller_command(_noop, side=SIDE_LEFT)
             )
-            await asyncio.sleep(0.01)  # let it queue on the lock
-            coord._pair_cancel_counter[SIDE_LEFT] += 1  # a left STOP landed
-        await asyncio.wait_for(queued, timeout=1)
-        # The queued movement saw the bumped counter and dropped — no command ran.
-        assert ("left", "command") not in log
+            await asyncio.wait_for(command, timeout=1)
+        assert ("left", "command") in log
 
     async def test_queued_side_survives_other_side_preemption(self):
         log: list = []
@@ -516,7 +1055,8 @@ class SingleAddressInner:
     async def async_execute_controller_command(self, command_fn, **_kwargs):
         await command_fn(self.controller)
 
-    def request_command_cancel(self):
+    def request_command_cancel(self, resource=None, *, resources=None):
+        del resource, resources
         return None
 
     def register_connection_state_callback(self, _callback):
@@ -557,6 +1097,114 @@ class SingleAddressInner:
         self.position_hydration_pause_count -= 1
 
 
+class RecordingLogicalController:
+    """Minimal side-bindable controller for shared-scheduler tests."""
+
+    def __init__(self, _coordinator) -> None:
+        self.stop_sides: list[str] = []
+
+    def bind_side(self, side: str):
+        owner = self
+
+        class BoundController:
+            _side = side
+
+            async def stop_all(self) -> None:
+                owner.stop_sides.append(side)
+
+        return BoundController()
+
+
+class ScheduledSingleAddressInner(SingleAddressInner):
+    """Single physical coordinator double backed by the production scheduler."""
+
+    def __init__(self) -> None:
+        super().__init__(RecordingLogicalController)
+        self.scheduler = DeviceCommandScheduler("single-address")
+        self.cancel_requests = 0
+
+    async def async_execute_controller_command(
+        self,
+        command_fn,
+        *,
+        cancel_running=True,
+        resource=None,
+        resources=None,
+        **_kwargs,
+    ):
+        context = current_command_context()
+        if context is not None and context.scheduler_token is self.scheduler.token:
+            await command_fn(self.controller)
+            return
+
+        command_scope = (
+            command_resources(*resources)
+            if resources is not None
+            else command_resources(resource or "*")
+        )
+
+        async def scheduled(_context: CommandContext) -> None:
+            await command_fn(self.controller)
+
+        await self.scheduler.execute(
+            CommandIntent(
+                scheduled,
+                resources=command_scope,
+                cancel_running=cancel_running,
+            )
+        )
+
+    async def async_prepare_command_operation(
+        self,
+        operation,
+        *,
+        resource=None,
+        resources=None,
+        cancel_running=True,
+        group_id,
+        **_kwargs,
+    ) -> CommandHandle:
+        command_scope = (
+            command_resources(*resources)
+            if resources is not None
+            else command_resources(resource or "*")
+        )
+
+        async def scheduled(_context: CommandContext) -> None:
+            await operation()
+
+        return await self.scheduler.enqueue(
+            CommandIntent(
+                scheduled,
+                resources=command_scope,
+                cancel_running=cancel_running,
+                group_id=group_id,
+            ),
+            prepared=True,
+        )
+
+    async def async_wait_prepared_command(self, handle: CommandHandle) -> None:
+        await self.scheduler.wait_ready(handle)
+
+    def commit_prepared_command(self, handle: CommandHandle) -> None:
+        self.scheduler.commit(handle)
+
+    async def async_wait_prepared_command_result(self, handle: CommandHandle) -> None:
+        await self.scheduler.wait_prepared_result(handle)
+
+    async def async_abort_prepared_command(self, handle: CommandHandle) -> None:
+        await self.scheduler.cancel(handle, CommandOutcome.GROUP_ABORTED)
+
+    def request_command_cancel(self, resource=None, *, resources=None):
+        self.cancel_requests += 1
+        command_scope = (
+            command_resources(*resources)
+            if resources is not None
+            else command_resources(resource or "*")
+        )
+        self.scheduler.request_cancel(command_scope)
+
+
 class TestSingleAddressCoordinator:
     def _coordinator(self, bed_type, controller_type):
         entry = SimpleNamespace(
@@ -567,6 +1215,22 @@ class TestSingleAddressCoordinator:
         inner = SingleAddressInner(controller_type)
         inner.bed_type = bed_type
         return SingleAddressPairedCoordinator(None, entry, inner)
+
+    def _scheduled_coordinator(self):
+        entry = SimpleNamespace(
+            data={
+                CONF_PAIR_ID: "pair_single_scheduled",
+                "name": "Single",
+                CONF_BED_TYPE: BED_TYPE_SLEEP_NUMBER,
+            },
+            entry_id="single_address_scheduled",
+            async_create_background_task=lambda _hass, coro, **_kwargs: asyncio.create_task(
+                coro
+            ),
+        )
+        inner = ScheduledSingleAddressInner()
+        inner.bed_type = BED_TYPE_SLEEP_NUMBER
+        return SingleAddressPairedCoordinator(None, entry, inner), inner
 
     async def test_sbi_uses_native_side_and_both_packets(self):
         coordinator = self._coordinator(BED_TYPE_SBI, SBIController)
@@ -593,6 +1257,121 @@ class TestSingleAddressCoordinator:
         await coordinator.async_execute_controller_command(record, side=SIDE_BOTH)
 
         assert sides == [SIDE_LEFT, SIDE_RIGHT]
+
+    async def test_shared_scheduler_keeps_same_axis_sides_independent(self):
+        coordinator, _inner = self._scheduled_coordinator()
+        left_started = asyncio.Event()
+        release_left = asyncio.Event()
+        right_started = asyncio.Event()
+        left_context: CommandContext | None = None
+
+        async def left(_controller) -> None:
+            nonlocal left_context
+            left_context = current_command_context()
+            assert left_context is not None
+            left_started.set()
+            await release_left.wait()
+
+        async def right(_controller) -> None:
+            right_started.set()
+
+        left_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(
+                left,
+                side=SIDE_LEFT,
+                resource="motor:back",
+            )
+        )
+        await left_started.wait()
+        right_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(
+                right,
+                side=SIDE_RIGHT,
+                resource="motor:back",
+            )
+        )
+        await asyncio.sleep(0.01)
+
+        assert left_context is not None
+        assert not left_context.cancel_event.is_set()
+        assert not right_started.is_set()
+
+        release_left.set()
+        await asyncio.gather(left_task, right_task)
+        assert right_started.is_set()
+
+    async def test_sleep_number_both_stop_preserves_each_side_write(self):
+        coordinator, inner = self._scheduled_coordinator()
+
+        await coordinator.async_stop_command(side=SIDE_BOTH)
+
+        assert inner.cancel_requests == 1
+        assert inner.controller.stop_sides == [SIDE_LEFT, SIDE_RIGHT]
+
+    async def test_sleep_number_replacement_aborts_stale_both_fanout(self):
+        coordinator, _inner = self._scheduled_coordinator()
+        left_started = asyncio.Event()
+        sides: list[str] = []
+
+        async def old_both(controller) -> None:
+            sides.append(f"old:{controller._side}")
+            if controller._side == SIDE_LEFT:
+                context = current_command_context()
+                assert context is not None
+                left_started.set()
+                await context.cancel_event.wait()
+
+        async def replacement(controller) -> None:
+            sides.append(f"new:{controller._side}")
+
+        both_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(
+                old_both,
+                side=SIDE_BOTH,
+                resource="motor:back",
+            )
+        )
+        await left_started.wait()
+        replacement_task = asyncio.create_task(
+            coordinator.async_execute_controller_command(
+                replacement,
+                side=SIDE_LEFT,
+                resource="motor:back",
+            )
+        )
+
+        await asyncio.gather(both_task, replacement_task)
+        assert sides == ["old:left", "new:left"]
+
+    @pytest.mark.parametrize(
+        ("bed_type", "controller_type"),
+        [
+            (BED_TYPE_SBI, SBIController),
+            (BED_TYPE_SLEEP_NUMBER, SleepNumberController),
+        ],
+    )
+    async def test_cancelled_both_command_runs_stop_cleanup(
+        self, bed_type, controller_type
+    ):
+        coordinator = self._coordinator(bed_type, controller_type)
+        command_started = asyncio.Event()
+        stop_children = AsyncMock(return_value={})
+        coordinator._stop_children = stop_children
+
+        async def block(_controller):
+            command_started.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(
+            coordinator.async_execute_controller_command(block, side=SIDE_BOTH)
+        )
+        await command_started.wait()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        stop_children.assert_awaited_once()
 
     async def test_sleep_number_reconnect_hydrates_each_logical_side(self):
         coordinator = self._coordinator(BED_TYPE_SLEEP_NUMBER, SleepNumberController)
