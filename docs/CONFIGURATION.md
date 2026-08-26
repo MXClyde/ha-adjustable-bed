@@ -299,8 +299,14 @@ Richmat beds have different feature sets based on the remote model. Selecting yo
 | **ZR60** | Head, Feet, Lights |
 | **I7RM** | Head, Feet, Pillow, Lumbar, Massage, Lights |
 | **190-0055** | Head, Pillow, Feet, Massage, Lights |
+| **L&P QRRM** | Head, Feet, Flat, Zero G, Custom 1/2 |
 
 **Note:** The remote code is usually printed on the back of your physical remote.
+For an L&P bed that advertises as `QRRM` and has Flat, Zero G, Custom 1, and
+Custom 2 buttons, select **L&P QRRM**. Current L&P and Richmat apps also require
+a physical remote or product selection for QRRM devices. The BLE name and GATT
+services do not identify that profile, so the integration cannot select it
+safely on its own.
 
 ---
 

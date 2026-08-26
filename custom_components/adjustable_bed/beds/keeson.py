@@ -157,6 +157,12 @@ class KeesonCommands:
     MASSAGE_TIMER_STEP = 0x200
     MASSAGE_WAVE_STEP = 0x10000000
 
+    # BaseI4/I5 massage controls confirmed on GlideAway ComfortBase Odessa.
+    MASSAGE_WAVE_PREVIOUS = 0x4000000
+    MASSAGE_INTENSITY_1 = 0x80000
+    MASSAGE_INTENSITY_2 = 0x100000
+    MASSAGE_INTENSITY_3 = 0x200000
+
     # Additional massage commands (from Sleep Harmony / KSBT04C)
     MASSAGE_LUMBAR = 0x400000
     MASSAGE_LUMBAR_DOWN = 0x10000000  # Same value as MASSAGE_WAVE_STEP
@@ -764,6 +770,21 @@ class KeesonController(BedController):
     def supports_massage_intensity_control(self) -> bool:
         """Return True for ORE variant which supports step up/down intensity."""
         return self._variant == KEESON_VARIANT_SINO
+
+    @property
+    def supports_massage_mode_step_control(self) -> bool:
+        """Hide the ambiguous mode-step control when base wave controls exist."""
+        return self._variant != KEESON_VARIANT_BASE
+
+    @property
+    def supports_massage_wave_direction_control(self) -> bool:
+        """Return True for the hardware-confirmed BaseI4/I5 wave controls."""
+        return self._variant == KEESON_VARIANT_BASE
+
+    @property
+    def supports_massage_intensity_preset_control(self) -> bool:
+        """Return True for the hardware-confirmed BaseI4/I5 intensity presets."""
+        return self._variant == KEESON_VARIANT_BASE
 
     @property
     def massage_intensity_max(self) -> int:
@@ -1761,7 +1782,9 @@ class KeesonController(BedController):
 
     async def massage_mode_step(self) -> None:
         """Step through massage wave patterns."""
-        if self._variant == KEESON_VARIANT_SINO:
+        if self._variant == KEESON_VARIANT_BASE:
+            await self.massage_wave_next()
+        elif self._variant == KEESON_VARIANT_SINO:
             self._wave_massage = (self._wave_massage % 10) + 1
             await self.write_command(
                 self._build_command(SinoCommands.MASSAGE_HEAD_WAVE_BASE + self._wave_massage),
@@ -1769,6 +1792,33 @@ class KeesonController(BedController):
             )
         else:
             await self._write_single_shot(self._build_command(KeesonCommands.MASSAGE_TIMER_STEP))
+
+    async def massage_wave_next(self) -> None:
+        """Select the next BaseI4/I5 massage wave pattern."""
+        if not self.supports_massage_wave_direction_control:
+            raise NotImplementedError("Massage wave direction is only verified for base variant")
+        await self._write_single_shot(self._build_command(KeesonCommands.MASSAGE_WAVE_STEP))
+
+    async def massage_wave_previous(self) -> None:
+        """Select the previous BaseI4/I5 massage wave pattern."""
+        if not self.supports_massage_wave_direction_control:
+            raise NotImplementedError("Massage wave direction is only verified for base variant")
+        await self._write_single_shot(self._build_command(KeesonCommands.MASSAGE_WAVE_PREVIOUS))
+
+    async def set_massage_intensity_preset(self, level: int) -> None:
+        """Select a hardware-confirmed BaseI4/I5 massage intensity."""
+        if not self.supports_massage_intensity_preset_control:
+            raise NotImplementedError("Massage intensity presets are only verified for base variant")
+        commands = {
+            1: KeesonCommands.MASSAGE_INTENSITY_1,
+            2: KeesonCommands.MASSAGE_INTENSITY_2,
+            3: KeesonCommands.MASSAGE_INTENSITY_3,
+        }
+        try:
+            command = commands[level]
+        except KeyError as err:
+            raise ValueError(f"Unsupported massage intensity preset: {level}") from err
+        await self._write_single_shot(self._build_command(command))
 
     async def massage_head_toggle(self) -> None:
         """Toggle head massage zone on/off."""

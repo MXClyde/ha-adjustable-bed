@@ -28,13 +28,20 @@ from .adapter import (
 from .address_lock import async_get_connect_lock
 from .const import (
     ADAPTER_AUTO,
+    BED_TYPE_OKIN_CST,
+    BED_TYPE_OKIN_RF_ECO_BT,
     CONF_PREFERRED_ADAPTER,
     DEVICE_INFO_CHARS,
     DEVICE_INFO_SERVICE_UUID,
     DOMAIN,
     SUPPORTED_BED_TYPES,
 )
-from .detection import detect_bed_type_detailed, detect_bed_type_from_gatt_services
+from .detection import (
+    OKIN_SHARED_UUID_GATT_REFINABLE_TYPES,
+    detect_bed_type_detailed,
+    detect_bed_type_from_gatt_services,
+    refine_okin_shared_uuid_protocol_from_gatt,
+)
 from .diagnostic_payloads import (
     format_mapping_payloads,
     format_payload,
@@ -303,6 +310,7 @@ class BLEDiagnosticRunner:
         detection = self._build_detection_section(
             best_snapshot[0] if best_snapshot else None,
             services_info,
+            device_information,
         )
 
         adapter_details: dict[str, Any] = self.coordinator.adapter_details if self.coordinator else {}
@@ -1033,6 +1041,7 @@ class BLEDiagnosticRunner:
         self,
         service_info: Any | None,
         gatt_services: list[ServiceInfo] | None = None,
+        device_information: dict[str, str | None] | None = None,
     ) -> dict[str, Any]:
         """Build a detection reasoning section."""
         connected_device = self._extract_backend_device()
@@ -1047,14 +1056,52 @@ class BLEDiagnosticRunner:
             observed_device_name or getattr(service_info, "name", None),
         )
         if gatt_detection.bed_type is not None:
+            model_number = (device_information or {}).get("model_number")
+            configured_bed_type = (
+                self.coordinator.bed_type if self.coordinator is not None else None
+            )
+            refinement_seed = gatt_detection.bed_type
+            if (
+                gatt_detection.bed_type
+                in {BED_TYPE_OKIN_CST, BED_TYPE_OKIN_RF_ECO_BT}
+                and configured_bed_type in OKIN_SHARED_UUID_GATT_REFINABLE_TYPES
+            ):
+                # CSS plus Nordic DFU cannot distinguish CST from RF ECO BT.
+                # Seed the same configured profile that runtime refinement uses
+                # so a support bundle does not contradict the active controller.
+                refinement_seed = configured_bed_type
+            bed_type_without_model = None
+            if model_number:
+                bed_type_without_model = refine_okin_shared_uuid_protocol_from_gatt(
+                    refinement_seed,
+                    gatt_services,
+                    device_name=observed_device_name or getattr(service_info, "name", None),
+                    _log_correction=False,
+                )
+            bed_type = refine_okin_shared_uuid_protocol_from_gatt(
+                refinement_seed,
+                gatt_services,
+                ble_model=model_number,
+                device_name=observed_device_name or getattr(service_info, "name", None),
+            )
+            signals = list(gatt_detection.signals)
+            confidence = gatt_detection.confidence
+            ambiguous_types = list(gatt_detection.ambiguous_types or [])
+            if bed_type != gatt_detection.bed_type:
+                if bed_type_without_model is not None and bed_type != bed_type_without_model:
+                    signals.append("device_info:model_number")
+                    confidence = max(confidence, 0.95)
+                    ambiguous_types = []
+                elif bed_type == refinement_seed and refinement_seed != gatt_detection.bed_type:
+                    signals.append("configured_profile:shared_okin_uuid")
             return {
-                "bed_type": gatt_detection.bed_type,
-                "confidence": gatt_detection.confidence,
-                "signals": list(gatt_detection.signals),
-                "ambiguous_types": list(gatt_detection.ambiguous_types or []),
+                "bed_type": bed_type,
+                "confidence": confidence,
+                "signals": signals,
+                "ambiguous_types": ambiguous_types,
                 "requires_characteristic_check": gatt_detection.requires_characteristic_check,
                 "detected_remote": gatt_detection.detected_remote,
-                "supported_match": gatt_detection.bed_type in SUPPORTED_BED_TYPES,
+                "supported_match": bed_type in SUPPORTED_BED_TYPES,
                 "manufacturer_id": gatt_detection.manufacturer_id,
             }
 
