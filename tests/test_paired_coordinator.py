@@ -91,7 +91,8 @@ class RecordingChild:
         self._connect_gate = asyncio.Event()
         self._block_connect = block_connect
 
-    def request_command_cancel(self) -> None:
+    def request_command_cancel(self, resource=None, *, resources=None) -> None:
+        del resource, resources
         self.log.append((self.side, "cancel"))
         self._gate.set()
 
@@ -169,9 +170,14 @@ class ScheduledRecordingChild(RecordingChild):
         self.scheduler = DeviceCommandScheduler(side)
         self.prepared_scopes: list[frozenset[str]] = []
 
-    def request_command_cancel(self) -> None:
-        self.scheduler.request_cancel()
-        super().request_command_cancel()
+    def request_command_cancel(self, resource=None, *, resources=None) -> None:
+        scope = (
+            command_resources(*resources)
+            if resources is not None
+            else command_resources(resource or "*")
+        )
+        self.scheduler.request_cancel(scope)
+        super().request_command_cancel(resource, resources=resources)
 
     async def async_prepare_command_operation(
         self,
@@ -506,6 +512,69 @@ class TestSideRouting:
             "legs:replacement",
         ]
         assert operations[3:] == ["back:left", "back:right"]
+
+    async def test_group_preemption_does_not_cancel_unrelated_child_axis(self):
+        log: list[tuple[str, str]] = []
+        left = ScheduledRecordingChild(SIDE_LEFT, log)
+        right = ScheduledRecordingChild(SIDE_RIGHT, log)
+        coord = _make({SIDE_LEFT: left, SIDE_RIGHT: right})
+        legs_started = asyncio.Event()
+        release_legs = asyncio.Event()
+        legs_context: CommandContext | None = None
+        operations: list[str] = []
+
+        async def active_legs(_child: RecordingChild) -> None:
+            nonlocal legs_context
+            legs_context = current_command_context()
+            assert legs_context is not None
+            operations.append("legs:start")
+            legs_started.set()
+            await release_legs.wait()
+            operations.append("legs:end")
+
+        async def both_back(child: RecordingChild) -> None:
+            operations.append(f"group:{child.side}")
+
+        async def replace_left_back(_child: RecordingChild) -> None:
+            operations.append("back:left")
+
+        legs_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "legs",
+                active_legs,
+                side=SIDE_RIGHT,
+                resource="motor:legs",
+            )
+        )
+        await legs_started.wait()
+        group_task = asyncio.create_task(
+            coord.async_run_child_operation(
+                "back group",
+                both_back,
+                side=SIDE_BOTH,
+                resource="motor:back",
+            )
+        )
+        while not right.scheduler.has_pending:
+            await asyncio.sleep(0)
+
+        await coord.async_run_child_operation(
+            "left back",
+            replace_left_back,
+            side=SIDE_LEFT,
+            resource="motor:back",
+        )
+        with pytest.raises(PairedSideError):
+            await group_task
+
+        assert legs_context is not None
+        assert not legs_context.cancel_event.is_set()
+        assert not legs_task.done()
+        assert operations == ["legs:start", "back:left"]
+
+        release_legs.set()
+        await legs_task
+        assert operations == ["legs:start", "back:left", "legs:end"]
 
     async def test_group_enqueue_cancellation_aborts_completed_reservations(self):
         log: list[tuple[str, str]] = []
@@ -989,7 +1058,8 @@ class SingleAddressInner:
     async def async_execute_controller_command(self, command_fn, **_kwargs):
         await command_fn(self.controller)
 
-    def request_command_cancel(self):
+    def request_command_cancel(self, resource=None, *, resources=None):
+        del resource, resources
         return None
 
     def register_connection_state_callback(self, _callback):

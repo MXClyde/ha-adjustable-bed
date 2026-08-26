@@ -4169,16 +4169,28 @@ class AdjustableBedCoordinator:
                 if self._client is not None and self._client.is_connected:
                     self._reset_disconnect_timer()
 
-    def request_command_cancel(self, resource: str | None = None) -> None:
+    def request_command_cancel(
+        self,
+        resource: str | None = None,
+        *,
+        resources: Collection[str] | None = None,
+    ) -> None:
         """Signal the running command to stop ASAP, without sending a STOP write.
 
         Lets the paired parent preempt an in-flight child command before taking
         the pair lock, so a cancel_running movement (or STOP) isn't queued behind
         the BLE pulse window.
         """
+        if resource is not None and resources is not None:
+            raise ValueError("Pass resource or resources, not both")
+        command_scope = (
+            command_resources(*resources)
+            if resources is not None
+            else command_resources(resource or "*")
+        )
         self._cancel_counter += 1
         self._cancel_command.set()
-        self._command_scheduler.request_cancel(command_resources(resource or "*"))
+        self._command_scheduler.request_cancel(command_scope)
 
     async def async_stop_command(self) -> None:
         """Immediately stop any running command and send stop to bed."""

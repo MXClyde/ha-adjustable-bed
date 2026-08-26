@@ -384,8 +384,9 @@ class PairedBedCoordinator:
             if any(child in target_children for child in self._active_children) and (
                 sequential or active_group_overlaps
             ):
+                cancel_scope = self._active_group_resources or command_scope
                 for child in list(self._active_children):
-                    child.request_command_cancel()
+                    child.request_command_cancel(resources=cancel_scope)
         entry_cancel = {
             s: self._pair_cancel_generation(s, command_scope) for s in target_sides
         }

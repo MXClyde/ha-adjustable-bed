@@ -155,6 +155,37 @@ async def test_same_resource_replaces_only_after_active_cleanup() -> None:
     assert events == ["first:start", "first:cleanup", "first:done", "replacement"]
 
 
+async def test_ticket_cancelled_error_does_not_shutdown_replacement() -> None:
+    scheduler = DeviceCommandScheduler("cancelled-operation")
+    first_started = asyncio.Event()
+    events: list[str] = []
+
+    async def first(context) -> None:
+        events.append("first:start")
+        first_started.set()
+        await context.cancel_event.wait()
+        events.append("first:cancelled")
+        raise asyncio.CancelledError
+
+    async def replacement(_context) -> None:
+        events.append("replacement")
+
+    first_task = asyncio.create_task(
+        scheduler.execute(
+            CommandIntent(first, resources=command_resources("motor:back"))
+        )
+    )
+    await first_started.wait()
+    replacement_task = asyncio.create_task(
+        scheduler.execute(
+            CommandIntent(replacement, resources=command_resources("motor:back"))
+        )
+    )
+
+    await asyncio.gather(first_task, replacement_task)
+    assert events == ["first:start", "first:cancelled", "replacement"]
+
+
 async def test_stop_epoch_invalidates_active_and_queued_work() -> None:
     scheduler = DeviceCommandScheduler("stop")
     active_started = asyncio.Event()

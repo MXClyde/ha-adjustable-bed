@@ -427,14 +427,27 @@ class DeviceCommandScheduler:
                 try:
                     await handle.intent.operation(handle.context)
                 except asyncio.CancelledError:
+                    worker_task = asyncio.current_task()
+                    worker_cancelled = bool(
+                        worker_task is not None and worker_task.cancelling()
+                    )
                     if not handle.context.cancel_event.is_set():
-                        handle.context.cancel_reason = CommandOutcome.SHUTDOWN
+                        handle.context.cancel_reason = (
+                            CommandOutcome.SHUTDOWN
+                            if worker_cancelled
+                            else CommandOutcome.CALLER_CANCELLED
+                        )
                         handle.context.cancel_event.set()
                     self._finish(
                         handle,
                         handle.context.cancel_reason or CommandOutcome.CALLER_CANCELLED,
                     )
-                    raise
+                    # A controller may raise CancelledError after observing its
+                    # ticket event. That ends only this handle; the replacement
+                    # queued behind it must still run. Re-raise solely when the
+                    # scheduler worker task itself was externally cancelled.
+                    if worker_cancelled:
+                        raise
                 except Exception as err:
                     handle.state = CommandState.FAILED
                     handle.outcome = CommandOutcome.FAILED
