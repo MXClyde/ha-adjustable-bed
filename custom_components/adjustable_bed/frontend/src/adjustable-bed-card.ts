@@ -28,7 +28,6 @@ import {
 } from "./discovery";
 import { MotorHold } from "./hold";
 import { localize } from "./localize";
-import { settleSequentially } from "./settle-sequentially";
 import {
   type AdjustableBedCardConfig,
   type BedEntities,
@@ -513,17 +512,13 @@ export class AdjustableBedCard extends LitElement {
     this._synchronizingTo = sourceSide;
     this._synchronizationFailed = false;
     try {
-      this._synchronizationFailed = await settleSequentially(
-        plan.map(
-          (item) => () =>
-            this.hass!.callService(PLATFORM, "set_position", {
-              device_id: [serviceTarget.deviceId],
-              motor: item.motor,
-              position: item.position,
-              ...(serviceTarget.side ? { side: serviceTarget.side } : {}),
-            }),
-        ),
-      );
+      await this.hass.callService(PLATFORM, "set_positions", {
+        device_id: [serviceTarget.deviceId],
+        positions: plan,
+        ...(serviceTarget.side ? { side: serviceTarget.side } : {}),
+      });
+    } catch {
+      this._synchronizationFailed = true;
     } finally {
       this._synchronizingTo = undefined;
     }

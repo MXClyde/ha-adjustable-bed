@@ -10,7 +10,7 @@ import random
 import time
 import traceback
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Collection, Coroutine, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Coroutine, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -56,6 +56,17 @@ from .bond_verification import (
     bond_context_matches,
     bond_owner_from_entry,
     build_bond_context,
+)
+from .command_scheduler import (
+    ALL_COMMAND_RESOURCES,
+    CommandContext,
+    CommandHandle,
+    CommandIntent,
+    CommandKind,
+    CommandOutcome,
+    DeviceCommandScheduler,
+    command_resources,
+    current_command_context,
 )
 from .const import (
     ADAPTER_AUTO,
@@ -398,6 +409,7 @@ class AdjustableBedCoordinator:
         self._reconnect_timer: asyncio.TimerHandle | None = None
         self._lock = asyncio.Lock()
         self._command_lock = asyncio.Lock()  # Separate lock for command serialization
+        self._command_scheduler = DeviceCommandScheduler(self._address.replace(":", "_"))
         self._connecting: bool = False  # Track if we're actively connecting
         self._intentional_disconnect: bool = (
             False  # Track intentional disconnects to skip auto-reconnect
@@ -667,6 +679,11 @@ class AdjustableBedCoordinator:
         """Return the Bluetooth address."""
         return self._address
 
+    @property
+    def operation_identity(self) -> int:
+        """Return the identity of this physical command scheduler."""
+        return id(self._command_scheduler)
+
     def entity_unique_id(self, key: str) -> str:
         """Return the stable unique id for one standalone entity key."""
         return f"{self._address}_{key}"
@@ -786,11 +803,25 @@ class AdjustableBedCoordinator:
     @property
     def motor_pulse_count(self) -> int:
         """Return the motor pulse count."""
+        context = current_command_context()
+        if (
+            context is not None
+            and context.scheduler_token is self._command_scheduler.token
+            and context.pulse_count is not None
+        ):
+            return context.pulse_count
         return self._motor_pulse_count
 
     @property
     def motor_pulse_delay_ms(self) -> int:
         """Return the motor pulse delay in milliseconds."""
+        context = current_command_context()
+        if (
+            context is not None
+            and context.scheduler_token is self._command_scheduler.token
+            and context.pulse_delay_ms is not None
+        ):
+            return context.pulse_delay_ms
         return self._motor_pulse_delay_ms
 
     @property
@@ -1628,6 +1659,12 @@ class AdjustableBedCoordinator:
     @property
     def cancel_command(self) -> asyncio.Event:
         """Return the cancel command event."""
+        context = current_command_context()
+        if (
+            context is not None
+            and context.scheduler_token is self._command_scheduler.token
+        ):
+            return context.cancel_event
         return self._cancel_command
 
     @property
@@ -1728,6 +1765,7 @@ class AdjustableBedCoordinator:
             "last_notify_received": self._last_notify_received.isoformat()
             if self._last_notify_received
             else None,
+            "scheduler": self._command_scheduler.diagnostics,
         }
 
     @property
@@ -1928,6 +1966,12 @@ class AdjustableBedCoordinator:
         controller_class: str,
     ) -> None:
         """Record an integration-issued write for support bundles."""
+        context = current_command_context()
+        if (
+            context is not None
+            and context.scheduler_token is not self._command_scheduler.token
+        ):
+            context = None
         self._command_trace.append(
             {
                 "timestamp": datetime.now(UTC).isoformat(),
@@ -1940,6 +1984,15 @@ class AdjustableBedCoordinator:
                 "repeat_delay_ms": repeat_delay_ms,
                 "command_origin": command_origin,
                 "operation_name": self._active_operation_name,
+                "intent_id": context.intent_id if context is not None else None,
+                "group_id": context.group_id if context is not None else None,
+                "resources": sorted(context.resources) if context is not None else [],
+                "scheduler_strategy": self._command_scheduler.strategy_name,
+                "stop_epoch": (
+                    context.admitted_stop_epoch
+                    if context is not None
+                    else self._command_scheduler.stop_epoch
+                ),
             }
         )
 
@@ -3728,7 +3781,10 @@ class AdjustableBedCoordinator:
             await self._async_cancel_position_hydration()
         finally:
             self._cancel_passive_position_reconciliation_task()
-            await self.async_disconnect()
+            try:
+                await self._command_scheduler.async_shutdown()
+            finally:
+                await self.async_disconnect()
 
     async def async_disconnect(
         self,
@@ -4113,7 +4169,7 @@ class AdjustableBedCoordinator:
                 if self._client is not None and self._client.is_connected:
                     self._reset_disconnect_timer()
 
-    def request_command_cancel(self) -> None:
+    def request_command_cancel(self, resource: str | None = None) -> None:
         """Signal the running command to stop ASAP, without sending a STOP write.
 
         Lets the paired parent preempt an in-flight child command before taking
@@ -4122,20 +4178,39 @@ class AdjustableBedCoordinator:
         """
         self._cancel_counter += 1
         self._cancel_command.set()
+        self._command_scheduler.request_cancel(command_resources(resource or "*"))
 
     async def async_stop_command(self) -> None:
         """Immediately stop any running command and send stop to bed."""
         _LOGGER.info("Stop requested - cancelling current command")
 
-        # Signal cancellation to any running command
-        self.request_command_cancel()
+        # Invalidate active and queued movement before awaiting the wire lane.
+        # The epoch check prevents a queued command from starting after STOP.
+        self._cancel_counter += 1
+        self._cancel_command.set()
+        stop_epoch = self._command_scheduler.request_stop(ALL_COMMAND_RESOURCES)
+        stop_task = asyncio.create_task(self._async_send_stop_command())
 
-        # Acquire the command lock to wait for any in-flight GATT write to complete
-        # This prevents concurrent BLE writes which cause "operation in progress" errors
-        # NOTE: Stop is safety-critical and must ALWAYS complete - no early return if
-        # cancel_counter changes while waiting (that would leave motors running)
+        try:
+            await asyncio.shield(stop_task)
+        except asyncio.CancelledError:
+            # Once accepted, a safety STOP outlives cancellation of the service
+            # caller or config-entry task. Settle it before propagating cancellation.
+            try:
+                await stop_task
+            except Exception:
+                _LOGGER.exception("STOP failed after its caller was cancelled")
+            raise
+        finally:
+            # A caller cancellation must never leave the scheduler barrier closed.
+            # Overlapping STOP calls use their epochs so only the newest one releases it.
+            self._command_scheduler.finish_stop(stop_epoch)
+
+    async def _async_send_stop_command(self) -> None:
+        """Send STOP while owning the legacy wire and connection lifecycle lane."""
+        # STOP remains outside the ordinary scheduler lane so it can preempt it,
+        # then waits for any cancelled controller cleanup to release the wire lock.
         async with self._command_lock:
-            # Cancel disconnect timer while command is in progress
             self._cancel_disconnect_timer()
             try:
                 if not await self.async_ensure_connected(reset_timer=False):
@@ -4180,8 +4255,6 @@ class AdjustableBedCoordinator:
 
     async def _async_prepare_controller_operation(self, operation_name: str) -> BedController:
         """Ensure the controller is connected and authenticated before use."""
-        self._cancel_command.clear()
-
         if not await self.async_ensure_connected(reset_timer=False):
             _LOGGER.error("Cannot execute %s: not connected to bed", operation_name)
             raise ConnectionError("Not connected to bed")
@@ -4198,6 +4271,8 @@ class AdjustableBedCoordinator:
         self,
         *,
         entry_cancel_count: int,
+        cancel_event: asyncio.Event,
+        scheduler_managed: bool,
         skip_disconnect: bool,
         operation_name: str,
     ) -> None:
@@ -4205,7 +4280,16 @@ class AdjustableBedCoordinator:
         if self._client is None or not self._client.is_connected:
             return
 
-        command_preempted = self._cancel_counter > entry_cancel_count
+        command_preempted = (
+            cancel_event.is_set()
+            or (scheduler_managed and self._command_scheduler.has_pending)
+            or (
+                scheduler_managed
+                and (context := current_command_context()) is not None
+                and context.defer_disconnect
+            )
+            or (not scheduler_managed and self._cancel_counter > entry_cancel_count)
+        )
         if (
             self._disconnect_after_operation_enabled()
             and not skip_disconnect
@@ -4230,11 +4314,12 @@ class AdjustableBedCoordinator:
         self,
         operation_task: asyncio.Task[T],
         *,
+        cancel_event: asyncio.Event,
         operation_name: str,
         raise_on_cancel: bool,
     ) -> T | None:
         """Wait for a controller operation or cancel it when preempted."""
-        cancel_wait_task = asyncio.create_task(self._cancel_command.wait())
+        cancel_wait_task = asyncio.create_task(cancel_event.wait())
         try:
             done, pending = await asyncio.wait(
                 {operation_task, cancel_wait_task},
@@ -4293,11 +4378,28 @@ class AdjustableBedCoordinator:
             self._cancel_command.set()
 
         entry_cancel_count = self._cancel_counter
+        command_context = current_command_context()
+        scheduler_managed = bool(
+            command_context is not None
+            and command_context.scheduler_token is self._command_scheduler.token
+        )
+        legacy_exclusive = bool(
+            scheduler_managed
+            and command_context is not None
+            and "*" in command_context.resources
+        )
+        cancel_event = self.cancel_command
 
         async with self._command_lock:
             self._cancel_disconnect_timer()
 
-            if preemptible and self._cancel_counter > entry_cancel_count:
+            cancelled_while_waiting = (
+                cancel_event.is_set()
+                or (legacy_exclusive and self._cancel_counter > entry_cancel_count)
+                if scheduler_managed
+                else self._cancel_counter > entry_cancel_count
+            )
+            if preemptible and cancelled_while_waiting:
                 _LOGGER.debug("Controller %s cancelled while waiting for lock", operation_name)
                 if self._client is not None and self._client.is_connected:
                     self._reset_disconnect_timer()
@@ -4306,6 +4408,7 @@ class AdjustableBedCoordinator:
                 return None
 
             try:
+                cancel_event.clear()
                 if run_if is not None and not run_if():
                     _LOGGER.debug(
                         "Skipping controller %s: operation is no longer needed",
@@ -4313,10 +4416,11 @@ class AdjustableBedCoordinator:
                     )
                     return None
                 controller = await self._async_prepare_controller_operation(operation_name)
-                if preemptible and (
-                    self._cancel_counter > entry_cancel_count
-                    or self._cancel_command.is_set()
-                ):
+                cancelled_during_preparation = cancel_event.is_set() or (
+                    (not scheduler_managed or legacy_exclusive)
+                    and self._cancel_counter > entry_cancel_count
+                )
+                if preemptible and cancelled_during_preparation:
                     _LOGGER.debug("Controller %s cancelled during preparation", operation_name)
                     if raise_on_lock_cancel:
                         raise asyncio.CancelledError
@@ -4341,6 +4445,7 @@ class AdjustableBedCoordinator:
                     if preemptible:
                         result = await self._async_wait_for_controller_operation(
                             operation_task,
+                            cancel_event=cancel_event,
                             operation_name=operation_name,
                             raise_on_cancel=raise_on_lock_cancel,
                         )
@@ -4359,7 +4464,7 @@ class AdjustableBedCoordinator:
                 if (
                     read_positions_after_operation
                     and not self._disable_angle_sensing
-                    and not self._cancel_command.is_set()
+                    and not cancel_event.is_set()
                 ):
                     if (
                         self._position_mode == POSITION_MODE_ACCURACY
@@ -4399,6 +4504,8 @@ class AdjustableBedCoordinator:
             finally:
                 await self._async_finish_controller_operation(
                     entry_cancel_count=entry_cancel_count,
+                    cancel_event=cancel_event,
+                    scheduler_managed=scheduler_managed,
                     skip_disconnect=skip_disconnect,
                     operation_name=operation_name,
                 )
@@ -4408,18 +4515,196 @@ class AdjustableBedCoordinator:
         command_fn: Callable[[BedController], Coroutine[Any, Any, None]],
         cancel_running: bool = True,
         skip_disconnect: bool = False,
+        *,
+        resource: str | None = None,
+        pulse_count: int | None = None,
+        pulse_delay_ms: int | None = None,
+        group_id: str | None = None,
     ) -> None:
-        """Execute a controller command with proper serialization."""
-        await self._async_execute_controller_operation(
-            command_fn,
+        """Execute an opaque controller command through the device scheduler."""
+
+        async def operation() -> None:
+            await self._async_execute_controller_operation(
+                command_fn,
+                cancel_running=False,
+                skip_disconnect=skip_disconnect,
+                raise_on_lock_cancel=False,
+                preemptible=True,
+                enable_position_polling=True,
+                read_positions_after_operation=True,
+                operation_name="command",
+            )
+
+        await self._async_schedule_command_operation(
+            operation,
+            resource=resource,
+            kind=CommandKind.COMMAND,
             cancel_running=cancel_running,
-            skip_disconnect=skip_disconnect,
-            raise_on_lock_cancel=False,
-            preemptible=True,
-            enable_position_polling=True,
-            read_positions_after_operation=True,
-            operation_name="command",
+            pulse_count=pulse_count,
+            pulse_delay_ms=pulse_delay_ms,
+            group_id=group_id,
         )
+
+    async def _async_schedule_command_operation(
+        self,
+        operation: Callable[[], Awaitable[None]],
+        *,
+        resource: str | None,
+        kind: CommandKind,
+        cancel_running: bool,
+        pulse_count: int | None = None,
+        pulse_delay_ms: int | None = None,
+        group_id: str | None = None,
+    ) -> None:
+        """Schedule an operation, or run inline inside this scheduler's reservation."""
+        context = current_command_context()
+        if (
+            context is not None
+            and context.scheduler_token is self._command_scheduler.token
+        ):
+            previous_pulse_count = context.pulse_count
+            previous_pulse_delay_ms = context.pulse_delay_ms
+            if pulse_count is not None:
+                context.pulse_count = pulse_count
+            if pulse_delay_ms is not None:
+                context.pulse_delay_ms = pulse_delay_ms
+            try:
+                await operation()
+            finally:
+                context.pulse_count = previous_pulse_count
+                context.pulse_delay_ms = previous_pulse_delay_ms
+            return
+
+        intent = self._build_command_intent(
+            operation,
+            resource=resource,
+            kind=kind,
+            cancel_running=cancel_running,
+            pulse_count=pulse_count,
+            pulse_delay_ms=pulse_delay_ms,
+            group_id=group_id,
+        )
+        await self._command_scheduler.execute(intent)
+
+    def _build_command_intent(
+        self,
+        operation: Callable[[], Awaitable[None]],
+        *,
+        resource: str | None,
+        kind: CommandKind,
+        cancel_running: bool,
+        pulse_count: int | None = None,
+        pulse_delay_ms: int | None = None,
+        group_id: str | None = None,
+    ) -> CommandIntent:
+        """Build one device intent while preserving legacy cancellation signals."""
+        resources = command_resources(resource or "*")
+        if cancel_running:
+            # Keep preemptible non-scheduler work (queries and legacy direct
+            # writes) responsive. Scheduler-owned operations use their private
+            # ticket event and are replaced only when resources overlap.
+            self._cancel_counter += 1
+            self._cancel_command.set()
+
+        async def scheduled(_context: CommandContext) -> None:
+            await operation()
+
+        return CommandIntent(
+            scheduled,
+            resources=resources,
+            kind=kind,
+            replacement_key=resource or "*",
+            cancel_running=cancel_running,
+            group_id=group_id,
+            pulse_count=pulse_count,
+            pulse_delay_ms=pulse_delay_ms,
+        )
+
+    async def async_prepare_command_operation(
+        self,
+        operation: Callable[[], Awaitable[None]],
+        *,
+        resource: str | None = None,
+        kind: CommandKind = CommandKind.GROUP,
+        cancel_running: bool = True,
+        group_id: str,
+    ) -> CommandHandle:
+        """Queue a linked operation without allowing controller execution yet."""
+        intent = self._build_command_intent(
+            operation,
+            resource=resource,
+            kind=kind,
+            cancel_running=cancel_running,
+            group_id=group_id,
+        )
+        return await self._command_scheduler.enqueue(intent, prepared=True)
+
+    async def async_wait_prepared_command(self, handle: CommandHandle) -> None:
+        """Wait until a prepared command owns this device scheduler."""
+        await self._command_scheduler.wait_ready(handle)
+
+    def commit_prepared_command(self, handle: CommandHandle) -> None:
+        """Commit a prepared command after every linked device is ready."""
+        self._command_scheduler.commit(handle)
+
+    async def async_wait_prepared_command_result(self, handle: CommandHandle) -> None:
+        """Wait for a committed linked command and require successful completion."""
+        await self._command_scheduler.wait_prepared_result(handle)
+
+    async def async_abort_prepared_command(self, handle: CommandHandle) -> None:
+        """Abort a group member before or during execution."""
+        await self._command_scheduler.cancel(handle, CommandOutcome.GROUP_ABORTED)
+
+    async def async_execute_command_group(
+        self,
+        operations: Collection[Callable[[], Awaitable[None]]],
+        *,
+        resources: Collection[str],
+        cancel_running: bool = True,
+        group_id: str | None = None,
+    ) -> None:
+        """Run ordered operations as one resource-scoped scheduler intent."""
+        operation_list = tuple(operations)
+        if not operation_list:
+            return
+
+        async def group_operation() -> None:
+            context = current_command_context()
+            for index, operation in enumerate(operation_list):
+                previous_defer_disconnect = (
+                    context.defer_disconnect if context is not None else False
+                )
+                if context is not None:
+                    context.defer_disconnect = index < len(operation_list) - 1
+                try:
+                    await operation()
+                finally:
+                    if context is not None:
+                        context.defer_disconnect = previous_defer_disconnect
+
+        context = current_command_context()
+        if (
+            context is not None
+            and context.scheduler_token is self._command_scheduler.token
+        ):
+            await group_operation()
+            return
+
+        if cancel_running:
+            self._cancel_counter += 1
+            self._cancel_command.set()
+
+        async def scheduled(_context: CommandContext) -> None:
+            await group_operation()
+
+        intent = CommandIntent(
+            scheduled,
+            resources=command_resources(*resources),
+            kind=CommandKind.GROUP,
+            cancel_running=cancel_running,
+            group_id=group_id,
+        )
+        await self._command_scheduler.execute(intent)
 
     async def async_execute_controller_query(
         self,
@@ -4906,6 +5191,32 @@ class AdjustableBedCoordinator:
         move_down_fn: Callable[[BedController], Coroutine[Any, Any, None]],
         move_stop_fn: Callable[[BedController], Coroutine[Any, Any, None]],
     ) -> None:
+        """Schedule one position target with axis-scoped replacement."""
+
+        async def operation() -> None:
+            await self._async_seek_position_serial(
+                position_key,
+                target_angle,
+                move_up_fn,
+                move_down_fn,
+                move_stop_fn,
+            )
+
+        await self._async_schedule_command_operation(
+            operation,
+            resource=f"motor:{position_key}",
+            kind=CommandKind.SEEK,
+            cancel_running=True,
+        )
+
+    async def _async_seek_position_serial(
+        self,
+        position_key: str,
+        target_angle: float,
+        move_up_fn: Callable[[BedController], Coroutine[Any, Any, None]],
+        move_down_fn: Callable[[BedController], Coroutine[Any, Any, None]],
+        move_stop_fn: Callable[[BedController], Coroutine[Any, Any, None]],
+    ) -> None:
         """Seek to a target position using feedback loop control.
 
         This method moves the motor toward the target position by polling the
@@ -4922,27 +5233,20 @@ class AdjustableBedCoordinator:
             move_down_fn: Async function to move motor down
             move_stop_fn: Async function to stop motor
         """
-        # Cancel any running command FIRST (before tolerance check)
-        # This ensures any in-flight seek is cancelled even if new target is already satisfied
-        self._cancel_counter += 1
-        self._cancel_command.set()
-        entry_cancel_count = self._cancel_counter
+        cancel_event = self.cancel_command
 
         async with self._command_lock:
             # Cancel disconnect timer during seeking
             self._cancel_disconnect_timer()
 
             # Check if cancelled while waiting for lock
-            if self._cancel_counter > entry_cancel_count:
+            if cancel_event.is_set():
                 _LOGGER.debug("Position seek cancelled while waiting for lock")
                 if self._client is not None and self._client.is_connected:
                     self._reset_disconnect_timer()
                 return
 
             try:
-                # Clear cancel signal
-                self._cancel_command.clear()
-
                 if not await self.async_ensure_connected(reset_timer=False):
                     _LOGGER.error("Cannot seek position: not connected to bed")
                     raise NotConnectedError("Not connected to bed")
@@ -5088,7 +5392,7 @@ class AdjustableBedCoordinator:
                             break
 
                         # Check for cancellation
-                        if self._cancel_command.is_set():
+                        if cancel_event.is_set():
                             _LOGGER.debug("Position seek cancelled for %s", position_key)
                             break
 
@@ -5139,13 +5443,10 @@ class AdjustableBedCoordinator:
                             )
                             break
 
-                        # Check for overshoot (passed the target)
-                        # Overshoot reversal is a safety correction - clear cancel
-                        # to allow reversal movement, but check _cancel_counter to
-                        # detect if a NEW stop was requested (not just the prior
-                        # cancel that the seek itself issued on entry). If counter
-                        # changed, a real user-initiated stop arrived and we must
-                        # honour it instead of reversing.
+                        # Check for overshoot (passed the target). The ticket-local
+                        # cancellation event stays clear during an ordinary seek and
+                        # is set only by replacement, STOP, caller cancellation, or
+                        # shutdown, so a reversal cannot erase a newer safety action.
                         # Use larger overshoot tolerance to prevent oscillation
                         if reverse_on_overshoot and (
                             moving_up
@@ -5160,12 +5461,11 @@ class AdjustableBedCoordinator:
                                 await move_stop_fn(controller)
                                 await asyncio.sleep(0.3)  # Ensure stop completes before reversal
                             # Check if a new stop was requested while we were stopping
-                            if self._cancel_counter > entry_cancel_count:
+                            if cancel_event.is_set():
                                 _LOGGER.debug(
                                     "New stop request during overshoot - aborting reversal"
                                 )
                                 break
-                            self._cancel_command.clear()  # Ensure reversal isn't cancelled
                             await issue_seek_step(False, abs(target_angle - current_angle))
                             moving_up = False
                         elif reverse_on_overshoot and (
@@ -5181,12 +5481,11 @@ class AdjustableBedCoordinator:
                                 await move_stop_fn(controller)
                                 await asyncio.sleep(0.3)  # Ensure stop completes before reversal
                             # Check if a new stop was requested while we were stopping
-                            if self._cancel_counter > entry_cancel_count:
+                            if cancel_event.is_set():
                                 _LOGGER.debug(
                                     "New stop request during overshoot - aborting reversal"
                                 )
                                 break
-                            self._cancel_command.clear()  # Ensure reversal isn't cancelled
                             await issue_seek_step(True, abs(target_angle - current_angle))
                             moving_up = True
 
@@ -5247,7 +5546,15 @@ class AdjustableBedCoordinator:
 
             finally:
                 if self._client is not None and self._client.is_connected:
-                    if self._disconnect_after_operation_enabled():
+                    if (
+                        self._disconnect_after_operation_enabled()
+                        and not cancel_event.is_set()
+                        and not self._command_scheduler.has_pending
+                        and not (
+                            (context := current_command_context()) is not None
+                            and context.defer_disconnect
+                        )
+                    ):
                         _LOGGER.debug(
                             "Disconnecting after seek (disconnect_after_command=True) for %s",
                             self._address,

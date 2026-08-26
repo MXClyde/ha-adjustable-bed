@@ -520,7 +520,7 @@ class VibradormController(BedController):
 
         # Use coordinator's cancel event if none provided
         if cancel_event is None:
-            cancel_event = self._coordinator._cancel_command
+            cancel_event = self._coordinator.cancel_command
 
         self._refresh_characteristics()
 

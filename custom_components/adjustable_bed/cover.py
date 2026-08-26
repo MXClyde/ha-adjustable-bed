@@ -406,11 +406,13 @@ class AdjustableBedCover(AdjustableBedEntity, CoverEntity):
             )
             if direction == "open":
                 await self._coordinator.async_execute_controller_command(
-                    self.entity_description.open_fn
+                    self.entity_description.open_fn,
+                    resource=f"motor:{self.entity_description.key}",
                 )
             else:
                 await self._coordinator.async_execute_controller_command(
-                    self.entity_description.close_fn
+                    self.entity_description.close_fn,
+                    resource=f"motor:{self.entity_description.key}",
                 )
             _LOGGER.debug(
                 "Movement command sent for %s %s",
@@ -450,7 +452,8 @@ class AdjustableBedCover(AdjustableBedEntity, CoverEntity):
             # (round-16 cancel) before the lock, so the stop is both immediate and
             # motor-specific (not a side-wide stop_all).
             await self._coordinator.async_execute_controller_command(
-                self.entity_description.stop_fn
+                self.entity_description.stop_fn,
+                resource=f"motor:{self.entity_description.key}",
             )
             _LOGGER.debug("Stop command sent for %s", self.entity_description.key)
         except Exception:

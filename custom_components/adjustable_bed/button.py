@@ -561,6 +561,14 @@ BUTTON_DESCRIPTIONS: tuple[AdjustableBedButtonEntityDescription, ...] = (
 )
 
 
+def _button_resource(key: str) -> str | None:
+    """Return the independently replaceable resource for a button action."""
+    for motor in ("back", "legs", "head", "feet", "lumbar", "tilt", "bed_height"):
+        if key in {f"{motor}_up", f"{motor}_down", f"{motor}_stop"}:
+            return f"motor:{motor}"
+    return None
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -868,6 +876,7 @@ class AdjustableBedButton(AdjustableBedEntity, ButtonEntity):
             await self._coordinator.async_execute_controller_command(
                 self.entity_description.press_fn,
                 cancel_running=self.entity_description.cancel_movement,
+                resource=_button_resource(self.entity_description.key),
             )
             _LOGGER.debug("Button action completed: %s", self.entity_description.key)
         except Exception:
@@ -963,6 +972,7 @@ class PairedBedCombinedButton(ButtonEntity):
             description.press_fn,
             side=SIDE_BOTH,
             cancel_running=description.cancel_movement,
+            resource=_button_resource(description.key),
         )
 
 
@@ -990,6 +1000,7 @@ class PairedBedCombinedMotorButton(ButtonEntity):
         self._coordinator = coordinator
         self._direction = direction
         self._move_fn = spec.open_fn if direction == "up" else spec.close_fn
+        self._resource = f"motor:{spec.key}"
         # Translation key from spec.translation_key (preserves controller-specific
         # label overrides); unique_id stays on the stable spec.key.
         base_translation_key = f"{spec.translation_key}_{direction}"
@@ -1013,5 +1024,8 @@ class PairedBedCombinedMotorButton(ButtonEntity):
     async def async_press(self) -> None:
         """Move this motor on both sides."""
         await self._coordinator.async_execute_controller_command(
-            self._move_fn, side=SIDE_BOTH, cancel_running=True
+            self._move_fn,
+            side=SIDE_BOTH,
+            cancel_running=True,
+            resource=self._resource,
         )

@@ -60,6 +60,7 @@ SERVICE_GOTO_PRESET = "goto_preset"
 SERVICE_GENERATE_SUPPORT_BUNDLE = "generate_support_bundle"
 SERVICE_SAVE_PRESET = "save_preset"
 SERVICE_SET_POSITION = "set_position"
+SERVICE_SET_POSITIONS = "set_positions"
 SERVICE_STOP_ALL = "stop_all"
 SERVICE_TIMED_MOVE = "timed_move"
 
@@ -67,6 +68,7 @@ SERVICE_TIMED_MOVE = "timed_move"
 ATTR_PRESET = "preset"
 ATTR_MOTOR = "motor"
 ATTR_POSITION = "position"
+ATTR_POSITIONS = "positions"
 ATTR_TARGET_ADDRESS = "target_address"
 ATTR_CAPTURE_DURATION = "capture_duration"
 ATTR_INCLUDE_LOGS = "include_logs"
@@ -336,6 +338,7 @@ async def _execute_sided(
     command_fn: Callable[[BedController], Coroutine[Any, Any, None]],
     *,
     cancel_running: bool = True,
+    resource: str | None = None,
 ) -> None:
     """Run a command on the targeted side(s).
 
@@ -344,11 +347,16 @@ async def _execute_sided(
     """
     if isinstance(coordinator, PairedBedCoordinator):
         await coordinator.async_execute_controller_command(
-            command_fn, side=side, cancel_running=cancel_running
+            command_fn,
+            side=side,
+            cancel_running=cancel_running,
+            resource=resource,
         )
     else:
         await coordinator.async_execute_controller_command(
-            command_fn, cancel_running=cancel_running
+            command_fn,
+            cancel_running=cancel_running,
+            resource=resource,
         )
 
 
@@ -747,24 +755,64 @@ async def handle_set_position(call: ServiceCall) -> None:
         position,
         explicit_side,
     )
+    await _execute_position_requests(
+        hass,
+        device_ids,
+        explicit_side,
+        [(motor, position)],
+    )
+
+
+async def handle_set_positions(call: ServiceCall) -> None:
+    """Handle an all-preflighted list of motor position targets."""
+    hass = call.hass
+    device_ids = call.data.get(CONF_DEVICE_ID, [])
+    explicit_side = call.data.get(ATTR_SIDE)
+    requests = [
+        (str(item[ATTR_MOTOR]), float(item[ATTR_POSITION]))
+        for item in call.data[ATTR_POSITIONS]
+    ]
+    motors = [motor for motor, _ in requests]
+    if len(motors) != len(set(motors)):
+        raise ServiceValidationError(
+            "Each motor may appear only once in a set_positions call",
+        )
+    _LOGGER.info(
+        "Service set_positions called: motors=%s (side=%s)",
+        ", ".join(motors),
+        explicit_side,
+    )
+    await _execute_position_requests(hass, device_ids, explicit_side, requests)
+
+
+async def _execute_position_requests(
+    hass: HomeAssistant,
+    device_ids: list[str],
+    explicit_side: str | None,
+    requests: list[tuple[str, float]],
+) -> None:
+    """Preflight every requested axis and then execute the complete plan."""
     targets, missing = _resolve_sided_targets(hass, device_ids, explicit_side)
     if missing:
         raise _missing_device_error(missing[0])
 
     preflighted: PreflightedSides = []
-    plans: dict[int, dict[str, Any]] = {}
+    plans: dict[tuple[int, str], dict[str, Any]] = {}
     try:
         for coordinator, side in targets:
             for target in _command_targets(coordinator, side):
-                plans[_plan_key(target)] = await _set_position_plan(
-                    coordinator, target, preflighted, motor, position
-                )
+                for motor, position in requests:
+                    plans[(_plan_key(target), motor)] = await _set_position_plan(
+                        coordinator, target, preflighted, motor, position
+                    )
     except ServiceValidationError:
         await _release_preflighted(preflighted)
         raise
 
-    async def seek(target: AdjustableBedCoordinator) -> None:
-        config = plans[_plan_key(target)]
+    async def seek(
+        target: AdjustableBedCoordinator, motor: str, position: float
+    ) -> None:
+        config = plans[(_plan_key(target), motor)]
         await target.async_seek_position(
             position_key=cast(str, config["position_key"]),
             target_angle=position,
@@ -773,12 +821,36 @@ async def handle_set_position(call: ServiceCall) -> None:
             move_stop_fn=config["move_stop_fn"],  # type: ignore[arg-type]
         )
 
+    async def seek_all(target: AdjustableBedCoordinator) -> None:
+        operations: list[Callable[[], Coroutine[Any, Any, None]]] = []
+        for motor, position in requests:
+
+            async def operation(
+                motor: str = motor,
+                position: float = position,
+            ) -> None:
+                await seek(target, motor, position)
+
+            operations.append(operation)
+
+        await target.async_execute_command_group(
+            operations,
+            resources=tuple(
+                f"motor:{plans[(_plan_key(target), motor)]['position_key']}"
+                for motor, _ in requests
+            ),
+        )
+
     try:
         for coordinator, side in targets:
             if isinstance(coordinator, PairedBedCoordinator):
-                await coordinator.async_run_child_operation("set position", seek, side=side)
+                await coordinator.async_run_child_operation(
+                    "set positions",
+                    seek_all,
+                    side=side,
+                )
             else:
-                await seek(coordinator)
+                await seek_all(coordinator)
     except Exception:
         await _release_preflighted(preflighted)
         raise
@@ -791,10 +863,8 @@ async def _timed_move_plan(
     motor: str,
     direction: str,
     duration_ms: int,
-) -> Callable[[BedController], Coroutine[Any, Any, None]]:
+) -> tuple[Callable[[BedController], Coroutine[Any, Any, None]], int, int]:
     """Validate one physical side and build its timed command."""
-    # Create a narrowed reference for use in closures (mypy doesn't narrow across closures)
-    coordinator_: AdjustableBedCoordinator = coordinator
     async with _release_idle_on_validation_failure(coordinator):
         controller = await _validation_controller(parent, coordinator, preflighted)
 
@@ -854,40 +924,21 @@ async def _timed_move_plan(
             calculated_repeat_count,
         )
 
-        # Store original pulse settings to restore after
-        original_pulse_count = coordinator.motor_pulse_count
-        original_pulse_delay_ms = coordinator.motor_pulse_delay_ms
-
         # Bind closure variables as defaults to avoid late-binding bugs
         async def timed_movement(
             ctrl: BedController,
             *,
-            _coordinator: AdjustableBedCoordinator = coordinator_,
             _move_fn: Callable[..., Coroutine[Any, Any, None]] = move_fn,
             _stop_fn: Callable[..., Coroutine[Any, Any, None]] = stop_fn,
-            _calculated_repeat_count: int = calculated_repeat_count,
-            _pulse_delay_ms: int = pulse_delay_ms,
-            _original_pulse_count: int = original_pulse_count,
-            _original_pulse_delay_ms: int = original_pulse_delay_ms,
         ) -> None:
             """Execute movement for specified duration, always sending stop."""
             try:
-                # Temporarily set the effective pulse settings
-                # This is safe because we're inside the command lock
-                _coordinator._motor_pulse_count = _calculated_repeat_count
-                _coordinator._motor_pulse_delay_ms = _pulse_delay_ms
-
-                # Call the movement function (uses coordinator's pulse settings)
                 await _move_fn(ctrl)
             finally:
-                # Restore original pulse settings
-                _coordinator._motor_pulse_count = _original_pulse_count
-                _coordinator._motor_pulse_delay_ms = _original_pulse_delay_ms
-
                 # Always send stop command
                 await asyncio.shield(_stop_fn(ctrl))
 
-        return timed_movement
+        return timed_movement, calculated_repeat_count, pulse_delay_ms
 
 
 async def handle_timed_move(call: ServiceCall) -> None:
@@ -911,7 +962,10 @@ async def handle_timed_move(call: ServiceCall) -> None:
         raise _missing_device_error(missing[0])
 
     preflighted: PreflightedSides = []
-    plans: dict[int, Callable[[BedController], Coroutine[Any, Any, None]]] = {}
+    plans: dict[
+        int,
+        tuple[Callable[[BedController], Coroutine[Any, Any, None]], int, int],
+    ] = {}
     try:
         for coordinator, side in targets:
             for target in _command_targets(coordinator, side):
@@ -923,12 +977,23 @@ async def handle_timed_move(call: ServiceCall) -> None:
         raise
 
     async def move(target: AdjustableBedCoordinator) -> None:
-        await target.async_execute_controller_command(plans[_plan_key(target)])
+        command, pulse_count, pulse_delay_ms = plans[_plan_key(target)]
+        await target.async_execute_controller_command(
+            command,
+            resource=f"motor:{motor}",
+            pulse_count=pulse_count,
+            pulse_delay_ms=pulse_delay_ms,
+        )
 
     try:
         for coordinator, side in targets:
             if isinstance(coordinator, PairedBedCoordinator):
-                await coordinator.async_run_child_operation("timed move", move, side=side)
+                await coordinator.async_run_child_operation(
+                    "timed move",
+                    move,
+                    side=side,
+                    resource=f"motor:{motor}",
+                )
             else:
                 await move(coordinator)
     except Exception:
@@ -1243,6 +1308,30 @@ async def async_register_services(hass: HomeAssistant) -> None:
                 vol.Required(ATTR_MOTOR): vol.In(["back", "legs", "head", "feet"]),
                 # No max cap here - per-motor validation handles bed-specific limits
                 vol.Required(ATTR_POSITION): vol.All(vol.Coerce(float), vol.Range(min=0)),
+                **SIDE_FIELD,
+            }
+        ),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_POSITIONS,
+        handle_set_positions,
+        schema=vol.Schema(
+            {
+                vol.Required(CONF_DEVICE_ID): cv.ensure_list,
+                vol.Required(ATTR_POSITIONS): vol.All(
+                    [
+                        {
+                            vol.Required(ATTR_MOTOR): vol.In(
+                                ["back", "legs", "head", "feet"]
+                            ),
+                            vol.Required(ATTR_POSITION): vol.All(
+                                vol.Coerce(float), vol.Range(min=0)
+                            ),
+                        }
+                    ],
+                    vol.Length(min=1, max=4),
+                ),
                 **SIDE_FIELD,
             }
         ),
