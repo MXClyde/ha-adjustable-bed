@@ -14,7 +14,9 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.adjustable_bed.adapter import AdapterSelectionResult
 from custom_components.adjustable_bed.ble_diagnostics import (
     BLEDiagnosticRunner,
+    CharacteristicInfo,
     DiagnosticReport,
+    ServiceInfo,
 )
 from custom_components.adjustable_bed.const import (
     BED_TYPE_LEGGETT_GEN2,
@@ -500,6 +502,54 @@ class TestBleDiagnosticsRunner:
             assert "name:leggett_okin" in report.detection["signals"]
         else:
             assert "device_info:model_number" in report.detection["signals"]
+
+    def test_detection_preserves_configured_rf_eco_bt_without_device_info(
+        self,
+        hass: HomeAssistant,
+    ):
+        """An ambiguous support bundle should agree with its configured stair profile."""
+        coordinator = MagicMock()
+        coordinator.bed_type = BED_TYPE_OKIN_RF_ECO_BT
+        coordinator.observed_ble_device_name = "OKIN-050226"
+        gatt_services = [
+            ServiceInfo(
+                uuid=OKIMAT_SERVICE_UUID,
+                characteristics=[
+                    CharacteristicInfo(
+                        uuid=OKIMAT_WRITE_CHAR_UUID,
+                        handle=19,
+                        properties=["write"],
+                    )
+                ],
+            ),
+            ServiceInfo(
+                uuid=OKIN_SMART_REMOTE_CSS_SERVICE_UUID,
+                characteristics=[
+                    CharacteristicInfo(
+                        uuid=OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID,
+                        handle=42,
+                        properties=["write"],
+                    )
+                ],
+            ),
+            ServiceInfo(uuid=NORDIC_DFU_SERVICE_UUID),
+        ]
+        runner = BLEDiagnosticRunner(
+            hass,
+            "AA:BB:CC:DD:EE:55",
+            capture_duration=0,
+            coordinator=coordinator,
+        )
+
+        detection = runner._build_detection_section(
+            SimpleNamespace(name="OKIN-050226"),
+            gatt_services,
+        )
+
+        assert detection["bed_type"] == BED_TYPE_OKIN_RF_ECO_BT
+        assert "configured_profile:shared_okin_uuid" in detection["signals"]
+        assert "device_info:model_number" not in detection["signals"]
+        assert detection["confidence"] == 0.8
 
     async def test_run_diagnostics_reconnects_after_mid_enumeration_disconnect(
         self,

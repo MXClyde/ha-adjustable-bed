@@ -27,6 +27,8 @@ from .adapter import (
 from .address_lock import async_get_connect_lock
 from .const import (
     ADAPTER_AUTO,
+    BED_TYPE_OKIN_CST,
+    BED_TYPE_OKIN_RF_ECO_BT,
     CONF_PREFERRED_ADAPTER,
     DEVICE_INFO_CHARS,
     DEVICE_INFO_SERVICE_UUID,
@@ -34,6 +36,7 @@ from .const import (
     SUPPORTED_BED_TYPES,
 )
 from .detection import (
+    OKIN_SHARED_UUID_GATT_REFINABLE_TYPES,
     detect_bed_type_detailed,
     detect_bed_type_from_gatt_services,
     refine_okin_shared_uuid_protocol_from_gatt,
@@ -954,8 +957,21 @@ class BLEDiagnosticRunner:
         )
         if gatt_detection.bed_type is not None:
             model_number = (device_information or {}).get("model_number")
+            configured_bed_type = (
+                self.coordinator.bed_type if self.coordinator is not None else None
+            )
+            refinement_seed = gatt_detection.bed_type
+            if (
+                gatt_detection.bed_type
+                in {BED_TYPE_OKIN_CST, BED_TYPE_OKIN_RF_ECO_BT}
+                and configured_bed_type in OKIN_SHARED_UUID_GATT_REFINABLE_TYPES
+            ):
+                # CSS plus Nordic DFU cannot distinguish CST from RF ECO BT.
+                # Seed the same configured profile that runtime refinement uses
+                # so a support bundle does not contradict the active controller.
+                refinement_seed = configured_bed_type
             bed_type = refine_okin_shared_uuid_protocol_from_gatt(
-                gatt_detection.bed_type,
+                refinement_seed,
                 gatt_services,
                 ble_model=model_number,
                 device_name=observed_device_name or getattr(service_info, "name", None),
@@ -964,9 +980,12 @@ class BLEDiagnosticRunner:
             confidence = gatt_detection.confidence
             ambiguous_types = list(gatt_detection.ambiguous_types or [])
             if bed_type != gatt_detection.bed_type:
-                signals.append("device_info:model_number")
-                confidence = max(confidence, 0.95)
-                ambiguous_types = []
+                if bed_type == refinement_seed and refinement_seed != gatt_detection.bed_type:
+                    signals.append("configured_profile:shared_okin_uuid")
+                else:
+                    signals.append("device_info:model_number")
+                    confidence = max(confidence, 0.95)
+                    ambiguous_types = []
             return {
                 "bed_type": bed_type,
                 "confidence": confidence,
