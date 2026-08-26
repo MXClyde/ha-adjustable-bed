@@ -4182,6 +4182,37 @@ class TestDeviceInfoCache:
 
         assert coordinator._device_info_read_done is False
 
+    def test_cst_missing_device_info_is_cached_after_bounded_retry(
+        self,
+        hass: HomeAssistant,
+    ):
+        """A genuine CST receiver should not pay DIS timeouts on every reconnect."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title=TEST_NAME,
+            data={
+                CONF_ADDRESS: TEST_ADDRESS,
+                CONF_NAME: TEST_NAME,
+                CONF_BED_TYPE: BED_TYPE_OKIN_CST,
+                CONF_MOTOR_COUNT: 2,
+                CONF_HAS_MASSAGE: False,
+                CONF_DISABLE_ANGLE_SENSING: True,
+                CONF_PREFERRED_ADAPTER: "auto",
+            },
+            unique_id=TEST_ADDRESS,
+            entry_id="okin_cst_bounded_device_info_retry_test",
+        )
+        entry.add_to_hass(hass)
+
+        coordinator = AdjustableBedCoordinator(hass, entry)
+        coordinator._store_ble_device_info(None, None)
+        assert coordinator._device_info_read_done is False
+
+        coordinator._store_ble_device_info(None, None)
+
+        assert coordinator._device_info_read_attempts == 2
+        assert coordinator._device_info_read_done is True
+
     def test_useful_device_info_is_cached_for_refinable_bed(
         self,
         hass: HomeAssistant,
