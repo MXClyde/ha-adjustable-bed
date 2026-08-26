@@ -863,21 +863,17 @@ async def _timed_move_plan(
     motor: str,
     direction: str,
     duration_ms: int,
-) -> tuple[Callable[[BedController], Coroutine[Any, Any, None]], int, int]:
+) -> tuple[Callable[[BedController], Coroutine[Any, Any, None]], int, int, str]:
     """Validate one physical side and build its timed command."""
     async with _release_idle_on_validation_failure(coordinator):
         controller = await _validation_controller(parent, coordinator, preflighted)
 
-        motor_configs = {
-            spec.key: {
-                "move_up_fn": spec.open_fn,
-                "move_down_fn": spec.close_fn,
-                "move_stop_fn": spec.stop_fn,
-            }
+        motor_specs = {
+            spec.key: spec
             for spec in controller.motor_control_specs
             if spec.key in TIMED_MOVE_MOTOR_OPTIONS
         }
-        valid_motors = set(motor_configs)
+        valid_motors = set(motor_specs)
 
         # Validate motor is valid for this bed
         if motor not in valid_motors:
@@ -893,11 +889,11 @@ async def _timed_move_plan(
                 },
             )
 
-        config = motor_configs[motor]
+        spec = motor_specs[motor]
 
         # Get the appropriate move function based on direction
-        move_fn = config["move_up_fn"] if direction == "up" else config["move_down_fn"]
-        stop_fn = config["move_stop_fn"]
+        move_fn = spec.open_fn if direction == "up" else spec.close_fn
+        stop_fn = spec.stop_fn
 
         # Execute timed movement
         # Calculate repeat count: duration_ms / pulse_delay_ms
@@ -938,7 +934,12 @@ async def _timed_move_plan(
                 # Always send stop command
                 await asyncio.shield(_stop_fn(ctrl))
 
-        return timed_movement, calculated_repeat_count, pulse_delay_ms
+        return (
+            timed_movement,
+            calculated_repeat_count,
+            pulse_delay_ms,
+            spec.position_key or spec.key,
+        )
 
 
 async def handle_timed_move(call: ServiceCall) -> None:
@@ -964,7 +965,7 @@ async def handle_timed_move(call: ServiceCall) -> None:
     preflighted: PreflightedSides = []
     plans: dict[
         int,
-        tuple[Callable[[BedController], Coroutine[Any, Any, None]], int, int],
+        tuple[Callable[[BedController], Coroutine[Any, Any, None]], int, int, str],
     ] = {}
     try:
         for coordinator, side in targets:
@@ -977,10 +978,10 @@ async def handle_timed_move(call: ServiceCall) -> None:
         raise
 
     async def move(target: AdjustableBedCoordinator) -> None:
-        command, pulse_count, pulse_delay_ms = plans[_plan_key(target)]
+        command, pulse_count, pulse_delay_ms, position_key = plans[_plan_key(target)]
         await target.async_execute_controller_command(
             command,
-            resource=f"motor:{motor}",
+            resource=f"motor:{position_key}",
             pulse_count=pulse_count,
             pulse_delay_ms=pulse_delay_ms,
         )
@@ -988,11 +989,20 @@ async def handle_timed_move(call: ServiceCall) -> None:
     try:
         for coordinator, side in targets:
             if isinstance(coordinator, PairedBedCoordinator):
+                position_keys = {
+                    plans[_plan_key(target)][3]
+                    for target in _command_targets(coordinator, side)
+                }
+                resource = (
+                    f"motor:{next(iter(position_keys))}"
+                    if len(position_keys) == 1
+                    else None
+                )
                 await coordinator.async_run_child_operation(
                     "timed move",
                     move,
                     side=side,
-                    resource=f"motor:{motor}",
+                    resource=resource,
                 )
             else:
                 await move(coordinator)

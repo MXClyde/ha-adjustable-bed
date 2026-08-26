@@ -130,6 +130,14 @@ class PairedBedCoordinator:
         # sides executing under the lock, so a cancel_running command can cancel
         # them before queueing and preempt instead of waiting out the pulse window.
         self._pair_cancel_counter: dict[str, int] = {SIDE_LEFT: 0, SIDE_RIGHT: 0}
+        self._pair_global_cancel_counter: dict[str, int] = {
+            SIDE_LEFT: 0,
+            SIDE_RIGHT: 0,
+        }
+        self._pair_resource_cancel_counter: dict[str, dict[str, int]] = {
+            SIDE_LEFT: {},
+            SIDE_RIGHT: {},
+        }
         self._active_children: set[AdjustableBedCoordinator] = set()
         self._active_group_resources: frozenset[str] = frozenset()
         self._connection_state_callbacks: set[Callable[[bool], None]] = set()
@@ -209,6 +217,35 @@ class PairedBedCoordinator:
         if side == SIDE_BOTH:
             return [(s, self._children[s]) for s in PAIR_SIDES if s in self._children]
         return [(side, self._children[side])]
+
+    def _bump_pair_cancel_generation(self, side: str, resource: str | None) -> None:
+        """Invalidate queued commands whose resources overlap a newer request."""
+        self._pair_cancel_counter[side] += 1
+        if resource is None or resource == "*":
+            self._pair_global_cancel_counter[side] += 1
+            return
+        resource_counters = self._pair_resource_cancel_counter[side]
+        resource_counters[resource] = resource_counters.get(resource, 0) + 1
+
+    def _pair_cancel_generation(
+        self, side: str, resource: str | None
+    ) -> tuple[int, ...]:
+        """Snapshot cancellation state relevant to one queued resource."""
+        if resource is None or resource == "*":
+            return (self._pair_cancel_counter[side],)
+        return (
+            self._pair_global_cancel_counter[side],
+            self._pair_resource_cancel_counter[side].get(resource, 0),
+        )
+
+    def _pair_command_was_cancelled(
+        self,
+        side: str,
+        resource: str | None,
+        entry_cancel: Mapping[str, tuple[int, ...]],
+    ) -> bool:
+        """Return whether a newer overlapping command invalidated this request."""
+        return self._pair_cancel_generation(side, resource) != entry_cancel[side]
 
     # ------------------------------------------------------------------ commands
     async def async_execute_controller_command(
@@ -305,7 +342,7 @@ class PairedBedCoordinator:
         # right movement (and vice versa).
         if cancel_running:
             for target_side in target_sides:
-                self._pair_cancel_counter[target_side] += 1
+                self._bump_pair_cancel_generation(target_side, resource)
             target_children = {child for _, child in targets}
             # If this command overlaps the in-flight one, preempt the WHOLE
             # in-flight command (all its children), not just the shared side: a
@@ -326,7 +363,9 @@ class PairedBedCoordinator:
             ):
                 for child in list(self._active_children):
                     child.request_command_cancel()
-        entry_cancel = {s: self._pair_cancel_counter[s] for s in target_sides}
+        entry_cancel = {
+            s: self._pair_cancel_generation(s, resource) for s in target_sides
+        }
 
         if not sequential:
             if len(targets) == 1:
@@ -354,7 +393,7 @@ class PairedBedCoordinator:
                             self._pair_side_locks[target_side]
                         )
                 if any(
-                    self._pair_cancel_counter[s] != entry_cancel[s]
+                    self._pair_command_was_cancelled(s, resource, entry_cancel)
                     for s in target_sides
                 ):
                     return
@@ -381,14 +420,17 @@ class PairedBedCoordinator:
             # A STOP (or newer command) bumped one of OUR target sides while we
             # waited — drop this now-stale movement instead of starting it right
             # after the safety stop.
-            if any(self._pair_cancel_counter[s] != entry_cancel[s] for s in target_sides):
+            if any(
+                self._pair_command_was_cancelled(s, resource, entry_cancel)
+                for s in target_sides
+            ):
                 return
 
             self._active_children = {child for _, child in targets}
             try:
                 try:
                     await self._run_both_sequential(
-                        action, targets, op, entry_cancel
+                        action, targets, op, entry_cancel, resource
                     )
                 except asyncio.CancelledError:
                     # The parent command was cancelled (service cancellation or
@@ -414,7 +456,7 @@ class PairedBedCoordinator:
         *,
         cancel_running: bool,
         resource: str | None,
-        entry_cancel: dict[str, int],
+        entry_cancel: Mapping[str, tuple[int, ...]],
     ) -> None:
         """Admit one side without holding pair metadata across its operation."""
         prepare = getattr(child, "async_prepare_command_operation", None)
@@ -422,14 +464,14 @@ class PairedBedCoordinator:
             # Compatibility for coordinator doubles. Separate side locks still
             # allow left and right to overlap while serializing one fake child.
             async with self._pair_side_locks[side]:
-                if self._pair_cancel_counter[side] != entry_cancel[side]:
+                if self._pair_command_was_cancelled(side, resource, entry_cancel):
                     return
                 await op(child)
             return
 
         handle: CommandHandle | None = None
         async with self._pair_side_locks[side]:
-            if self._pair_cancel_counter[side] != entry_cancel[side]:
+            if self._pair_command_was_cancelled(side, resource, entry_cancel):
                 return
             handle = await child.async_prepare_command_operation(
                 lambda: op(child),
@@ -439,6 +481,9 @@ class PairedBedCoordinator:
             )
             try:
                 await child.async_wait_prepared_command(handle)
+                if self._pair_command_was_cancelled(side, resource, entry_cancel):
+                    await child.async_abort_prepared_command(handle)
+                    return
             except BaseException:
                 await child.async_abort_prepared_command(handle)
                 raise
@@ -605,7 +650,8 @@ class PairedBedCoordinator:
         action: str,
         targets: list[tuple[str, AdjustableBedCoordinator]],
         op: Callable[[AdjustableBedCoordinator], Coroutine[Any, Any, None]],
-        entry_cancel: dict[str, int],
+        entry_cancel: Mapping[str, tuple[int, ...]],
+        resource: str | None,
     ) -> None:
         """Run each side in turn holding only ONE BLE link at a time: connect the
         side, run its op, then disconnect it before moving to the next.
@@ -629,7 +675,8 @@ class PairedBedCoordinator:
             # cycle — checking only the side about to run would let a later side
             # connect after an earlier side of a both-cycle was already cancelled.
             return any(
-                self._pair_cancel_counter[s] != entry_cancel[s] for s, _ in targets
+                self._pair_command_was_cancelled(s, resource, entry_cancel)
+                for s, _ in targets
             )
 
         for side, child in targets:
@@ -744,7 +791,7 @@ class PairedBedCoordinator:
         # Bump each targeted side's counter so a movement still queued on the pair
         # lock for that side drops instead of starting right after this safety stop.
         for target_side, _ in targets:
-            self._pair_cancel_counter[target_side] += 1
+            self._bump_pair_cancel_generation(target_side, None)
         errors = await self._stop_children(targets)
         if errors:
             raise PairedSideError("stop", errors)
@@ -1137,10 +1184,33 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
     ) -> None:
         """Serialize non-native both over the one physical command lock."""
         del cancel_running, resource
-        if self._single_native_both and len({child for _, child in targets}) == 1:
-            try:
+        try:
+            if self._single_native_both and len({child for _, child in targets}) == 1:
                 await op(targets[0][1])
-            except Exception as err:  # noqa: BLE001
+                return
+
+            errors: dict[str, BaseException] = {}
+            for side, child in targets:
+                try:
+                    await op(child)
+                except Exception as err:  # noqa: BLE001
+                    errors[side] = err
+                    break
+            if errors:
+                stop_targets = [
+                    (side, self._children[side])
+                    for side in PAIR_SIDES
+                    if side in self._children
+                ]
+                stop_errors = await self._stop_children(stop_targets)
+                raise PairedSideError(
+                    action, _merge_stop_errors(errors, stop_errors)
+                )
+        except asyncio.CancelledError:
+            await self._stop_children(targets)
+            raise
+        except Exception as err:  # noqa: BLE001
+            if self._single_native_both and len({child for _, child in targets}) == 1:
                 stop_errors = await self._stop_children(
                     [(SIDE_BOTH, targets[0][1])]
                 )
@@ -1148,23 +1218,7 @@ class SingleAddressPairedCoordinator(PairedBedCoordinator):
                     action,
                     _merge_stop_errors({SIDE_BOTH: err}, stop_errors),
                 ) from err
-            return
-
-        errors: dict[str, BaseException] = {}
-        for side, child in targets:
-            try:
-                await op(child)
-            except Exception as err:  # noqa: BLE001
-                errors[side] = err
-                break
-        if errors:
-            stop_targets = [
-                (side, self._children[side])
-                for side in PAIR_SIDES
-                if side in self._children
-            ]
-            stop_errors = await self._stop_children(stop_targets)
-            raise PairedSideError(action, _merge_stop_errors(errors, stop_errors))
+            raise
 
     async def _stop_children(
         self, targets: list[tuple[str, AdjustableBedCoordinator]]

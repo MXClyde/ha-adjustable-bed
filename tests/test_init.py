@@ -1358,6 +1358,10 @@ class TestServices:
                 response=True,
             )
         ] * 4
+        coordinator = hass.data[DOMAIN][entry.entry_id]
+        assert {tuple(item["resources"]) for item in coordinator.command_trace} == {
+            ("motor:back",)
+        }
 
     async def test_timed_move_service_accepts_okin_rf_eco_bt_stair(
         self,
