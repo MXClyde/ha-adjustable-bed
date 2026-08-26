@@ -58,6 +58,7 @@ from custom_components.adjustable_bed.const import (
     BED_TYPE_TIMOTION_AHF,
     BED_TYPE_VIBRADORM,
     BEDS_WITH_POSITION_FEEDBACK,
+    BEDS_WITHOUT_ANGLE_FEEDBACK,
     CONF_BACK_MAX_ANGLE,
     CONF_BED_TYPE,
     CONF_BLE_BOND_ESTABLISHED,
@@ -195,10 +196,10 @@ class TestPairingInstructions:
         "bed_type",
         [BED_TYPE_OKIN_UUID, BED_TYPE_OKIN_CST, BED_TYPE_OKIN_RF_ECO_BT],
     )
-    async def test_okin_pairing_instructions_use_receiver_button(
+    async def test_okin_pairing_instructions_use_power_cycle_guidance(
         self, hass: HomeAssistant, bed_type: str
     ) -> None:
-        """Okin UUID/CST/RF ECO BT beds should show receiver pairing guidance."""
+        """Okin UUID/CST/RF ECO BT beds should not suggest the RF pairing button."""
         flow = AdjustableBedConfigFlow()
         flow.hass = hass
 
@@ -210,24 +211,33 @@ class TestPairingInstructions:
                         "component.adjustable_bed.config.step.bluetooth_pairing."
                         "data_description.pairing_instructions_okin"
                     ): (
-                        "1. Put the OKIN receiver/control box in pairing mode (press or hold the receiver pairing button until the LED blinks)\n"
-                        "2. Click 'Pair Now'"
+                        "1. Power-cycle the OKIN control box, or hold the under-bed lamp button "
+                        "until its light blinks. The Pair/Learn button only syncs the RF remote.\n"
+                        "2. While the light is active, click 'Pair Now'."
                     )
                 }
             ),
         ):
             instructions = await flow._get_pairing_instructions(bed_type)
 
-        assert "OKIN receiver/control box" in instructions
-        assert "receiver pairing button" in instructions
+        assert "Power-cycle the OKIN control box" in instructions
+        assert "under-bed lamp button" in instructions
+        assert "Pair/Learn button only syncs the RF remote" in instructions
 
     async def test_okin_rf_eco_bt_requires_pairing(self) -> None:
         """RF ECO BT should request BLE pairing before authenticated OKIN writes."""
         assert requires_pairing(BED_TYPE_OKIN_RF_ECO_BT)
 
-    async def test_okin_cst_supports_position_feedback(self) -> None:
-        """CST should keep position sliders available after runtime correction."""
-        assert BED_TYPE_OKIN_CST in BEDS_WITH_POSITION_FEEDBACK
+    async def test_okin_cst_uses_fixed_three_motor_layout_without_position_feedback(
+        self,
+    ) -> None:
+        """The MFirm profile has three motors but no decoded position state."""
+        assert _default_motor_count(BED_TYPE_OKIN_CST) == 3
+        assert _is_valid_motor_count(BED_TYPE_OKIN_CST, "auto", 3)
+        assert not _is_valid_motor_count(BED_TYPE_OKIN_CST, "auto", 2)
+        assert not _is_valid_motor_count(BED_TYPE_OKIN_CST, "auto", 4)
+        assert BED_TYPE_OKIN_CST not in BEDS_WITH_POSITION_FEEDBACK
+        assert BED_TYPE_OKIN_CST in BEDS_WITHOUT_ANGLE_FEEDBACK
 
 
 class TestPairingPersistence:
@@ -1635,7 +1645,7 @@ class TestBluetoothDiscoveryFlow:
             result["flow_id"],
             user_input={
                 CONF_NAME: "My CST Bed",
-                CONF_MOTOR_COUNT: 2,
+                CONF_MOTOR_COUNT: 3,
                 CONF_HAS_MASSAGE: False,
                 CONF_DISABLE_ANGLE_SENSING: True,
                 CONF_PREFERRED_ADAPTER: "auto",
@@ -2384,7 +2394,7 @@ class TestOptionsFlow:
                 CONF_ADDRESS: "AA:BB:CC:DD:EE:96",
                 CONF_NAME: "Okin CST Bed",
                 CONF_BED_TYPE: BED_TYPE_OKIN_CST,
-                CONF_MOTOR_COUNT: 4,
+                CONF_MOTOR_COUNT: 3,
                 CONF_BLE_BOND_ESTABLISHED: True,
                 CONF_BLE_BOND_MARKER_UNRELIABLE: True,
                 CONF_BACK_MAX_ANGLE: 68.0,
@@ -2409,7 +2419,7 @@ class TestOptionsFlow:
             initial["flow_id"],
             user_input={
                 CONF_BED_TYPE: BED_TYPE_OCTO,
-                CONF_MOTOR_COUNT: 4,
+                CONF_MOTOR_COUNT: 3,
             },
         )
 
