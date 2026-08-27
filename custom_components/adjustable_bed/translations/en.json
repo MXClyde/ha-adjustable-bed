@@ -462,20 +462,23 @@
       "massage_mode_step": {
         "name": "Massage: Mode"
       },
+      "massage_timer_step": {
+        "name": "Massage: Timer"
+      },
       "massage_wave_next": {
         "name": "Massage: Wave Next"
       },
       "massage_wave_previous": {
         "name": "Massage: Wave Previous"
       },
-      "massage_intensity_1": {
-        "name": "Massage: Intensity 1"
+      "massage_intensity_level_1": {
+        "name": "Massage: Intensity Level 1"
       },
-      "massage_intensity_2": {
-        "name": "Massage: Intensity 2"
+      "massage_intensity_level_2": {
+        "name": "Massage: Intensity Level 2"
       },
-      "massage_intensity_3": {
-        "name": "Massage: Intensity 3"
+      "massage_intensity_level_3": {
+        "name": "Massage: Intensity Level 3"
       },
       "massage_circulation_full_body": {
         "name": "Massage: Full Body Loop"
