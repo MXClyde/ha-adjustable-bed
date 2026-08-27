@@ -1447,24 +1447,108 @@ class TestButtonEntities:
         )
         entry.add_to_hass(hass)
 
+        from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(hass)
+        old_level_1 = registry.async_get_or_create(
+            "button",
+            DOMAIN,
+            f"{address}_massage_intensity_1",
+            config_entry=entry,
+            suggested_object_id="keeson_base_massage_bed_massage_intensity_1",
+        )
+        old_level_2 = registry.async_get_or_create(
+            "button",
+            DOMAIN,
+            f"{address}_massage_intensity_2",
+            config_entry=entry,
+            suggested_object_id="keeson_base_massage_bed_massage_intensity_2",
+        )
+        established_level_2 = registry.async_get_or_create(
+            "button",
+            DOMAIN,
+            f"{address}_massage_intensity_level_2",
+            config_entry=entry,
+            suggested_object_id="keeson_base_massage_bed_massage_intensity_level_2",
+        )
+
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
+
+        for key in (
+            "massage_mode_step",
+            "massage_wave_next",
+            "massage_wave_previous",
+            "massage_intensity_level_1",
+            "massage_intensity_level_2",
+            "massage_intensity_level_3",
+        ):
+            assert registry.async_get_entity_id("button", DOMAIN, f"{address}_{key}") is not None
+
+        # 3.6 briefly shipped different unique IDs. Migrate them without
+        # changing an existing entity ID, and prefer an established pre-3.6
+        # entity when both forms are present.
+        assert registry.async_get_entity_id(
+            "button", DOMAIN, f"{address}_massage_intensity_level_1"
+        ) == str(old_level_1.entity_id)
+        assert registry.async_get_entity_id(
+            "button", DOMAIN, f"{address}_massage_intensity_level_2"
+        ) == str(established_level_2.entity_id)
+        assert registry.async_get_entity_id(
+            "button", DOMAIN, f"{address}_massage_intensity_1"
+        ) is None
+        assert registry.async_get_entity_id(
+            "button", DOMAIN, f"{address}_massage_intensity_2"
+        ) is None
+        assert registry.async_get(str(old_level_2.entity_id)) is None
+
+    async def test_intensity_id_migration_removes_unsupported_stale_button(
+        self,
+        hass: HomeAssistant,
+        mock_coordinator_connected,
+        enable_custom_integrations,
+    ):
+        """Migrated 3.6 intensity entities should not linger on other variants."""
+        address = "AA:BB:CC:DD:EE:51"
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Keeson KSBT Bed",
+            data={
+                CONF_ADDRESS: address,
+                CONF_NAME: "Keeson KSBT Bed",
+                CONF_BED_TYPE: BED_TYPE_KEESON,
+                CONF_PROTOCOL_VARIANT: "ksbt",
+                CONF_MOTOR_COUNT: 2,
+                CONF_HAS_MASSAGE: True,
+                CONF_DISABLE_ANGLE_SENSING: True,
+                CONF_PREFERRED_ADAPTER: "auto",
+            },
+            unique_id=address,
+            entry_id="keeson_ksbt_stale_intensity_entry",
+        )
+        entry.add_to_hass(hass)
 
         from homeassistant.helpers import entity_registry as er
 
         registry = er.async_get(hass)
-        for key in (
-            "massage_wave_next",
-            "massage_wave_previous",
-            "massage_intensity_1",
-            "massage_intensity_2",
-            "massage_intensity_3",
-        ):
-            assert registry.async_get_entity_id("button", DOMAIN, f"{address}_{key}") is not None
-
-        assert (
-            registry.async_get_entity_id("button", DOMAIN, f"{address}_massage_mode_step") is None
+        stale = registry.async_get_or_create(
+            "button",
+            DOMAIN,
+            f"{address}_massage_intensity_1",
+            config_entry=entry,
+            suggested_object_id="keeson_ksbt_bed_massage_intensity_1",
         )
+
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        assert registry.async_get(str(stale.entity_id)) is None
+        assert registry.async_get_entity_id(
+            "button", DOMAIN, f"{address}_massage_intensity_1"
+        ) is None
+        assert registry.async_get_entity_id(
+            "button", DOMAIN, f"{address}_massage_intensity_level_1"
+        ) is None
 
     async def test_kaidi_entities_expose_book_leisure_direct_position_and_filtered_massage(
         self,

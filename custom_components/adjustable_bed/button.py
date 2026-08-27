@@ -26,6 +26,12 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+_MASSAGE_INTENSITY_BUTTON_KEY_MIGRATIONS = (
+    ("massage_intensity_1", "massage_intensity_level_1"),
+    ("massage_intensity_2", "massage_intensity_level_2"),
+    ("massage_intensity_3", "massage_intensity_level_3"),
+)
+
 
 @dataclass(frozen=True, kw_only=True)
 class AdjustableBedButtonEntityDescription(ButtonEntityDescription):
@@ -387,8 +393,8 @@ BUTTON_DESCRIPTIONS: tuple[AdjustableBedButtonEntityDescription, ...] = (
         required_capability="supports_massage_wave_direction_control",
     ),
     AdjustableBedButtonEntityDescription(
-        key="massage_intensity_1",
-        translation_key="massage_intensity_1",
+        key="massage_intensity_level_1",
+        translation_key="massage_intensity_level_1",
         icon="mdi:numeric-1-circle",
         requires_massage=True,
         cancel_movement=True,
@@ -396,8 +402,8 @@ BUTTON_DESCRIPTIONS: tuple[AdjustableBedButtonEntityDescription, ...] = (
         required_capability="supports_massage_intensity_preset_control",
     ),
     AdjustableBedButtonEntityDescription(
-        key="massage_intensity_2",
-        translation_key="massage_intensity_2",
+        key="massage_intensity_level_2",
+        translation_key="massage_intensity_level_2",
         icon="mdi:numeric-2-circle",
         requires_massage=True,
         cancel_movement=True,
@@ -405,8 +411,8 @@ BUTTON_DESCRIPTIONS: tuple[AdjustableBedButtonEntityDescription, ...] = (
         required_capability="supports_massage_intensity_preset_control",
     ),
     AdjustableBedButtonEntityDescription(
-        key="massage_intensity_3",
-        translation_key="massage_intensity_3",
+        key="massage_intensity_level_3",
+        translation_key="massage_intensity_level_3",
         icon="mdi:numeric-3-circle",
         requires_massage=True,
         cancel_movement=True,
@@ -569,6 +575,7 @@ async def async_setup_entry(
         has_massage = True
 
     if controller is not None:
+        _async_migrate_massage_intensity_button_unique_ids(hass, coordinator)
         _async_remove_stale_button_entities(hass, coordinator, controller, has_massage)
 
     entities = []
@@ -578,6 +585,29 @@ async def async_setup_entry(
         entities.append(AdjustableBedButton(coordinator, description))
 
     async_add_entities(entities)
+
+
+def _async_migrate_massage_intensity_button_unique_ids(
+    hass: HomeAssistant,
+    coordinator: AdjustableBedCoordinator,
+) -> None:
+    """Restore established intensity IDs while preserving 3.6 entity IDs."""
+    registry = er.async_get(hass)
+    for old_key, new_key in _MASSAGE_INTENSITY_BUTTON_KEY_MIGRATIONS:
+        old_entity_id = registry.async_get_entity_id(
+            "button",
+            DOMAIN,
+            f"{coordinator.address}_{old_key}",
+        )
+        if old_entity_id is None:
+            continue
+
+        new_unique_id = f"{coordinator.address}_{new_key}"
+        if registry.async_get_entity_id("button", DOMAIN, new_unique_id) is not None:
+            registry.async_remove(old_entity_id)
+            continue
+
+        registry.async_update_entity(old_entity_id, new_unique_id=new_unique_id)
 
 
 def _should_add_button(

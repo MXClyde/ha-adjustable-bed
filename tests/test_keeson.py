@@ -685,6 +685,26 @@ class TestKeesonMassage:
             response=True,
         )
 
+    async def test_base_mode_step_remains_timer_step(
+        self,
+        hass: HomeAssistant,
+        mock_keeson_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """Base mode entity should retain its pre-3.6 timer-step behavior."""
+        coordinator = AdjustableBedCoordinator(hass, mock_keeson_config_entry)
+        await coordinator.async_connect()
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await coordinator.controller.massage_mode_step()
+
+        mock_bleak_client.write_gatt_char.assert_awaited_once_with(
+            KEESON_BASE_WRITE_CHAR_UUID,
+            bytes.fromhex("e5fe160002000004"),
+            response=True,
+        )
+
     @pytest.mark.parametrize(
         ("level", "expected_payload"),
         [
@@ -731,20 +751,20 @@ class TestKeesonMassage:
             ("purple", False),
         ],
     )
-    def test_direct_massage_controls_are_base_only(
+    def test_wave_direction_controls_are_base_only(
         self,
         hass: HomeAssistant,
         mock_keeson_config_entry,
         variant: str,
         supported: bool,
     ):
-        """Variant-specific Base meanings must not leak into other profiles."""
+        """Variant-specific Base wave meanings must not leak into other profiles."""
         coordinator = AdjustableBedCoordinator(hass, mock_keeson_config_entry)
         controller = KeesonController(coordinator, variant=variant)
 
         assert controller.supports_massage_wave_direction_control is supported
         assert controller.supports_massage_intensity_preset_control is supported
-        assert controller.supports_massage_mode_step_control is not supported
+        assert controller.supports_massage_mode_step_control is True
 
     async def test_base_intensity_rejects_unknown_level(
         self,
