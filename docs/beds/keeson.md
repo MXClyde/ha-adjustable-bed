@@ -83,7 +83,8 @@ the wave controls, while its logs showed that the dashboard's established
 presses never reached BLE. The entity IDs are retained for compatibility.
 Their meanings are variant-specific and must not be applied to the KSBT, Sino,
 Purple, or Ergomotion profiles. The existing `0x00000200` timer-step action is
-separate from wave selection.
+separate from wave selection and is displayed as **Massage: Timer** while
+retaining its established entity identity.
 
 | Action | Value |
 |--------|-------|

@@ -772,6 +772,11 @@ class KeesonController(BedController):
         return self._variant == KEESON_VARIANT_SINO
 
     @property
+    def massage_mode_step_is_timer(self) -> bool:
+        """Return True when the shared action sends the Keeson timer-step command."""
+        return self._variant != KEESON_VARIANT_SINO
+
+    @property
     def supports_massage_wave_direction_control(self) -> bool:
         """Return True for the hardware-confirmed BaseI4/I5 wave controls."""
         return self._variant == KEESON_VARIANT_BASE

@@ -765,6 +765,7 @@ class TestKeesonMassage:
         assert controller.supports_massage_wave_direction_control is supported
         assert controller.supports_massage_intensity_preset_control is supported
         assert controller.supports_massage_mode_step_control is True
+        assert controller.massage_mode_step_is_timer is (variant != "sino")
 
     async def test_base_intensity_rejects_unknown_level(
         self,

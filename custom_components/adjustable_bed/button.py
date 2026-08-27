@@ -715,7 +715,14 @@ class AdjustableBedButton(AdjustableBedEntity, ButtonEntity):
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{coordinator.address}_{description.key}"
-        self._attr_translation_key = description.translation_key
+        controller = coordinator.controller
+        self._attr_translation_key = (
+            "massage_timer_step"
+            if description.key == "massage_mode_step"
+            and controller is not None
+            and controller.massage_mode_step_is_timer
+            else description.translation_key
+        )
 
         # Beds that name their memory slots (Octo CAP_MEMINFO reports e.g.
         # Zero-G or Anti-Snore) are far more useful with that name than with

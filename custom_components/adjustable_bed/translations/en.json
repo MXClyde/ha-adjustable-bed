@@ -462,6 +462,9 @@
       "massage_mode_step": {
         "name": "Massage: Mode"
       },
+      "massage_timer_step": {
+        "name": "Massage: Timer"
+      },
       "massage_wave_next": {
         "name": "Massage: Wave Next"
       },

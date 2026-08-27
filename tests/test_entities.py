@@ -1450,6 +1450,13 @@ class TestButtonEntities:
         from homeassistant.helpers import entity_registry as er
 
         registry = er.async_get(hass)
+        established_timer = registry.async_get_or_create(
+            "button",
+            DOMAIN,
+            f"{address}_massage_mode_step",
+            config_entry=entry,
+            suggested_object_id="keeson_base_massage_bed_massage_mode",
+        )
         old_level_1 = registry.async_get_or_create(
             "button",
             DOMAIN,
@@ -1484,6 +1491,14 @@ class TestButtonEntities:
             "massage_intensity_level_3",
         ):
             assert registry.async_get_entity_id("button", DOMAIN, f"{address}_{key}") is not None
+
+        timer_entity_id = registry.async_get_entity_id(
+            "button", DOMAIN, f"{address}_massage_mode_step"
+        )
+        assert timer_entity_id == str(established_timer.entity_id)
+        timer_state = hass.states.get(timer_entity_id)
+        assert timer_state is not None
+        assert timer_state.name.endswith("Massage: Timer")
 
         # 3.6 briefly shipped different unique IDs. Migrate them without
         # changing an existing entity ID, and prefer an established pre-3.6
