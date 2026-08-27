@@ -300,6 +300,11 @@ class SleepNumberController(BedController):
         return True
 
     @property
+    def reports_percentage_position(self) -> bool:
+        """Return True because foundation positions use percentages."""
+        return True
+
+    @property
     def supports_direct_position_control(self) -> bool:
         """Sleep Number supports 0-100 target positions per actuator."""
         return True
