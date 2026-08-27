@@ -1421,13 +1421,13 @@ class TestButtonEntities:
         # (Linak has memory_slot_count=6, supports_memory_programming=True, supports_preset_flat=False)
         assert len(button_states) == 26
 
-    async def test_keeson_base_exposes_direct_massage_buttons(
+    async def test_keeson_base_exposes_only_verified_massage_buttons(
         self,
         hass: HomeAssistant,
         mock_coordinator_connected,
         enable_custom_integrations,
     ):
-        """Keeson Base should expose its verified wave and intensity actions."""
+        """Keeson Base should expose only its verified direct massage actions."""
         address = "AA:BB:CC:DD:EE:50"
         entry = MockConfigEntry(
             domain=DOMAIN,
@@ -1447,24 +1447,30 @@ class TestButtonEntities:
         )
         entry.add_to_hass(hass)
 
-        await hass.config_entries.async_setup(entry.entry_id)
-        await hass.async_block_till_done()
-
         from homeassistant.helpers import entity_registry as er
 
         registry = er.async_get(hass)
+        for key in ("massage_intensity_1", "massage_intensity_2", "massage_intensity_3"):
+            registry.async_get_or_create(
+                "button",
+                DOMAIN,
+                f"{address}_{key}",
+                config_entry=entry,
+                suggested_object_id=f"keeson_base_{key}",
+            )
+
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
         for key in (
+            "massage_mode_step",
             "massage_wave_next",
             "massage_wave_previous",
-            "massage_intensity_1",
-            "massage_intensity_2",
-            "massage_intensity_3",
         ):
             assert registry.async_get_entity_id("button", DOMAIN, f"{address}_{key}") is not None
 
-        assert (
-            registry.async_get_entity_id("button", DOMAIN, f"{address}_massage_mode_step") is None
-        )
+        for key in ("massage_intensity_1", "massage_intensity_2", "massage_intensity_3"):
+            assert registry.async_get_entity_id("button", DOMAIN, f"{address}_{key}") is None
 
     async def test_kaidi_entities_expose_book_leisure_direct_position_and_filtered_massage(
         self,

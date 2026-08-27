@@ -26,6 +26,12 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+_REMOVED_BUTTON_KEYS = (
+    "massage_intensity_1",
+    "massage_intensity_2",
+    "massage_intensity_3",
+)
+
 
 @dataclass(frozen=True, kw_only=True)
 class AdjustableBedButtonEntityDescription(ButtonEntityDescription):
@@ -386,33 +392,6 @@ BUTTON_DESCRIPTIONS: tuple[AdjustableBedButtonEntityDescription, ...] = (
         press_fn=lambda ctrl: ctrl.massage_wave_previous(),
         required_capability="supports_massage_wave_direction_control",
     ),
-    AdjustableBedButtonEntityDescription(
-        key="massage_intensity_1",
-        translation_key="massage_intensity_1",
-        icon="mdi:numeric-1-circle",
-        requires_massage=True,
-        cancel_movement=True,
-        press_fn=lambda ctrl: ctrl.set_massage_intensity_preset(1),
-        required_capability="supports_massage_intensity_preset_control",
-    ),
-    AdjustableBedButtonEntityDescription(
-        key="massage_intensity_2",
-        translation_key="massage_intensity_2",
-        icon="mdi:numeric-2-circle",
-        requires_massage=True,
-        cancel_movement=True,
-        press_fn=lambda ctrl: ctrl.set_massage_intensity_preset(2),
-        required_capability="supports_massage_intensity_preset_control",
-    ),
-    AdjustableBedButtonEntityDescription(
-        key="massage_intensity_3",
-        translation_key="massage_intensity_3",
-        icon="mdi:numeric-3-circle",
-        requires_massage=True,
-        cancel_movement=True,
-        press_fn=lambda ctrl: ctrl.set_massage_intensity_preset(3),
-        required_capability="supports_massage_intensity_preset_control",
-    ),
     # Circulation massage buttons (only for beds with circulation massage support)
     AdjustableBedButtonEntityDescription(
         key="massage_circulation_full_body",
@@ -646,6 +625,15 @@ def _async_remove_stale_button_entities(
             "button",
             DOMAIN,
             f"{coordinator.address}_{description.key}",
+        )
+        if entity_id is not None:
+            registry.async_remove(entity_id)
+
+    for key in _REMOVED_BUTTON_KEYS:
+        entity_id = registry.async_get_entity_id(
+            "button",
+            DOMAIN,
+            f"{coordinator.address}_{key}",
         )
         if entity_id is not None:
             registry.async_remove(entity_id)

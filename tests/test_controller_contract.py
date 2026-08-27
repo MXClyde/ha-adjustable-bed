@@ -608,9 +608,6 @@ async def test_declared_capabilities_map_to_implemented_methods(bed_type: str) -
         assert _is_overridden(controller, "massage_wave_next")
         assert _is_overridden(controller, "massage_wave_previous")
 
-    if controller.supports_massage_intensity_preset_control:
-        assert _is_overridden(controller, "set_massage_intensity_preset")
-
     if controller.supports_fan_control:
         for method_name in ("fan_left_cycle", "fan_right_cycle", "fan_sync_cycle"):
             assert _is_overridden(controller, method_name)

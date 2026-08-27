@@ -1121,11 +1121,6 @@ class BedController(ABC):
         return False
 
     @property
-    def supports_massage_intensity_preset_control(self) -> bool:
-        """Return True if the controller exposes discrete intensity presets."""
-        return False
-
-    @property
     def supports_motor_control(self) -> bool:
         """Return True if bed supports direct motor control (up/down/stop).
 
@@ -1809,10 +1804,6 @@ class BedController(ABC):
     async def massage_wave_previous(self) -> None:
         """Select the previous massage wave pattern."""
         raise NotImplementedError("Massage wave direction not supported on this bed")
-
-    async def set_massage_intensity_preset(self, level: int) -> None:
-        """Select a discrete massage intensity preset."""
-        raise NotImplementedError("Massage intensity presets not supported on this bed")
 
     # Massage intensity and timer control (optional - for beds with direct control)
 
