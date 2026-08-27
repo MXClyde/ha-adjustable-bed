@@ -1079,6 +1079,11 @@ class BedController(ABC):
         return False
 
     @property
+    def reports_percentage_position(self) -> bool:
+        """Return whether reported motor positions use a 0-100 percentage scale."""
+        return False
+
+    @property
     def requires_notification_channel(self) -> bool:
         """Return True if commands depend on BLE notifications for responses/auth.
 

@@ -13,8 +13,11 @@ from typing import Any
 import pytest
 
 from custom_components.adjustable_bed import const, controller_factory
-from custom_components.adjustable_bed.beds.base import BedController
-from custom_components.adjustable_bed.beds.keeson import KeesonController
+from custom_components.adjustable_bed.beds.base import (
+    POSITION_UNIT_DEGREES,
+    POSITION_UNIT_PERCENT,
+    BedController,
+)
 from custom_components.adjustable_bed.const import (
     BED_TYPE_COOLBASE,
     BED_TYPE_KEESON,
@@ -52,6 +55,7 @@ SHARED_CAPABILITY_FLAGS: tuple[str, ...] = (
     "supports_light_color_control",
     "supports_light_cycle",
     "supports_position_feedback",
+    "reports_percentage_position",
     "supports_massage",
     "supports_motor_control",
     "supports_stop_all",
@@ -99,6 +103,10 @@ class _FactoryCoordinator(SimpleNamespace):
     async def async_execute_controller_command(self, *args: Any, **kwargs: Any) -> None:
         """Stub command executor used by keepalive-capable controllers."""
         return None
+
+    def get_max_angle(self, position_key: str) -> float:
+        """Return the integration's default calibration for a position axis."""
+        return 45.0 if position_key in {"legs", "feet"} else 68.0
 
 
 def _protocol_variant_for_bed_type(bed_type: str) -> str | None:
@@ -240,24 +248,35 @@ async def test_factory_resolves_every_supported_bed_type(bed_type: str) -> None:
 
 
 @pytest.mark.parametrize("bed_type", SUPPORTED_BED_TYPES)
-async def test_keeson_protocol_bed_types_are_listed_as_percentage_beds(
+async def test_percentage_position_contract_matches_bed_type_metadata(
     bed_type: str,
 ) -> None:
-    """Every bed type running KeesonController must be a known percentage bed.
-
-    sensor.py consults BEDS_WITH_PERCENTAGE_POSITIONS by bed type rather than asking
-    the controller, so a Keeson-protocol bed type missing from the set gets degree
-    angle sensors. Only the ergomotion variant reports positions at all, so for the
-    others those sensors would sit at "unknown" forever. BED_TYPE_OKIN_FFE was absent
-    this way despite running KeesonController like Keeson and Serta.
-    """
+    """Controller declarations must agree with offline-safe bed-type metadata."""
     controller = await _create_controller_for_bed_type(bed_type)
-    if not isinstance(controller, KeesonController):
-        return
-    assert bed_type in const.BEDS_WITH_PERCENTAGE_POSITIONS, (
-        f"{bed_type} runs KeesonController but is not in BEDS_WITH_PERCENTAGE_POSITIONS, "
-        "so angle sensing would create degree angle sensors for it"
+    assert controller.reports_percentage_position is (
+        bed_type in const.BEDS_WITH_PERCENTAGE_POSITIONS
+    ), (
+        f"{bed_type} reports_percentage_position disagrees with "
+        "BEDS_WITH_PERCENTAGE_POSITIONS"
     )
+
+
+@pytest.mark.parametrize("bed_type", SUPPORTED_BED_TYPES)
+async def test_position_slider_units_match_reported_position_units(bed_type: str) -> None:
+    """Position sliders must use the controller's declared feedback unit."""
+    controller = await _create_controller_for_bed_type(bed_type)
+    if not controller.supports_position_feedback:
+        return
+
+    expected_unit = (
+        POSITION_UNIT_PERCENT
+        if controller.reports_percentage_position
+        else POSITION_UNIT_DEGREES
+    )
+    specs = controller.position_number_specs
+
+    assert specs, f"{bed_type} reports positions but exposes no position sliders"
+    assert {spec.native_unit_of_measurement for spec in specs} == {expected_unit}
 
 
 @pytest.mark.parametrize("bed_type", sorted(_SIMPLE_CONTROLLERS))

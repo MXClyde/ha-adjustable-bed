@@ -20,7 +20,12 @@ from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.exc import BleakError
 
 from ..const import JENSEN_CHAR_UUID, JENSEN_SERVICE_UUID
-from .base import BedController
+from .base import (
+    POSITION_UNIT_PERCENT,
+    BedController,
+    PositionNumberSpec,
+    build_position_number_spec,
+)
 
 if TYPE_CHECKING:
     from ..coordinator import AdjustableBedCoordinator
@@ -273,6 +278,19 @@ class JensenController(BedController):
     def supports_position_feedback(self) -> bool:
         """Return True - Jensen beds report position via notifications."""
         return True
+
+    @property
+    def reports_percentage_position(self) -> bool:
+        """Return True because Jensen normalizes reported positions to percentages."""
+        return True
+
+    @property
+    def position_number_specs(self) -> tuple[PositionNumberSpec, ...]:
+        """Expose back and legs as percentage sliders."""
+        return (
+            build_position_number_spec("back", max_value=100.0, unit=POSITION_UNIT_PERCENT),
+            build_position_number_spec("legs", max_value=100.0, unit=POSITION_UNIT_PERCENT),
+        )
 
     @property
     def massage_intensity_zones(self) -> list[str]:
