@@ -458,14 +458,14 @@ async def test_admitted_stop_records_stop_intent_and_releases_barrier() -> None:
         seen_context = current_command_context()
         assert seen_context is context
 
-    handle = scheduler.admit_stop(
+    stop_task = scheduler.admit_stop(
         stop,
         command_resources("motor:back"),
         group_id="stop-group",
     )
     assert not scheduler._stop_barrier.is_set()
 
-    await scheduler.execute_admitted_stop(handle)
+    await stop_task
 
     record = scheduler.recent_records[-1]
     assert record.kind is CommandKind.STOP
@@ -475,6 +475,31 @@ async def test_admitted_stop_records_stop_intent_and_releases_barrier() -> None:
     assert record.outcome is CommandOutcome.COMPLETED
     assert scheduler._stop_barrier.is_set()
     assert seen_context is not None
+
+
+async def test_shutdown_drains_stop_admitted_before_its_task_starts() -> None:
+    scheduler = DeviceCommandScheduler("stop-shutdown")
+    stop_started = asyncio.Event()
+    release_stop = asyncio.Event()
+
+    async def stop(_context) -> None:
+        assert scheduler._closed
+        stop_started.set()
+        await release_stop.wait()
+
+    stop_task = scheduler.admit_stop(stop)
+
+    async def release_after_start() -> None:
+        await stop_started.wait()
+        assert not stop_task.done()
+        release_stop.set()
+
+    release_task = asyncio.create_task(release_after_start())
+    await scheduler.async_shutdown()
+    await release_task
+
+    assert stop_task.done()
+    assert scheduler.recent_records[-1].outcome is CommandOutcome.COMPLETED
 
 
 @pytest.mark.parametrize(

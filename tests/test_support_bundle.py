@@ -1147,6 +1147,60 @@ class TestBleDiagnosticsRunner:
 class TestSupportBundle:
     """Test support bundle orchestration."""
 
+    async def test_command_timing_uses_same_diagnostic_snapshot_as_trace(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        enable_custom_integrations,
+    ) -> None:
+        """Bundle timing and trace should come from one diagnostic snapshot."""
+        del enable_custom_integrations
+        captured_timing = {
+            "scheduler": {"recent_records": [{"intent_id": "captured"}]}
+        }
+        diagnostic_report = DiagnosticReport(
+            metadata={"version": "2.0"},
+            device={"address": mock_config_entry.data[CONF_ADDRESS]},
+            advertisement={},
+            advertisements_by_source=[],
+            detection={"bed_type": "linak", "supported_match": True},
+            gatt_services=[],
+            gatt_summary={"available": False, "service_count": 0},
+            device_information={},
+            notifications=[],
+            notification_summary={"total_notifications": 0},
+            adapter_details={},
+            connection_history={},
+            connection_attempt_details=[],
+            command_trace=[{"intent_id": "captured"}],
+            command_timing=captured_timing,
+            errors=[],
+        )
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+
+        with (
+            patch.object(
+                BLEDiagnosticRunner,
+                "run_diagnostics",
+                new=AsyncMock(return_value=diagnostic_report),
+            ),
+            patch(
+                "custom_components.adjustable_bed.support_bundle.bluetooth.async_current_scanners",
+                return_value=[],
+            ),
+        ):
+            report = await generate_support_bundle(
+                hass,
+                address=mock_config_entry.data[CONF_ADDRESS],
+                capture_duration=0,
+                include_logs=False,
+                coordinator=coordinator,
+                entry=mock_config_entry,
+            )
+
+        assert report["command_timing"] == captured_timing
+        assert report["command_trace"] == diagnostic_report.command_trace
+
     async def test_nearby_device_inventory_ranks_deduplicates_and_caps(
         self,
         hass: HomeAssistant,

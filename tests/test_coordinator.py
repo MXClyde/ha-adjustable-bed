@@ -5295,6 +5295,43 @@ class TestStopAfterCancel:
             await stop_task
         assert coordinator._command_scheduler._stop_barrier.is_set()
 
+    async def test_shutdown_waits_for_admitted_stop_before_disconnect(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+    ) -> None:
+        """Coordinator teardown must drain an accepted STOP before disconnecting."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        stop_started = asyncio.Event()
+        release_stop = asyncio.Event()
+
+        async def blocking_stop() -> None:
+            stop_started.set()
+            await release_stop.wait()
+
+        with (
+            patch.object(
+                coordinator,
+                "_async_send_stop_command",
+                new=AsyncMock(side_effect=blocking_stop),
+            ),
+            patch.object(
+                coordinator,
+                "async_disconnect",
+                new=AsyncMock(),
+            ) as mock_disconnect,
+        ):
+            stop_task = asyncio.create_task(coordinator.async_stop_command())
+            await stop_started.wait()
+            shutdown_task = asyncio.create_task(coordinator.async_shutdown())
+            await asyncio.sleep(0)
+
+            mock_disconnect.assert_not_awaited()
+            release_stop.set()
+            await asyncio.gather(stop_task, shutdown_task)
+
+        mock_disconnect.assert_awaited_once_with()
+
     async def test_stop_command_when_not_connected(
         self,
         hass: HomeAssistant,
@@ -5302,7 +5339,7 @@ class TestStopAfterCancel:
         mock_coordinator_connected,
         mock_bleak_client: MagicMock,
     ):
-        """Test stop_command handles not connected state gracefully."""
+        """An unsent STOP should fail instead of being recorded as completed."""
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         await coordinator.async_connect()
 
@@ -5310,8 +5347,19 @@ class TestStopAfterCancel:
         # This prevents async_ensure_connected from trying to reconnect
         coordinator._client = None
 
-        # Should not raise, just log error
-        await coordinator.async_stop_command()
+        with (
+            patch.object(
+                coordinator,
+                "async_ensure_connected",
+                new=AsyncMock(return_value=False),
+            ),
+            pytest.raises(ConnectionError, match="Not connected to bed"),
+        ):
+            await coordinator.async_stop_command()
+
+        record = coordinator._command_scheduler.recent_records[-1]
+        assert record.kind is CommandKind.STOP
+        assert record.outcome is CommandOutcome.FAILED
 
     async def test_execute_controller_command_cancels_running(
         self,
