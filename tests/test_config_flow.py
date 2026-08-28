@@ -895,6 +895,25 @@ class TestBluetoothDiscoveryFlow:
         )
         assert motor_count_marker.default() == 1
 
+    async def test_octo_star2_discovery_uses_field_verified_pulse_defaults(
+        self,
+        hass: HomeAssistant,
+        mock_bluetooth_service_info_octo_star2: MagicMock,
+        enable_custom_integrations,
+    ) -> None:
+        """The dedicated Star2 UUID selects 3 pulses at a 50 ms cadence."""
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_BLUETOOTH},
+            data=mock_bluetooth_service_info_octo_star2,
+        )
+
+        assert result["type"] == FlowResultType.FORM
+        assert result["step_id"] == "bluetooth_confirm"
+        markers = {marker.schema: marker for marker in result["data_schema"].schema}
+        assert markers[CONF_MOTOR_PULSE_COUNT].default() == "3"
+        assert markers[CONF_MOTOR_PULSE_DELAY_MS].default() == "50"
+
     async def test_bluetooth_discovery_confirm(
         self,
         hass: HomeAssistant,

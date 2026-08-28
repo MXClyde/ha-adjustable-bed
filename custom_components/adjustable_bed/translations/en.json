@@ -557,6 +557,9 @@
       "legs": {
         "name": "Legs"
       },
+      "back_legs": {
+        "name": "Back + Legs"
+      },
       "feet": {
         "name": "Feet"
       },

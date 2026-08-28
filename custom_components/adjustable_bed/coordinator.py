@@ -115,8 +115,6 @@ from .const import (
     DEFAULT_IDLE_DISCONNECT_SECONDS,
     DEFAULT_LEGS_MAX_ANGLE,
     DEFAULT_MOTOR_COUNT,
-    DEFAULT_MOTOR_PULSE_COUNT,
-    DEFAULT_MOTOR_PULSE_DELAY_MS,
     DEFAULT_OCTO_PIN,
     DEFAULT_POSITION_MODE,
     DEFAULT_PROTOCOL_VARIANT,
@@ -136,6 +134,7 @@ from .const import (
     RICHMAT_REMOTE_AUTO,
     VARIANT_AUTO,
     connection_gated_by_bond,
+    get_motor_pulse_defaults,
     get_richmat_features,
     get_richmat_motor_count,
     grants_one_connection_per_pairing_window,
@@ -267,8 +266,9 @@ class AdjustableBedCoordinator:
         self._post_connect_delay: float = profile_settings.post_connect_delay
 
         # Get bed-type-specific motor pulse defaults, falling back to global defaults
-        bed_pulse_defaults = BED_MOTOR_PULSE_DEFAULTS.get(
-            self._bed_type, (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
+        bed_pulse_defaults = get_motor_pulse_defaults(
+            self._bed_type,
+            self._protocol_variant,
         )
         self._motor_pulse_count: int = entry.data.get(CONF_MOTOR_PULSE_COUNT, bed_pulse_defaults[0])
         self._motor_pulse_delay_ms: int = entry.data.get(

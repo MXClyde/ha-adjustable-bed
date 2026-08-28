@@ -154,7 +154,7 @@ instructions if a configured PIN has been lost.
 | One-motor TV/Bed Lift | ✅ (Standard variant; dedicated TV Lift entity, hardware validation pending) |
 | Position Feedback | ❌ |
 | Memory Presets | ✅ (dynamically detected, Standard variant only) |
-| Both Up Preset | ✅ (Standard variant: moves head + legs together) |
+| Combined Back + Legs Control | ✅ (two-motor Standard and Star2 variants; hold-capable in the bundled card) |
 | Under-bed Lights | ✅ (Standard variant only; RGBW color picker on beds with CAP_LIGHT_RGBWI) |
 | Synchro/Linked Mode | ✅ (Standard variant, split-king beds with CAP_SYNCHRO) |
 | PIN Authentication | ✅ (Standard variant only) |
@@ -269,6 +269,12 @@ this protocol: the integration's Flat control sends `0x06`, `0x0E` or `0x1E`
 according to the configured motor count, so 3M and 4M receivers (`RC3`, `BM3`
 and 4-motor bases) actually reach flat instead of leaving the extra actuators
 parked. A motor count the app does not recognize renders no controls at all.
+
+On a two-motor receiver, M1+2 is exposed as a **Back + Legs** motor control.
+Its Up and Down actions replace the former tap-only Back + Legs Up and Flat
+preset tiles, so the bundled card can repeat the command while the control is
+held. Three- and four-motor receivers retain separate preset controls because
+their all-motors-down command covers more actuators than Both Up.
 
 #### Light Commands
 
@@ -419,6 +425,17 @@ To configure PIN, enter your 4-digit PIN during setup or in the integration opti
 | Feet Down | `68 30 31 30 30 30 30 30 30 31 30 37 31 39 16` |
 | Both Up | `68 30 31 30 30 30 30 30 30 31 32 37 31 3B 16` |
 | Both Down | `68 30 31 30 30 30 30 30 30 31 32 38 31 3C 16` |
+
+Star2 defaults to 3 command pulses with a 50 ms delay. This cadence produced
+smooth, jerk-free movement on a DA1458x receiver during the hardware testing
+reported in [issue #510](https://github.com/kristofferR/ha-adjustable-bed/issues/510#issuecomment-5453581631).
+Standard OCTO keeps its separate 350 ms default. Existing entries keep their
+configured overrides; change Motor Pulse Count to `3` and Motor Pulse Delay to
+`50` in the integration options if an older Star2 entry still has other values.
+
+The Star2 Both Up and Both Down frames are exposed as the Up and Down actions
+of the **Back + Legs** motor control. In the bundled card this makes the
+combined movement hold-capable, like the individual Back and Legs controls.
 
 **Note:** Star2 variant does not support lights or PIN authentication.
 

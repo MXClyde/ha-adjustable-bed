@@ -1122,6 +1122,17 @@ class OctoController(BedController):
             ),
         ]
 
+        if motor_count == 2:
+            specs.append(
+                MotorControlSpec(
+                    key="back_legs",
+                    translation_key="back_legs",
+                    open_fn=lambda ctrl: cast(OctoController, ctrl).preset_both_up(),
+                    close_fn=lambda ctrl: cast(OctoController, ctrl).preset_flat(),
+                    stop_fn=lambda ctrl: ctrl.stop_all(),
+                )
+            )
+
         if motor_count >= 3:
             specs.append(
                 MotorControlSpec(
@@ -1162,20 +1173,22 @@ class OctoController(BedController):
 
     @property
     def supports_preset_both_up(self) -> bool:
-        """Return whether this OCTO controller has both bed motors."""
-        return not self._is_one_motor_lift
+        """Return whether Both Up remains a separate preset control."""
+        return self._coordinator.motor_count >= 3
 
     @property
     def supports_preset_flat(self) -> bool:
-        """Return whether this OCTO controller represents a bed."""
-        return not self._is_one_motor_lift
+        """Return whether Flat remains a separate preset control."""
+        return self._coordinator.motor_count >= 3
 
     @property
     def stale_motor_entity_keys(self) -> frozenset[str]:
         """Return entity keys belonging to the other OCTO actuator layout."""
         if self._is_one_motor_lift:
-            return frozenset({"back", "legs", "head", "feet", "head_feet"})
+            return frozenset({"back", "legs", "back_legs", "head", "feet", "head_feet"})
         stale = {"tv_lift"}
+        if self._coordinator.motor_count != 2:
+            stale.add("back_legs")
         if self._coordinator.motor_count < 4:
             # Reconfiguring 4 motors down to 2 or 3 drops the combined step, and
             # without this it lingers in the registry as an unavailable ghost.
@@ -1504,7 +1517,12 @@ class OctoStar2Controller(BedController):
     @property
     def stale_motor_entity_keys(self) -> frozenset[str]:
         """Return stale OCTO motor entities to remove for Star2."""
-        return frozenset({"tv_lift"})
+        return frozenset({"tv_lift", "head", "feet", "head_feet"})
+
+    @property
+    def auto_stops_on_idle(self) -> bool:
+        """Star2 motors stop when the held-command refresh ends."""
+        return True
 
     @property
     def supports_lights(self) -> bool:
@@ -1675,9 +1693,28 @@ class OctoStar2Controller(BedController):
         await self._send_stop()
 
     @property
+    def motor_control_specs(self) -> tuple[MotorControlSpec, ...]:
+        """Expose Star2's combined command as a hold-capable motor control."""
+        return (
+            *super().motor_control_specs,
+            MotorControlSpec(
+                key="back_legs",
+                translation_key="back_legs",
+                open_fn=lambda ctrl: cast(OctoStar2Controller, ctrl).preset_both_up(),
+                close_fn=lambda ctrl: cast(OctoStar2Controller, ctrl).preset_flat(),
+                stop_fn=lambda ctrl: ctrl.stop_all(),
+            ),
+        )
+
+    @property
     def supports_preset_both_up(self) -> bool:
-        """Return True - Octo Star2 beds support moving both head and legs up."""
-        return True
+        """Return False because Both Up is exposed as a motor control."""
+        return False
+
+    @property
+    def supports_preset_flat(self) -> bool:
+        """Return False because Flat is exposed as a motor control."""
+        return False
 
     async def preset_both_up(self) -> None:
         """Move both head and legs up simultaneously."""

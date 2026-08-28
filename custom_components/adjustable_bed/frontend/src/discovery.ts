@@ -32,6 +32,7 @@ export const SECTION_ORDER = [
 export const MOTOR_ORDER = [
   "back",
   "legs",
+  "back_legs",
   "head",
   "feet",
   "lumbar",

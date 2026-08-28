@@ -2121,6 +2121,10 @@ DEFAULT_MOTOR_PULSE_DELAY_MS: Final = 100  # Default for most beds
 LEGGETT_OKIN_PULSE_DEFAULTS: Final = (10, 100)
 LEGGETT_OKIN_SUPERSEDED_PULSE_DEFAULTS: Final = (5, 200)
 
+# Field-verified on a DA1458x Star2 receiver in issue #510. Star2 needs a much
+# shorter refresh interval than the Standard OCTO protocol.
+OCTO_STAR2_PULSE_DEFAULTS: Final = (3, 50)
+
 # Per-bed-type motor pulse defaults based on app disassembly analysis
 # Target: ~1.0 second total motor movement duration (repeat_count = 1000ms / delay_ms)
 BED_MOTOR_PULSE_DEFAULTS: Final = {
@@ -2230,3 +2234,25 @@ BED_MOTOR_PULSE_DEFAULTS: Final = {
     # Source: at.silvermotion APK analysis (SF_GetPipelineTx sendCount=10, delay=30ms)
     BED_TYPE_LOGICDATA: (10, 30),
 }
+
+
+def get_motor_pulse_defaults(
+    bed_type: str | None,
+    protocol_variant: str | None = VARIANT_AUTO,
+    detection_signals: list[str] | None = None,
+) -> tuple[int, int]:
+    """Return motor pulse defaults for a bed type and protocol variant."""
+    if bed_type == BED_TYPE_OCTO and (
+        protocol_variant == OCTO_VARIANT_STAR2
+        or (
+            protocol_variant in (None, VARIANT_AUTO)
+            and detection_signals is not None
+            and "uuid:octo_star2" in detection_signals
+        )
+    ):
+        return OCTO_STAR2_PULSE_DEFAULTS
+
+    return BED_MOTOR_PULSE_DEFAULTS.get(
+        bed_type,
+        (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS),
+    )
