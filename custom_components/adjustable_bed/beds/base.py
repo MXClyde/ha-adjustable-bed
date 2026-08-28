@@ -29,6 +29,7 @@ from ..const import (
     POSITION_TOLERANCE,
 )
 from ..diagnostic_payloads import format_payload
+from ..position_seek import PositionSeekPolicy
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -409,6 +410,18 @@ class BedController(ABC):
     def position_seek_chain_min_remaining_distance(self) -> float:
         """Return the minimum remaining error that still allows burst chaining."""
         return POSITION_TOLERANCE
+
+    @property
+    def position_seek_policy(self) -> PositionSeekPolicy:
+        """Return the protocol movement policy for feedback-driven seeking.
+
+        The default policy delegates to the tuning properties above, so
+        existing per-controller overrides keep working unchanged. Controller
+        families with protocol evidence for smarter seek behavior (coast
+        compensation, endpoint completion, reversal transitions) override this
+        to return a policy subclass.
+        """
+        return PositionSeekPolicy(self)
 
     @property
     def passive_position_reconciliation_interval(self) -> float | None:
