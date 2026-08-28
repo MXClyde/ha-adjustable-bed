@@ -1362,6 +1362,10 @@ class TestServices:
         assert {tuple(item["resources"]) for item in coordinator.command_trace} == {
             ("motor:back",)
         }
+        timed_move_record = coordinator._command_scheduler.recent_records[-1]
+        assert timed_move_record.kind.value == "command"
+        assert timed_move_record.resources == ("motor:back",)
+        assert timed_move_record.outcome.value == "completed"
 
     async def test_timed_move_service_accepts_okin_rf_eco_bt_stair(
         self,
@@ -1602,6 +1606,14 @@ class TestServices:
         )
 
         assert coordinator.async_seek_position.await_count == 4
+        position_records = coordinator._command_scheduler.recent_records[-3:]
+        assert [record.kind.value for record in position_records] == [
+            "group",
+            "group",
+            "group",
+        ]
+        assert all(record.group_id is not None for record in position_records)
+        assert position_records[-1].resources == ("motor:feet", "motor:head")
 
         coordinator.async_seek_position.reset_mock()
         with pytest.raises(ServiceValidationError, match="out of range"):

@@ -17,7 +17,11 @@ from custom_components.adjustable_bed.bluetooth_transport import (
     ConnectionPath,
     TransportClass,
 )
-from custom_components.adjustable_bed.command_scheduler import current_command_context
+from custom_components.adjustable_bed.command_scheduler import (
+    CommandKind,
+    CommandOutcome,
+    current_command_context,
+)
 from custom_components.adjustable_bed.const import (
     BED_MOTOR_PULSE_DEFAULTS,
     BED_TYPE_BEDTECH,
@@ -1748,6 +1752,50 @@ class TestCoordinatorPositionSeek:
         move_up.assert_not_awaited()
         move_down.assert_not_awaited()
         move_stop.assert_not_awaited()
+
+    async def test_seek_timeout_records_outcome_after_motor_cleanup(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+    ) -> None:
+        """A feedback timeout should be terminal only after protocol cleanup."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator._client = MagicMock()
+        coordinator._client.is_connected = True
+        coordinator._position_data["legs"] = 0.0
+
+        controller = make_controller_mock()
+        controller.supports_direct_position_control = False
+        controller.reverses_position_seek_on_overshoot = False
+        controller.uses_custom_position_seek_steps = False
+        controller.auto_stops_on_idle = False
+        coordinator._controller = controller
+
+        move_up = AsyncMock()
+        move_down = AsyncMock()
+        move_stop = AsyncMock()
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.coordinator.POSITION_SEEK_TIMEOUT",
+                0,
+            ),
+            pytest.raises(TimeoutError, match="Position seek timed out"),
+        ):
+            await coordinator.async_seek_position(
+                "legs",
+                20.0,
+                lambda c: move_up(c),
+                lambda c: move_down(c),
+                lambda c: move_stop(c),
+            )
+
+        move_up.assert_awaited_once_with(controller)
+        move_down.assert_not_awaited()
+        move_stop.assert_awaited_once_with(controller)
+        record = coordinator._command_scheduler.recent_records[-1]
+        assert record.kind is CommandKind.SEEK
+        assert record.outcome is CommandOutcome.TIMEOUT
 
     async def test_connect_uses_persisted_bond_marker_to_skip_pairing(
         self,
@@ -5181,7 +5229,11 @@ class TestStopAfterCancel:
         del mock_bleak_client
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         await coordinator.async_connect()
-        coordinator._controller.stop_all = AsyncMock()
+
+        async def send_stop() -> None:
+            await coordinator._controller.write_command(b"\x00")
+
+        coordinator._controller.stop_all = AsyncMock(side_effect=send_stop)
 
         command_started = asyncio.Event()
 
@@ -5202,6 +5254,16 @@ class TestStopAfterCancel:
         await command_task
 
         coordinator._controller.stop_all.assert_awaited_once()
+        command_record, stop_record = coordinator._command_scheduler.recent_records[-2:]
+        assert command_record.outcome is CommandOutcome.STOPPED
+        assert command_record.kind is CommandKind.COMMAND
+        assert stop_record.outcome is CommandOutcome.COMPLETED
+        assert stop_record.kind is CommandKind.STOP
+        assert stop_record.stop_epoch == command_record.invalidated_stop_epoch
+        stop_trace = coordinator.command_trace[-1]
+        assert stop_trace["kind"] == "stop"
+        assert stop_trace["intent_id"] == stop_record.intent_id
+        assert stop_trace["stop_epoch"] == stop_record.stop_epoch
 
     async def test_stop_command_settles_after_caller_cancellation(
         self,
@@ -5426,6 +5488,10 @@ class TestStopAfterCancel:
         release_first.set()
         await asyncio.gather(group_task, other_task)
         assert events == ["group:first", "group:second", "other"]
+        group_record = coordinator._command_scheduler.recent_records[-2]
+        assert group_record.kind is CommandKind.GROUP
+        assert group_record.group_id is not None
+        assert group_record.resources == ("motor:back", "motor:legs")
 
     async def test_command_group_keeps_connection_until_final_member(
         self,

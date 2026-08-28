@@ -51,7 +51,7 @@ from .support_report import (
 
 _LOGGER = logging.getLogger(__name__)
 
-_REPORT_VERSION = "2.2"
+_REPORT_VERSION = "2.3"
 _MAX_NEARBY_BLUETOOTH_DEVICES = 30
 _BLUETOOTH_DOMAIN = "bluetooth"
 _ESPHOME_DOMAIN = "esphome"
@@ -83,7 +83,7 @@ async def generate_support_bundle(
     reproduction_command_trace = [
         trace
         for trace in pre_capture_command_trace
-        if trace.get("operation_name") == "command"
+        if trace.get("intent_id") is not None
     ]
 
     diagnostics_report = await BLEDiagnosticRunner(
@@ -163,6 +163,9 @@ async def generate_support_bundle(
         "position_data": position_data,
         "notifications": diagnostics_report.notifications,
         "notification_summary": diagnostics_report.notification_summary,
+        "command_timing": (
+            coordinator.command_timing if coordinator is not None else {}
+        ),
         "command_trace": diagnostics_report.command_trace if coordinator is not None else [],
         "recent_logs": recent_logs,
         "evidence": evidence,

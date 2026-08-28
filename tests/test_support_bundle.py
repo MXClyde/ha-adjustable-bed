@@ -1262,7 +1262,7 @@ class TestSupportBundle:
             )
 
         assert report["target"]["mode"] == "target_address"
-        assert report["metadata"]["report_version"] == "2.2"
+        assert report["metadata"]["report_version"] == "2.3"
         assert report["integration"]["configured_device"] is False
         assert report["integration"]["kaidi_product_id"] is None
         assert report["integration"]["kaidi_sofa_acu_no"] is None
@@ -1412,7 +1412,7 @@ class TestSupportBundle:
             )
 
         pairing = report["pairing"]
-        assert report["metadata"]["report_version"] == "2.2"
+        assert report["metadata"]["report_version"] == "2.3"
         assert pairing["required"] is True
         assert pairing["connection_gated_by_bond"] is True
         assert pairing["persisted_bond_marker"] is True
@@ -1633,7 +1633,25 @@ class TestSupportBundle:
             await active_controller.write_command(b"\x03\x04")
 
         await coordinator.async_execute_controller_command(_user_command)
-        assert coordinator.command_trace[-1]["operation_name"] == "command"
+        scheduled_trace = coordinator.command_trace[-1]
+        terminal_record = coordinator._command_scheduler.recent_records[-1].as_dict()
+        assert scheduled_trace["operation_name"] == "command"
+        for key in (
+            "intent_id",
+            "kind",
+            "group_id",
+            "resources",
+            "scheduler_strategy",
+            "stop_epoch",
+        ):
+            assert scheduled_trace[key] == terminal_record[key]
+
+        command_timing = coordinator.command_timing
+        assert "last_command_start" not in command_timing
+        assert "last_command_end" not in command_timing
+        assert command_timing["protocol_operation_timing"]["last_started_at"]
+        assert command_timing["protocol_operation_timing"]["last_finished_at"]
+        assert command_timing["scheduler"]["recent_records"][-1] == terminal_record
 
 
 class TestSupportBundleLoggingWarning:

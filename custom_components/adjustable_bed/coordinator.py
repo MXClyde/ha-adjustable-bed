@@ -13,6 +13,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Coroutine, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeVar, cast
+from uuid import uuid4
 
 from bleak import BleakClient
 from bleak.backends.device import BLEDevice
@@ -502,9 +503,9 @@ class AdjustableBedCoordinator:
             None  # "idle_timeout", "intentional", "unexpected"
         )
 
-        # Command timing tracking for diagnostics (issue #168)
-        self._last_command_start: datetime | None = None
-        self._last_command_end: datetime | None = None
+        # Protocol-operation timing remains separate from scheduler intent timing.
+        self._last_protocol_operation_start: datetime | None = None
+        self._last_protocol_operation_end: datetime | None = None
         self._active_operation_name: str | None = None
         self._last_notify_received: datetime | None = None
 
@@ -1756,12 +1757,18 @@ class AdjustableBedCoordinator:
     def command_timing(self) -> dict[str, Any]:
         """Return command timing for diagnostics."""
         return {
-            "last_command_start": self._last_command_start.isoformat()
-            if self._last_command_start
-            else None,
-            "last_command_end": self._last_command_end.isoformat()
-            if self._last_command_end
-            else None,
+            "protocol_operation_timing": {
+                "last_started_at": (
+                    self._last_protocol_operation_start.isoformat()
+                    if self._last_protocol_operation_start
+                    else None
+                ),
+                "last_finished_at": (
+                    self._last_protocol_operation_end.isoformat()
+                    if self._last_protocol_operation_end
+                    else None
+                ),
+            },
             "last_notify_received": self._last_notify_received.isoformat()
             if self._last_notify_received
             else None,
@@ -1985,6 +1992,7 @@ class AdjustableBedCoordinator:
                 "command_origin": command_origin,
                 "operation_name": self._active_operation_name,
                 "intent_id": context.intent_id if context is not None else None,
+                "kind": context.kind.value if context is not None else None,
                 "group_id": context.group_id if context is not None else None,
                 "resources": sorted(context.resources) if context is not None else [],
                 "scheduler_strategy": self._command_scheduler.strategy_name,
@@ -4213,8 +4221,16 @@ class AdjustableBedCoordinator:
         # The epoch check prevents a queued command from starting after STOP.
         self._cancel_counter += 1
         self._cancel_command.set()
-        stop_epoch = self._command_scheduler.request_stop(ALL_COMMAND_RESOURCES)
-        stop_task = asyncio.create_task(self._async_send_stop_command())
+
+        async def stop_operation(_context: CommandContext) -> None:
+            await self._async_send_stop_command()
+
+        stop_handle = self._command_scheduler.admit_stop(
+            stop_operation, ALL_COMMAND_RESOURCES
+        )
+        stop_task = asyncio.create_task(
+            self._command_scheduler.execute_admitted_stop(stop_handle)
+        )
 
         try:
             await asyncio.shield(stop_task)
@@ -4226,10 +4242,6 @@ class AdjustableBedCoordinator:
             except Exception:
                 _LOGGER.exception("STOP failed after its caller was cancelled")
             raise
-        finally:
-            # A caller cancellation must never leave the scheduler barrier closed.
-            # Overlapping STOP calls use their epochs so only the newest one releases it.
-            self._command_scheduler.finish_stop(stop_epoch)
 
     async def _async_send_stop_command(self) -> None:
         """Send STOP while owning the legacy wire and connection lifecycle lane."""
@@ -4451,7 +4463,7 @@ class AdjustableBedCoordinator:
                         raise asyncio.CancelledError
                     return None
                 self._active_operation_name = operation_name
-                self._last_command_start = datetime.now(UTC)
+                self._last_protocol_operation_start = datetime.now(UTC)
 
                 poll_stop: asyncio.Event | None = None
                 poll_task: asyncio.Task[None] | None = None
@@ -4477,7 +4489,7 @@ class AdjustableBedCoordinator:
                     else:
                         result = await operation_task
                 finally:
-                    self._last_command_end = datetime.now(UTC)
+                    self._last_protocol_operation_end = datetime.now(UTC)
                     self._active_operation_name = None
                     if poll_stop is not None:
                         poll_stop.set()
@@ -4546,6 +4558,7 @@ class AdjustableBedCoordinator:
         pulse_count: int | None = None,
         pulse_delay_ms: int | None = None,
         group_id: str | None = None,
+        kind: CommandKind = CommandKind.COMMAND,
     ) -> None:
         """Execute an opaque controller command through the device scheduler."""
 
@@ -4565,7 +4578,7 @@ class AdjustableBedCoordinator:
             operation,
             resource=resource,
             resources=resources,
-            kind=CommandKind.COMMAND,
+            kind=kind,
             cancel_running=cancel_running,
             pulse_count=pulse_count,
             pulse_delay_ms=pulse_delay_ms,
@@ -4740,7 +4753,7 @@ class AdjustableBedCoordinator:
             resources=command_resources(*resources),
             kind=CommandKind.GROUP,
             cancel_running=cancel_running,
-            group_id=group_id,
+            group_id=group_id or uuid4().hex,
         )
         await self._command_scheduler.execute(intent)
 
@@ -5430,7 +5443,10 @@ class AdjustableBedCoordinator:
                                 position_key,
                                 POSITION_SEEK_TIMEOUT,
                             )
-                            break
+                            raise TimeoutError(
+                                f"Position seek timed out for {position_key} "
+                                f"after {POSITION_SEEK_TIMEOUT:.0f}s"
+                            )
 
                         # Check for cancellation
                         if cancel_event.is_set():

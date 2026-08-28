@@ -24,6 +24,7 @@ from custom_components.adjustable_bed.command_scheduler import (
     CommandContext,
     CommandHandle,
     CommandIntent,
+    CommandKind,
     CommandOutcome,
     DeviceCommandScheduler,
     command_resources,
@@ -201,6 +202,7 @@ class ScheduledRecordingChild(RecordingChild):
             CommandIntent(
                 scheduled,
                 resources=command_scope,
+                kind=CommandKind.GROUP,
                 replacement_key=(resource or "*") if resources is None else None,
                 cancel_running=cancel_running,
                 group_id=group_id,
@@ -629,6 +631,14 @@ class TestSideRouting:
 
         assert left.prepared_scopes == [frozenset(resources)]
         assert right.prepared_scopes == [frozenset(resources)]
+        left_record = left.scheduler.recent_records[-1]
+        right_record = right.scheduler.recent_records[-1]
+        assert left_record.kind is CommandKind.GROUP
+        assert right_record.kind is CommandKind.GROUP
+        assert left_record.group_id == right_record.group_id
+        assert left_record.group_id is not None
+        assert left_record.resources == ("motor:back", "motor:legs")
+        assert right_record.resources == ("motor:back", "motor:legs")
 
     async def test_linked_group_replacement_is_normal_cancellation(self):
         log: list[tuple[str, str]] = []

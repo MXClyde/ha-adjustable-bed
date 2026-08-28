@@ -155,6 +155,7 @@ class DiagnosticReport:
     connection_attempt_details: list[dict[str, Any]]
     command_trace: list[dict[str, Any]]
     errors: list[str]
+    command_timing: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert report to dictionary for JSON serialization."""
@@ -173,6 +174,7 @@ class DiagnosticReport:
             "connection_history": self.connection_history,
             "connection_attempt_details": self.connection_attempt_details,
             "command_trace": self.command_trace,
+            "command_timing": self.command_timing,
             "errors": self.errors,
         }
 
@@ -331,6 +333,7 @@ class BLEDiagnosticRunner:
             connection_attempt_details = self.coordinator.connection_attempt_details
 
         command_trace = self.coordinator.command_trace if self.coordinator else []
+        command_timing = self.coordinator.command_timing if self.coordinator else {}
 
         return DiagnosticReport(
             metadata={
@@ -361,6 +364,7 @@ class BLEDiagnosticRunner:
             connection_attempt_details=connection_attempt_details,
             command_trace=command_trace,
             errors=self._errors,
+            command_timing=command_timing,
         )
 
     async def _async_execute_diagnostic_query[T](
