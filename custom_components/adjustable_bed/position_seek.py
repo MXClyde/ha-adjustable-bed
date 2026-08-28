@@ -328,6 +328,14 @@ class PositionSeekRunner:
         # Start movement in try-finally to guarantee stop is sent
         try:
             await policy.async_on_seek_start(self._transition(moving_up), self._stop)
+            # A STOP or replacement can arrive while the policy runs its start
+            # transition; never begin motion after a newer safety request.
+            if cancel_event.is_set():
+                _LOGGER.debug(
+                    "Position seek cancelled during start transition for %s",
+                    position_key,
+                )
+                return result(SeekOutcome.CANCELLED, initial_angle, None)
             await self._issue_step(moving_up, abs(target_angle - initial_angle))
 
             # Tracking variables
