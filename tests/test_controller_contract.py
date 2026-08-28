@@ -640,17 +640,32 @@ async def test_base_preset_with_stop_always_sends_stop_on_error() -> None:
 
 async def test_base_wall_clock_pacing_absorbs_write_latency() -> None:
     """A paced stream subtracts BLE write time from the repeat interval."""
+    events: list[str] = []
+
+    class ObservedLock:
+        async def __aenter__(self) -> None:
+            events.append("lock")
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    def read_time() -> float:
+        events.append("time")
+        return next(time_values)
+
     coordinator = _FactoryCoordinator()
     client = SimpleNamespace(
         is_connected=True,
         services=(),
-        write_gatt_char=AsyncMock(),
+        write_gatt_char=AsyncMock(side_effect=lambda *args, **kwargs: events.append("write")),
     )
     coordinator.client = client
     coordinator.record_command_trace = MagicMock()
     controller = _ContractController(coordinator)
+    controller._ble_lock = ObservedLock()
+    time_values = iter([10.0, 10.03, 10.1])
     loop = SimpleNamespace(
-        time=MagicMock(side_effect=[10.0, 10.03, 10.1]),
+        time=MagicMock(side_effect=read_time),
     )
     sleep = AsyncMock()
 
@@ -674,6 +689,7 @@ async def test_base_wall_clock_pacing_absorbs_write_latency() -> None:
         )
 
     assert client.write_gatt_char.await_count == 2
+    assert events[:3] == ["lock", "time", "write"]
     sleep.assert_awaited_once()
     assert sleep.await_args.args[0] == pytest.approx(0.07)
 

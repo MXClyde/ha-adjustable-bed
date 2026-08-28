@@ -503,7 +503,7 @@ class BedController(ABC):
                 _LOGGER.debug("Command cancelled after %d/%d writes", i, repeat_count)
                 return
 
-            write_started = asyncio.get_running_loop().time() if wall_clock_pacing else None
+            write_started: float | None = None
             try:
                 client = self.client
                 if client is None or not client.is_connected:
@@ -512,6 +512,8 @@ class BedController(ABC):
                 # Acquire BLE lock for each individual write to prevent conflicts
                 # with concurrent position reads during movement
                 async with self._ble_lock:
+                    if wall_clock_pacing:
+                        write_started = asyncio.get_running_loop().time()
                     await client.write_gatt_char(char_uuid, command, response=response)
             except BleakError:
                 if log_errors:
