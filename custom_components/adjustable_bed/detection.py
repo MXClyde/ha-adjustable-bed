@@ -132,6 +132,7 @@ from .const import (
     OKIMAT_NAME_PATTERNS,
     OKIMAT_NOTIFY_CHAR_UUID,
     OKIMAT_SERVICE_UUID,
+    OKIMAT_VARIANTS,
     OKIMAT_WRITE_CHAR_UUID,
     OKIN_FFE_NAME_PATTERNS,
     OKIN_GENERIC_NAME_PATTERNS,
@@ -165,6 +166,7 @@ from .const import (
     SVANE_NAME_PATTERNS,
     TIMOTION_AHF_NAME_PATTERNS,
     TIMOTION_AHF_SERVICE_UUID,
+    VARIANT_AUTO,
     VIBRADORM_NAME_PATTERNS,
     VIBRADORM_SECONDARY_SERVICE_UUID,
     VIBRADORM_SERVICE_UUID,
@@ -749,6 +751,30 @@ def refine_okin_shared_uuid_protocol_from_gatt(
                     ble_model,
                 )
             return BED_TYPE_OKIN_RF_ECO_BT
+        if (
+            gatt_detection.bed_type
+            in {
+                BED_TYPE_OKIN_CST,
+                BED_TYPE_OKIN_RF_ECO_BT,
+            }
+            and bed_type in {BED_TYPE_OKIMAT, BED_TYPE_OKIN_UUID}
+            and protocol_variant in OKIMAT_VARIANTS
+            and protocol_variant != VARIANT_AUTO
+        ):
+            # RF ECO BT is a receiver family, not a topology: the two-motor
+            # installation in #344 reports that generic model while using the
+            # standard Okin UUID transport selected by its 82620 handset code.
+            # A validated explicit remote is stronger evidence than shared GATT.
+            if _log_correction:
+                _LOGGER.info(
+                    "Keeping %s profile for explicitly configured Okin remote %s "
+                    "despite shared OKIN GATT detection %s and model %r",
+                    bed_type,
+                    protocol_variant,
+                    gatt_detection.bed_type,
+                    ble_model,
+                )
+            return bed_type
         if gatt_detection.bed_type in {
             BED_TYPE_OKIN_CST,
             BED_TYPE_OKIN_RF_ECO_BT,

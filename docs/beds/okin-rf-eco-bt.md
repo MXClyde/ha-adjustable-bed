@@ -1,6 +1,6 @@
 # OKIN Smart Remote / RF ECO BT Single Actuator
 
-**Status:** Supported, needs reporter validation
+**Status:** Supported
 
 This profile is for the Elda BTH / RF ECO BT / MEGAMAT setup from
 [issue #344](https://github.com/kristofferR/ha-adjustable-bed/issues/344). It is
@@ -28,6 +28,11 @@ emergency lowering.
 
 Use manual setup and choose **OKIN Smart Remote / RF ECO BT single actuator**.
 
+Choose this profile only for a single moving actuator. RF ECO BT is also used
+as the receiver for adjustable beds. For a bed, choose **Okin UUID (Okimat,
+Lucid, requires pairing)**, set the motor count, and select the code printed on
+the handset under **Protocol variant**.
+
 The reported device advertises as `OKIN-050226` with no service UUIDs, so the
 integration cannot safely auto-detect it from advertisements alone. Diagnostics
 can identify it after connecting when this GATT signature is present:
@@ -43,13 +48,19 @@ bed controller using [Okin CST](okin-cst.md). That service is not a safe
 discriminator: the integration preserves an already configured RF ECO BT or
 CST profile when these GATT signals disagree with it.
 
-Full OKIMAT beds expose the **same** OKIN write + CSS GATT signature as this
-stair profile (see [issue #406](https://github.com/kristofferR/ha-adjustable-bed/issues/406),
-an OKIMAT 4 IPS/M Lattoflex bed). The GATT signature alone is therefore not
-enough to choose this single-actuator profile. The auto-refinement only
-downgrades to RF ECO BT when the connected Device Information **model** is not a
-multi-motor OKIMAT bed: the ELDA stair reports `MEGAMAT MBZ`, whereas a real bed
-reports e.g. `OKIMAT 4 IPS/M` and keeps its multi-motor profile.
+Full OKIMAT beds and RF ECO BT bed receivers expose the **same** OKIN write +
+CSS GATT signature as this stair profile. The GATT signature alone is therefore
+not enough to choose a topology. Confirmed Device Information models include:
+
+- `MEGAMAT MBZ`: the single-actuator ELDA staircase from issue #344
+- `OKIMAT 4 IPS/M`: the multi-motor Lattoflex bed from issue #406
+- `RF eco BT`: a two-motor bed receiver using RF-TOPLINE handset `82620`, also
+  reported in issue #344
+
+The exact `MEGAMAT MBZ` model remains the stronger staircase signal. For other
+shared-GATT receivers, selecting a valid handset code explicitly under the
+Okin UUID profile is stronger evidence than the generic receiver identity and
+keeps the multi-motor controller active.
 
 Generic `OKIN-*` devices remain ambiguous because multiple unrelated OKIN
 protocols use that naming pattern.
@@ -84,7 +95,8 @@ motion is safe, visible, and supervised.
 
 ## Follow-up
 
-If M2 is not the correct actuator channel for a specific installation, a future
-follow-up may need the reporter's OKIN Smart Remote ID or QR contents to map the
-actual channel. Do not add M3, reversed, DOT, or RF-gateway variants without
-new evidence.
+If M2 is not the correct actuator channel for a single-actuator installation, a
+future follow-up may need the reporter's OKIN Smart Remote ID or QR contents to
+map the actual channel. Do not add M3, reversed, DOT, or RF-gateway variants to
+the stair profile without new evidence. Adjustable beds belong on the Okin UUID
+profile with their printed handset code.

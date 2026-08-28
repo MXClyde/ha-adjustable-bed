@@ -2242,6 +2242,7 @@ def get_motor_pulse_defaults(
     detection_signals: list[str] | None = None,
 ) -> tuple[int, int]:
     """Return motor pulse defaults for a bed type and protocol variant."""
+    default = (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
     if bed_type == BED_TYPE_OCTO and (
         protocol_variant == OCTO_VARIANT_STAR2
         or (
@@ -2252,7 +2253,6 @@ def get_motor_pulse_defaults(
     ):
         return OCTO_STAR2_PULSE_DEFAULTS
 
-    return BED_MOTOR_PULSE_DEFAULTS.get(
-        bed_type,
-        (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS),
-    )
+    if bed_type is None:
+        return default
+    return BED_MOTOR_PULSE_DEFAULTS.get(bed_type, default)
