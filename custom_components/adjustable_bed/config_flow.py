@@ -2743,9 +2743,13 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
             )
         variants = get_variants_for_bed_type(bed_type)
         form_variant = self._variant_for_bed_type(bed_type, current_data)
+        has_position_feedback = bed_type_has_position_feedback(bed_type, form_variant)
         form_pulse_defaults = get_motor_pulse_defaults(bed_type, form_variant)
         motor_count_options = _motor_count_options_for_all_variants(bed_type)
-        form_motor_count = current_data.get(CONF_MOTOR_COUNT, DEFAULT_MOTOR_COUNT)
+        try:
+            form_motor_count = int(current_data.get(CONF_MOTOR_COUNT, DEFAULT_MOTOR_COUNT))
+        except (TypeError, ValueError):
+            form_motor_count = DEFAULT_MOTOR_COUNT
         if form_motor_count not in motor_count_options:
             form_motor_count = _default_motor_count(
                 bed_type,
@@ -2816,23 +2820,32 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                 ),
             ): vol.All(vol.Coerce(int), vol.Range(min=10, max=300)),
             vol.Optional(
-                CONF_DISABLE_ANGLE_SENSING,
-                default=current_data.get(CONF_DISABLE_ANGLE_SENSING, DEFAULT_DISABLE_ANGLE_SENSING),
-            ): bool,
-            vol.Optional(
-                CONF_POSITION_MODE,
-                default=current_data.get(CONF_POSITION_MODE, DEFAULT_POSITION_MODE),
-            ): vol.In(
-                {
-                    POSITION_MODE_SPEED: "Speed (recommended)",
-                    POSITION_MODE_ACCURACY: "Accuracy",
-                }
-            ),
-            vol.Optional(
                 CONF_DISABLE_DISCOVERY,
                 default=discovery_disabled,
             ): bool,
         }
+
+        if has_position_feedback:
+            schema_dict[
+                vol.Optional(
+                    CONF_DISABLE_ANGLE_SENSING,
+                    default=current_data.get(
+                        CONF_DISABLE_ANGLE_SENSING,
+                        DEFAULT_DISABLE_ANGLE_SENSING,
+                    ),
+                )
+            ] = bool
+            schema_dict[
+                vol.Optional(
+                    CONF_POSITION_MODE,
+                    default=current_data.get(CONF_POSITION_MODE, DEFAULT_POSITION_MODE),
+                )
+            ] = vol.In(
+                {
+                    POSITION_MODE_SPEED: "Speed (recommended)",
+                    POSITION_MODE_ACCURACY: "Accuracy",
+                }
+            )
 
         if supports_passive_position_reconciliation(bed_type):
             schema_dict[
@@ -2905,7 +2918,7 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
         if (
             bed_type
             and bed_type not in BEDS_WITH_PERCENTAGE_POSITIONS
-            and bed_type in BEDS_WITH_POSITION_FEEDBACK
+            and has_position_feedback
         ):
             schema_dict[
                 vol.Optional(
@@ -2973,7 +2986,10 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
             # user_input now so it is never written into entry data, but only
             # persist it on the success path below - otherwise a later
             # validation failure would partially apply the rejected form.
-            discovery_disabled_input: bool | None = None
+            pending_discovery = self._pending_data.get(CONF_DISABLE_DISCOVERY)
+            discovery_disabled_input = (
+                bool(pending_discovery) if isinstance(pending_discovery, bool) else None
+            )
             if CONF_DISABLE_DISCOVERY in user_input:
                 discovery_disabled_input = bool(user_input.pop(CONF_DISABLE_DISCOVERY))
             requested_variant = self._variant_for_bed_type(
@@ -2984,15 +3000,16 @@ class AdjustableBedOptionsFlow(OptionsFlowWithConfigEntry):
                 user_input[CONF_PROTOCOL_VARIANT] = requested_variant
             else:
                 user_input.pop(CONF_PROTOCOL_VARIANT, None)
-            if (
-                self.config_entry.data.get(CONF_BED_TYPE) != bed_type
-                and bed_type_has_position_feedback(bed_type, form_variant)
-                != bed_type_has_position_feedback(bed_type, requested_variant)
+            if has_position_feedback != bed_type_has_position_feedback(
+                bed_type,
+                requested_variant,
             ):
                 # Rebuild once more when the chosen variant changes position
                 # capability, so the user sees the new sensing default and can
                 # still explicitly override it on the following submission.
                 self._pending_data = {**self._pending_data, **user_input}
+                if discovery_disabled_input is not None:
+                    self._pending_data[CONF_DISABLE_DISCOVERY] = discovery_disabled_input
                 self._pending_data[CONF_DISABLE_ANGLE_SENSING] = not bed_type_has_position_feedback(
                     bed_type,
                     requested_variant,
