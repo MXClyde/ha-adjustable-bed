@@ -568,6 +568,7 @@ class TestBleDiagnosticsRunner:
         assert model_detection["ambiguous_types"] == []
 
         coordinator.entry.data = {CONF_PROTOCOL_VARIANT: "82620"}
+        coordinator.observed_ble_device_name = "Jasper"
         rf_eco_bed_detection = runner._build_detection_section(
             SimpleNamespace(name="Jasper"),
             gatt_services,
