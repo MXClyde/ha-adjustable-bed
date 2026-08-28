@@ -3585,9 +3585,9 @@ class TestOptionsFlow:
         assert initial["type"] == FlowResultType.FORM
         assert rebuilt["type"] == FlowResultType.FORM
         assert saved["type"] == FlowResultType.CREATE_ENTRY
-        assert {
-            child[CONF_PROTOCOL_VARIANT] for child in entry.data[CONF_PAIR_CHILDREN]
-        } == {KEESON_VARIANT_ERGOMOTION}
+        for child in entry.data[CONF_PAIR_CHILDREN]:
+            assert child[CONF_PROTOCOL_VARIANT] == KEESON_VARIANT_ERGOMOTION
+            assert child[CONF_DISABLE_ANGLE_SENSING] is False
 
     async def test_paired_bed_type_change_uses_new_protocol_defaults(
         self,

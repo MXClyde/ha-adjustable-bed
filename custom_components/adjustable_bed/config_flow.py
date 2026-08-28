@@ -5082,10 +5082,12 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 self._pending_data = {**self._pending_data, **user_input}
                 if discovery_disabled_input is not None:
                     self._pending_data[CONF_DISABLE_DISCOVERY] = discovery_disabled_input
-                self._pending_data[CONF_DISABLE_ANGLE_SENSING] = not bed_type_has_position_feedback(
+                disable_angle_sensing = not bed_type_has_position_feedback(
                     bed_type,
                     requested_variant,
                 )
+                self._pending_data[CONF_DISABLE_ANGLE_SENSING] = disable_angle_sensing
+                self._pending_changed_data[CONF_DISABLE_ANGLE_SENSING] = disable_angle_sensing
                 return await self._async_options_form(None, step_id=step_id)
             requested_motor_count = user_input.get(
                 CONF_MOTOR_COUNT,
