@@ -2436,6 +2436,13 @@ class TestSideServiceRouting:
             close_fn=MagicMock(),
             stop_fn=MagicMock(),
         )
+        back_legs_spec = MotorControlSpec(
+            key="back_legs",
+            translation_key="back_legs",
+            open_fn=MagicMock(),
+            close_fn=MagicMock(),
+            stop_fn=MagicMock(),
+        )
 
         # The button carries the spec's open_fn (the mapped per-side motor) and
         # keeps the same unique_id as before (no entity churn).
@@ -2450,12 +2457,16 @@ class TestSideServiceRouting:
         controller = SimpleNamespace(
             supports_motor_control=True,
             has_discrete_motor_control=False,
-            motor_control_specs=[head_spec, back_spec],
+            motor_control_specs=[head_spec, back_spec, back_legs_spec],
         )
         child = SimpleNamespace(capability_controller=controller)
         buttons = _combined_motor_buttons_for(coord, [child, child])
         head_up = next(b for b in buttons if b._attr_unique_id == "pair_x_head_up_both")
         assert head_up._move_fn is motor3_up
+        back_legs_up = next(
+            b for b in buttons if b._attr_unique_id == "pair_x_back_legs_up_both"
+        )
+        assert back_legs_up._attr_translation_key == "back_legs_up"
 
         # A known left side is not enough to advertise a both-sides action. The
         # other side could have a different capability surface, so suppress all

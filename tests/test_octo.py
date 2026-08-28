@@ -22,6 +22,7 @@ from custom_components.adjustable_bed.beds.octo import (
     OCTO_MEMORY_RECALL_INTERVAL_MS,
     OCTO_MEMORY_RECALL_SECONDS,
     OCTO_MOTOR_HEAD,
+    OCTO_MOTOR_LEGS,
     OCTO_PACKET_CHAR,
     OCTO_SYSTEM_PIN_LOCK,
     OCTO_SYSTEM_PIN_STATE,
@@ -529,7 +530,7 @@ class TestOctoCommands:
         assert controller.memory_slot_count == 0
         assert controller.supports_synchro is False
         assert controller.stale_motor_entity_keys == frozenset(
-            {"back", "legs", "head", "feet", "head_feet"}
+            {"back", "legs", "back_legs", "head", "feet", "head_feet"}
         )
 
         mock_bleak_client.write_gatt_char.reset_mock()
@@ -563,7 +564,17 @@ class TestOctoCommands:
         coordinator = AdjustableBedCoordinator(hass, mock_octo_star2_config_entry)
         controller = OctoStar2Controller(coordinator)
 
-        assert controller.stale_motor_entity_keys == frozenset({"tv_lift"})
+        assert controller.stale_motor_entity_keys == frozenset(
+            {"tv_lift", "head", "feet", "head_feet"}
+        )
+        assert controller.auto_stops_on_idle is True
+        assert controller.supports_preset_both_up is False
+        assert controller.supports_preset_flat is False
+        assert [spec.key for spec in controller.motor_control_specs] == [
+            "back",
+            "legs",
+            "back_legs",
+        ]
 
     async def test_move_head_up_sends_move_then_stop(
         self,
@@ -1904,18 +1915,36 @@ class TestOctoMemoryInfoAndCombinedStep:
         written = [c[0][1] for c in mock_bleak_client.write_gatt_char.call_args_list]
         assert controller._build_packet([0x02, 0x70], [0x18]) in written
 
-    async def test_two_motor_bed_has_no_combined_step(
+    async def test_two_motor_bed_exposes_combined_back_and_legs_control(
         self,
         hass: HomeAssistant,
         mock_octo_config_entry,
         mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
     ):
-        """The combined step exists only on the 4-motor layout."""
+        """The M1+2 command is hold-capable instead of a tap-only preset."""
         coordinator = AdjustableBedCoordinator(hass, mock_octo_config_entry)
         await coordinator.async_connect()
         controller = cast(OctoController, coordinator.controller)
 
+        assert [s.key for s in controller.motor_control_specs] == [
+            "back",
+            "legs",
+            "back_legs",
+        ]
+        assert controller.supports_preset_both_up is False
+        assert controller.supports_preset_flat is False
         assert "head_feet" not in [s.key for s in controller.motor_control_specs]
+
+        mock_bleak_client.write_gatt_char.reset_mock()
+        await controller.motor_control_specs[-1].open_fn(controller)
+
+        expected = controller._build_packet(
+            [0x02, 0x70],
+            [OCTO_MOTOR_HEAD | OCTO_MOTOR_LEGS],
+        )
+        written = [call.args[1] for call in mock_bleak_client.write_gatt_char.call_args_list]
+        assert written == [expected, controller._build_packet([0x02, 0x73])]
 
     def test_meminfo_before_memcount_still_classifies_correctly(self):
         """Capabilities arrive in the bed's order; MEMINFO must not need MEMCOUNT."""

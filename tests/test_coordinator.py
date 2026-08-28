@@ -30,6 +30,7 @@ from custom_components.adjustable_bed.const import (
     BED_TYPE_MALOUF_LEGACY_OKIN,
     BED_TYPE_MALOUF_NEW_OKIN,
     BED_TYPE_NECTAR,
+    BED_TYPE_OCTO,
     BED_TYPE_OKIMAT,
     BED_TYPE_OKIN_64BIT,
     BED_TYPE_OKIN_CB35,
@@ -63,6 +64,9 @@ from custom_components.adjustable_bed.const import (
     LEGGETT_OKIN_SUPERSEDED_PULSE_DEFAULTS,
     LEGGETT_VARIANT_OKIN,
     NORDIC_DFU_SERVICE_UUID,
+    OCTO_STAR2_PULSE_DEFAULTS,
+    OCTO_VARIANT_STANDARD,
+    OCTO_VARIANT_STAR2,
     OKIMAT_SERVICE_UUID,
     OKIMAT_WRITE_CHAR_UUID,
     OKIN_SMART_REMOTE_CSS_SERVICE_UUID,
@@ -3997,6 +4001,36 @@ class TestMotorPulseConfiguration:
         # Custom values should override bed-type defaults
         assert coordinator.motor_pulse_count == 15
         assert coordinator.motor_pulse_delay_ms == 75
+
+    @pytest.mark.parametrize(
+        ("variant", "expected"),
+        [
+            (OCTO_VARIANT_STANDARD, BED_MOTOR_PULSE_DEFAULTS[BED_TYPE_OCTO]),
+            (OCTO_VARIANT_STAR2, OCTO_STAR2_PULSE_DEFAULTS),
+        ],
+    )
+    async def test_octo_variant_uses_its_own_pulse_defaults(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+        variant: str,
+        expected: tuple[int, int],
+    ) -> None:
+        """Star2 uses its field-tested cadence without changing Standard OCTO."""
+        mock_config_entry_data[CONF_BED_TYPE] = BED_TYPE_OCTO
+        mock_config_entry_data[CONF_PROTOCOL_VARIANT] = variant
+        mock_config_entry_data.pop(CONF_MOTOR_PULSE_COUNT, None)
+        mock_config_entry_data.pop(CONF_MOTOR_PULSE_DELAY_MS, None)
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title=TEST_NAME,
+            data=mock_config_entry_data,
+            unique_id="AA:BB:CC:DD:EE:FF",
+        )
+
+        coordinator = AdjustableBedCoordinator(hass, entry)
+
+        assert (coordinator.motor_pulse_count, coordinator.motor_pulse_delay_ms) == expected
 
 
 class TestRuntimeBedTypeCorrection:
