@@ -1525,7 +1525,7 @@ class TestCoordinatorPositionSeek:
                 new=AsyncMock(side_effect=_read_positions),
             ),
             patch(
-                "custom_components.adjustable_bed.coordinator.asyncio.sleep",
+                "custom_components.adjustable_bed.position_seek.asyncio.sleep",
                 new=AsyncMock(),
             ),
         ):
@@ -1575,7 +1575,7 @@ class TestCoordinatorPositionSeek:
                 new=AsyncMock(side_effect=_read_positions),
             ),
             patch(
-                "custom_components.adjustable_bed.coordinator.asyncio.sleep",
+                "custom_components.adjustable_bed.position_seek.asyncio.sleep",
                 new=AsyncMock(),
             ),
         ):
@@ -1626,7 +1626,7 @@ class TestCoordinatorPositionSeek:
                 new=read_positions,
             ),
             patch(
-                "custom_components.adjustable_bed.coordinator.asyncio.sleep",
+                "custom_components.adjustable_bed.position_seek.asyncio.sleep",
                 new=AsyncMock(),
             ),
         ):
@@ -1680,7 +1680,7 @@ class TestCoordinatorPositionSeek:
                 new=AsyncMock(side_effect=_read_positions),
             ),
             patch(
-                "custom_components.adjustable_bed.coordinator.asyncio.sleep",
+                "custom_components.adjustable_bed.position_seek.asyncio.sleep",
                 new=AsyncMock(),
             ),
         ):
@@ -1738,7 +1738,7 @@ class TestCoordinatorPositionSeek:
                 new=AsyncMock(side_effect=_read_positions),
             ),
             patch(
-                "custom_components.adjustable_bed.coordinator.asyncio.sleep",
+                "custom_components.adjustable_bed.position_seek.asyncio.sleep",
                 new=AsyncMock(),
             ),
         ):
@@ -1781,7 +1781,7 @@ class TestCoordinatorPositionSeek:
 
         with (
             patch(
-                "custom_components.adjustable_bed.coordinator.POSITION_SEEK_TIMEOUT",
+                "custom_components.adjustable_bed.position_seek.POSITION_SEEK_TIMEOUT",
                 0,
             ),
             pytest.raises(TimeoutError, match="Position seek timed out"),

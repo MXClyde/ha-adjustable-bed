@@ -78,6 +78,7 @@ def make_controller_mock(**overrides: object) -> MagicMock:
     Pass keyword overrides for the capabilities a given test actually cares about.
     """
     from custom_components.adjustable_bed.beds.base import BedController
+    from custom_components.adjustable_bed.position_seek import PositionSeekPolicy
 
     controller = MagicMock()
     for name, member in vars(BedController).items():
@@ -87,7 +88,12 @@ def make_controller_mock(**overrides: object) -> MagicMock:
             default = member.fget(controller)
         except Exception:  # noqa: BLE001 - property needs real state; leave it a Mock
             continue
-        if isinstance(default, bool | int | float | str | tuple | list | dict | None):
+        # The default seek policy delegates to the mock's seeded tuning
+        # attributes lazily, so per-test overrides still flow through it.
+        if isinstance(
+            default,
+            bool | int | float | str | tuple | list | dict | None | PositionSeekPolicy,
+        ):
             setattr(controller, name, default)
     for name, value in overrides.items():
         setattr(controller, name, value)

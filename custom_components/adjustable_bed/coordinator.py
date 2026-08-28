@@ -159,8 +159,6 @@ from .const import (
     OFFLINE_CAPABILITY_SAFE_BED_TYPES,
     OKIMAT_SERVICE_UUID,
     POSITION_MODE_ACCURACY,
-    POSITION_OVERSHOOT_TOLERANCE,
-    POSITION_SEEK_TIMEOUT,
     REVERIE_BACK_MAX_ANGLE,
     RICHMAT_REMOTE_AUTO,
     RUNTIME_BOND_KEYS,
@@ -190,6 +188,14 @@ from .detection import (
 )
 from .diagnostic_payloads import new_connection_attempt_details
 from .pairing import inheritable_child_fields, octo_snapshot_from_descriptor
+from .position_seek import (
+    PositionSeekRunner,
+    SeekMotion,
+    SeekOutcome,
+    SeekResult,
+    SeekSample,
+    SeekTimeoutError,
+)
 from .unsupported import (
     create_pairing_required_issue,
     delete_pairing_required_issue,
@@ -508,6 +514,12 @@ class AdjustableBedCoordinator:
         self._last_protocol_operation_end: datetime | None = None
         self._active_operation_name: str | None = None
         self._last_notify_received: datetime | None = None
+
+        # Per-axis seek state: typed terminal outcomes for diagnostics and the
+        # last commanded motion so a replacement seek's policy can distinguish
+        # same-direction from opposite-direction transitions.
+        self._seek_outcomes: dict[str, dict[str, Any]] = {}
+        self._last_seek_motion: dict[str, SeekMotion] = {}
 
         # Adapter selection details for diagnostics (issue #168)
         self._actual_adapter: str | None = None
@@ -1772,6 +1784,10 @@ class AdjustableBedCoordinator:
             "last_notify_received": self._last_notify_received.isoformat()
             if self._last_notify_received
             else None,
+            "position_seeks": {
+                position_key: dict(record)
+                for position_key, record in self._seek_outcomes.items()
+            },
             "scheduler": self._command_scheduler.diagnostics,
         }
 
@@ -5260,6 +5276,24 @@ class AdjustableBedCoordinator:
             cancel_running=True,
         )
 
+    def _record_seek_result(self, result: SeekResult) -> None:
+        """Retain the typed terminal outcome of one seek for diagnostics."""
+        context = current_command_context()
+        self._seek_outcomes[result.position_key] = {
+            "outcome": result.outcome.value,
+            "target": result.target,
+            "final_angle": result.final_angle,
+            "duration_seconds": round(result.duration, 3),
+            "intent_id": context.intent_id if context is not None else None,
+            "finished_at": datetime.now(UTC).isoformat(),
+        }
+        if result.final_direction is not None:
+            self._last_seek_motion[result.position_key] = SeekMotion(
+                moving_up=result.final_direction,
+                outcome=result.outcome,
+                finished_monotonic=time.monotonic(),
+            )
+
     async def _async_seek_position_serial(
         self,
         position_key: str,
@@ -5270,12 +5304,10 @@ class AdjustableBedCoordinator:
     ) -> None:
         """Seek to a target position using feedback loop control.
 
-        This method moves the motor toward the target position by polling the
-        current position and adjusting direction as needed. It handles:
-        - Immediate return if already at target position
-        - Timeout protection (60s max)
-        - Stall detection (motor not moving)
-        - Cancellation via the cancel_command event
+        Owns the connection lifecycle around one seek: locking, connecting,
+        initial position acquisition, and the direct-position shortcut. The
+        feedback loop itself runs in `PositionSeekRunner` under the
+        controller-supplied `PositionSeekPolicy`.
 
         Args:
             position_key: Key in position_data (e.g., "back", "legs")
@@ -5342,25 +5374,34 @@ class AdjustableBedCoordinator:
                             f"Cannot seek {position_key}: no position data available"
                         )
 
-                position_tolerance = controller.position_seek_tolerance
-                position_check_interval = controller.position_seek_check_interval
-                position_stall_count = controller.position_seek_stall_count
-                position_stall_threshold = controller.position_seek_stall_threshold
-                chain_seek_steps = controller.chains_position_seek_steps_while_moving
-                position_seek_chain_min_remaining_distance = (
-                    controller.position_seek_chain_min_remaining_distance
-                )
+                policy = controller.position_seek_policy
 
-                # Check if already at target (within tolerance)
-                if (
-                    current_angle is not None
-                    and abs(current_angle - target_angle) <= position_tolerance
+                # Check if already at target (per the policy's completion band)
+                if current_angle is not None and policy.accepts_position(
+                    SeekSample(
+                        position_key=position_key,
+                        target=target_angle,
+                        current=current_angle,
+                        previous=None,
+                        moving_up=target_angle > current_angle,
+                        elapsed=0.0,
+                    )
                 ):
                     _LOGGER.debug(
                         "Position %s already at target: %.1f (target: %.1f)",
                         position_key,
                         current_angle,
                         target_angle,
+                    )
+                    self._record_seek_result(
+                        SeekResult(
+                            position_key=position_key,
+                            target=target_angle,
+                            outcome=SeekOutcome.ALREADY_AT_TARGET,
+                            final_angle=current_angle,
+                            final_direction=None,
+                            duration=0.0,
+                        )
                     )
                     return  # finally block handles disconnect
 
@@ -5391,6 +5432,16 @@ class AdjustableBedCoordinator:
                     )
                     await controller.set_motor_position(position_key, native_position)
                     self._handle_position_update(position_key, target_angle)
+                    self._record_seek_result(
+                        SeekResult(
+                            position_key=position_key,
+                            target=target_angle,
+                            outcome=SeekOutcome.DIRECT_SET,
+                            final_angle=target_angle,
+                            final_direction=None,
+                            duration=0.0,
+                        )
+                    )
                     return  # finally block handles disconnect timer
 
                 # Only direct-position controllers may reach this point without a
@@ -5400,9 +5451,6 @@ class AdjustableBedCoordinator:
                         f"Cannot seek {position_key}: no position data available"
                     )
 
-                # Determine initial direction
-                moving_up = target_angle > current_angle
-                reverse_on_overshoot = controller.reverses_position_seek_on_overshoot
                 use_custom_seek_steps = controller.uses_custom_position_seek_steps
 
                 async def issue_seek_step(direction_up: bool, remaining_distance: float) -> None:
@@ -5419,184 +5467,26 @@ class AdjustableBedCoordinator:
                     else:
                         await move_down_fn(controller)
 
-                # Start movement in try-finally to guarantee stop is sent
+                async def read_position() -> float | None:
+                    await self._async_read_positions()
+                    return self._position_data.get(position_key)
+
+                runner = PositionSeekRunner(
+                    position_key=position_key,
+                    target_angle=target_angle,
+                    policy=policy,
+                    cancel_event=cancel_event,
+                    read_position=read_position,
+                    issue_step=issue_seek_step,
+                    stop=lambda: move_stop_fn(controller),
+                    previous_motion=self._last_seek_motion.get(position_key),
+                )
                 try:
-                    await issue_seek_step(
-                        moving_up,
-                        abs(target_angle - cast(float, current_angle)),
-                    )
-
-                    # Tracking variables
-                    start_time = time.monotonic()
-                    stall_count = 0
-                    last_angle = current_angle
-
-                    # Position seeking loop
-                    while True:
-                        # Check for timeout
-                        if time.monotonic() - start_time > POSITION_SEEK_TIMEOUT:
-                            _LOGGER.warning(
-                                "Position seek timeout for %s after %.0fs",
-                                position_key,
-                                POSITION_SEEK_TIMEOUT,
-                            )
-                            raise TimeoutError(
-                                f"Position seek timed out for {position_key} "
-                                f"after {POSITION_SEEK_TIMEOUT:.0f}s"
-                            )
-
-                        # Check for cancellation
-                        if cancel_event.is_set():
-                            _LOGGER.debug("Position seek cancelled for %s", position_key)
-                            break
-
-                        # Wait and poll position
-                        await asyncio.sleep(position_check_interval)
-
-                        # Read current position
-                        await self._async_read_positions()
-
-                        # Get updated position
-                        current_angle = self._position_data.get(position_key)
-                        if current_angle is None:
-                            _LOGGER.warning(
-                                "Lost position data for %s during seek",
-                                position_key,
-                            )
-                            break
-
-                        _LOGGER.debug(
-                            "Position seek %s: current=%.1f, target=%.1f",
-                            position_key,
-                            current_angle,
-                            target_angle,
-                        )
-
-                        # Check if at target
-                        if abs(current_angle - target_angle) <= position_tolerance:
-                            _LOGGER.info(
-                                "Position %s reached target: %.1f (target: %.1f)",
-                                position_key,
-                                current_angle,
-                                target_angle,
-                            )
-                            break
-
-                        # Pulse-driven controllers can only evaluate the result of a
-                        # whole move burst, so once they cross the target they should
-                        # stop rather than hunt by reversing direction.
-                        if not reverse_on_overshoot and (
-                            (moving_up and current_angle >= target_angle)
-                            or (not moving_up and current_angle <= target_angle)
-                        ):
-                            _LOGGER.info(
-                                "Position %s crossed target in single-direction seek: %.1f (target: %.1f)",
-                                position_key,
-                                current_angle,
-                                target_angle,
-                            )
-                            break
-
-                        # Check for overshoot (passed the target). The ticket-local
-                        # cancellation event stays clear during an ordinary seek and
-                        # is set only by replacement, STOP, caller cancellation, or
-                        # shutdown, so a reversal cannot erase a newer safety action.
-                        # Use larger overshoot tolerance to prevent oscillation
-                        if reverse_on_overshoot and (
-                            moving_up
-                            and current_angle > target_angle + POSITION_OVERSHOOT_TOLERANCE
-                        ):
-                            _LOGGER.debug(
-                                "Position %s overshot target (up), reversing", position_key
-                            )
-                            # Only send explicit stop for controllers that don't auto-stop
-                            # (Linak auto-stops and explicit STOP can cause reverse blips)
-                            if not controller.auto_stops_on_idle:
-                                await move_stop_fn(controller)
-                                await asyncio.sleep(0.3)  # Ensure stop completes before reversal
-                            # Check if a new stop was requested while we were stopping
-                            if cancel_event.is_set():
-                                _LOGGER.debug(
-                                    "New stop request during overshoot - aborting reversal"
-                                )
-                                break
-                            await issue_seek_step(False, abs(target_angle - current_angle))
-                            moving_up = False
-                        elif reverse_on_overshoot and (
-                            not moving_up
-                            and current_angle < target_angle - POSITION_OVERSHOOT_TOLERANCE
-                        ):
-                            _LOGGER.debug(
-                                "Position %s overshot target (down), reversing", position_key
-                            )
-                            # Only send explicit stop for controllers that don't auto-stop
-                            # (Linak auto-stops and explicit STOP can cause reverse blips)
-                            if not controller.auto_stops_on_idle:
-                                await move_stop_fn(controller)
-                                await asyncio.sleep(0.3)  # Ensure stop completes before reversal
-                            # Check if a new stop was requested while we were stopping
-                            if cancel_event.is_set():
-                                _LOGGER.debug(
-                                    "New stop request during overshoot - aborting reversal"
-                                )
-                                break
-                            await issue_seek_step(True, abs(target_angle - current_angle))
-                            moving_up = True
-
-                        remaining_distance = abs(target_angle - current_angle)
-                        movement = abs(current_angle - last_angle)
-                        if (
-                            chain_seek_steps
-                            and movement >= position_stall_threshold
-                            and remaining_distance >= position_seek_chain_min_remaining_distance
-                        ):
-                            _LOGGER.debug(
-                                "Position %s still moving at %.1f with %.1f remaining, chaining seek step",
-                                position_key,
-                                current_angle,
-                                remaining_distance,
-                            )
-                            await issue_seek_step(
-                                moving_up,
-                                remaining_distance,
-                            )
-                            stall_count = 0
-                            last_angle = current_angle
-                            continue
-
-                        # Stall detection - re-issue movement if motor stopped prematurely
-                        if movement < position_stall_threshold:
-                            stall_count += 1
-                            if stall_count >= position_stall_count:
-                                # Motor appears stalled - re-issue movement command
-                                # This handles pulse-based protocols where motors auto-stop
-                                _LOGGER.debug(
-                                    "Position %s stalled at %.1f, re-issuing movement command",
-                                    position_key,
-                                    current_angle,
-                                )
-                                await issue_seek_step(
-                                    moving_up,
-                                    abs(target_angle - current_angle),
-                                )
-                                stall_count = 0  # Reset stall count after re-issue
-                        else:
-                            stall_count = 0
-
-                        last_angle = current_angle
-                finally:
-                    # Stop the motor unless it auto-stops on idle
-                    # Some controllers (e.g., Linak) auto-stop and sending explicit
-                    # STOP can cause brief reverse movement.
-                    if not controller.auto_stops_on_idle:
-                        try:
-                            await move_stop_fn(controller)
-                        except Exception:
-                            _LOGGER.exception(
-                                "CRITICAL: Failed to stop motor %s - manual intervention may be required",
-                                position_key,
-                            )
-                            raise
+                    result = await runner.async_run(cast(float, current_angle))
+                except SeekTimeoutError as err:
+                    self._record_seek_result(err.result)
+                    raise
+                self._record_seek_result(result)
 
             finally:
                 if self._client is not None and self._client.is_connected:
