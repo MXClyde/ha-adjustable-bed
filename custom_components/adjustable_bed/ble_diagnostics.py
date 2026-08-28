@@ -31,6 +31,7 @@ from .const import (
     BED_TYPE_OKIN_CST,
     BED_TYPE_OKIN_RF_ECO_BT,
     CONF_PREFERRED_ADAPTER,
+    CONF_PROTOCOL_VARIANT,
     DEVICE_INFO_CHARS,
     DEVICE_INFO_SERVICE_UUID,
     DOMAIN,
@@ -1064,6 +1065,11 @@ class BLEDiagnosticRunner:
             configured_bed_type = (
                 self.coordinator.bed_type if self.coordinator is not None else None
             )
+            configured_protocol_variant = (
+                self.coordinator.entry.data.get(CONF_PROTOCOL_VARIANT)
+                if self.coordinator is not None
+                else None
+            )
             refinement_seed = gatt_detection.bed_type
             if (
                 gatt_detection.bed_type
@@ -1079,12 +1085,14 @@ class BLEDiagnosticRunner:
                 bed_type_without_model = refine_okin_shared_uuid_protocol_from_gatt(
                     refinement_seed,
                     gatt_services,
+                    protocol_variant=configured_protocol_variant,
                     device_name=observed_device_name or getattr(service_info, "name", None),
                     _log_correction=False,
                 )
             bed_type = refine_okin_shared_uuid_protocol_from_gatt(
                 refinement_seed,
                 gatt_services,
+                protocol_variant=configured_protocol_variant,
                 ble_model=model_number,
                 device_name=observed_device_name or getattr(service_info, "name", None),
             )
