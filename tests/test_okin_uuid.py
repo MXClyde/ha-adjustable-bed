@@ -984,8 +984,8 @@ class TestOkinUuidMotorLayout:
     @pytest.mark.parametrize(
         ("variant", "motor_count", "expected_keys"),
         [
-            # Standard 2-motor remote.
-            ("82417", 2, ["back", "legs"]),
+            # RF-TOPLINE 82620 from the two-motor RF ECO BT bed in issue #344.
+            ("82620", 2, ["back", "legs"]),
             # 4-motor remote exposes all axes when configured for 4 motors...
             ("93332", 4, ["back", "legs", "head", "feet"]),
             # ...and is still capped by the configured motor count.
@@ -1034,7 +1034,7 @@ class TestOkinUuidMotorLayout:
         mock_bleak_client: MagicMock,
     ):
         """On 2-motor remotes without a head motor, head stays a back synonym."""
-        coordinator = self._controller(hass, "82417")
+        coordinator = self._controller(hass, "82620")
         await coordinator.async_connect()
 
         await coordinator.controller.move_head_up()
@@ -1080,7 +1080,7 @@ class TestOkinUuidMotorLayout:
         mock_coordinator_connected,
     ):
         """Remotes with a UBL key keep the light toggle."""
-        coordinator = self._controller(hass, "82417")
+        coordinator = self._controller(hass, "82620")
         await coordinator.async_connect()
 
         assert coordinator.controller.supports_lights is True

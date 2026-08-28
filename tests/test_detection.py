@@ -1545,6 +1545,52 @@ class TestOkinUUIDDisambiguation:
             == BED_TYPE_OKIN_RF_ECO_BT
         )
 
+    @pytest.mark.parametrize(
+        ("bed_type", "protocol_variant", "ble_model", "expected_bed_type"),
+        [
+            (BED_TYPE_OKIN_UUID, "82620", "RF eco BT", BED_TYPE_OKIN_UUID),
+            (BED_TYPE_OKIMAT, "82620", "RF eco BT", BED_TYPE_OKIMAT),
+            (BED_TYPE_OKIN_UUID, "auto", "RF eco BT", BED_TYPE_OKIN_CST),
+            (BED_TYPE_OKIN_UUID, "82620", "MEGAMAT MBZ", BED_TYPE_OKIN_RF_ECO_BT),
+        ],
+    )
+    def test_shared_okin_gatt_refinement_respects_explicit_bed_remote(
+        self,
+        bed_type: str,
+        protocol_variant: str,
+        ble_model: str,
+        expected_bed_type: str,
+    ):
+        """A selected bed remote beats generic RF ECO identity, but not the stair model."""
+        gatt_services = [
+            SimpleNamespace(
+                uuid=OKIMAT_SERVICE_UUID,
+                characteristics=[
+                    SimpleNamespace(uuid=OKIMAT_WRITE_CHAR_UUID),
+                ],
+            ),
+            SimpleNamespace(
+                uuid=OKIN_SMART_REMOTE_CSS_SERVICE_UUID,
+                characteristics=[
+                    SimpleNamespace(uuid=OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID),
+                ],
+            ),
+            SimpleNamespace(
+                uuid=NORDIC_DFU_SERVICE_UUID,
+                characteristics=[],
+            ),
+        ]
+
+        assert (
+            refine_okin_shared_uuid_protocol_from_gatt(
+                bed_type,
+                gatt_services,
+                protocol_variant=protocol_variant,
+                ble_model=ble_model,
+            )
+            == expected_bed_type
+        )
+
     def test_shared_okin_gatt_refinement_downgrades_non_okimat_model_to_rf_eco_bt(self):
         """The ELDA stair (#344, ``MEGAMAT MBZ``) keeps the RF ECO BT downgrade."""
         gatt_services = [
