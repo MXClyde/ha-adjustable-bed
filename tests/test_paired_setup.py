@@ -28,6 +28,7 @@ from custom_components.adjustable_bed import (
 )
 from custom_components.adjustable_bed.const import (
     BED_TYPE_KAIDI,
+    BED_TYPE_KEESON,
     BED_TYPE_LEGGETT_GEN2,
     BED_TYPE_LEGGETT_OKIN,
     BED_TYPE_LEGGETT_PLATT,
@@ -38,6 +39,7 @@ from custom_components.adjustable_bed.const import (
     BED_TYPE_SBI,
     CONF_BED_TYPE,
     CONF_DISABLE_ANGLE_SENSING,
+    CONF_HAS_MASSAGE,
     CONF_KAIDI_RESOLVED_VARIANT,
     CONF_MOTOR_COUNT,
     CONF_PAIR_CHILDREN,
@@ -649,6 +651,62 @@ class TestPairedSetup:
         # per-motor "both sides" up/down motion buttons instead.
         for key in ("back_up", "back_down", "legs_up", "legs_down"):
             assert f"{PAIR_ID}_{key}_both" in both_uids
+
+    async def test_paired_entry_migrates_combined_massage_intensity_ids(
+        self,
+        hass: HomeAssistant,
+        mock_coordinator_connected,
+        enable_custom_integrations,
+    ) -> None:
+        """Briefly shipped combined intensity IDs keep their entity IDs."""
+        data = _paired_entry_data()
+        data[CONF_BED_TYPE] = BED_TYPE_KEESON
+        for child in data[CONF_PAIR_CHILDREN]:
+            child.update(
+                {
+                    CONF_BED_TYPE: BED_TYPE_KEESON,
+                    CONF_PROTOCOL_VARIANT: "base",
+                    CONF_HAS_MASSAGE: True,
+                }
+            )
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Paired Keeson Bed",
+            data=data,
+            unique_id=PAIR_ID,
+            entry_id="paired_keeson_migration_entry",
+            version=4,
+        )
+        entry.add_to_hass(hass)
+
+        registry = er.async_get(hass)
+        legacy_entries = {
+            level: registry.async_get_or_create(
+                "button",
+                DOMAIN,
+                f"{PAIR_ID}_massage_intensity_{level}_both",
+                config_entry=entry,
+                suggested_object_id=f"paired_keeson_massage_intensity_{level}",
+            )
+            for level in range(1, 4)
+        }
+
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        for level, legacy_entry in legacy_entries.items():
+            new_unique_id = f"{PAIR_ID}_massage_intensity_level_{level}_both"
+            assert registry.async_get_entity_id("button", DOMAIN, new_unique_id) == str(
+                legacy_entry.entity_id
+            )
+            assert (
+                registry.async_get_entity_id(
+                    "button",
+                    DOMAIN,
+                    f"{PAIR_ID}_massage_intensity_{level}_both",
+                )
+                is None
+            )
 
     async def test_diagnostics_for_paired_entry_does_not_crash(
         self,

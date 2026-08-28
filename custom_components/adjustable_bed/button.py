@@ -591,6 +591,9 @@ async def async_setup_entry(
     if isinstance(coordinator, PairedBedCoordinator):
         entities: list[ButtonEntity] = []
         children = list(coordinator.children.values())
+        _async_migrate_massage_intensity_button_unique_ids(
+            hass, coordinator, key_suffix="_both"
+        )
         for side, child in coordinator.children.items():
             entities.extend(
                 _button_entities_for(
@@ -723,20 +726,23 @@ def _combined_motor_buttons_for(
 
 def _async_migrate_massage_intensity_button_unique_ids(
     hass: HomeAssistant,
-    coordinator: AdjustableBedCoordinator,
+    coordinator: AdjustableBedCoordinator | PairedBedCoordinator,
+    *,
+    key_suffix: str = "",
 ) -> None:
     """Restore established intensity IDs while preserving 3.6 entity IDs."""
     registry = er.async_get(hass)
     for old_key, new_key in _MASSAGE_INTENSITY_BUTTON_KEY_MIGRATIONS:
+        old_unique_id = coordinator.entity_unique_id(f"{old_key}{key_suffix}")
         old_entity_id = registry.async_get_entity_id(
             "button",
             DOMAIN,
-            f"{coordinator.address}_{old_key}",
+            old_unique_id,
         )
         if old_entity_id is None:
             continue
 
-        new_unique_id = f"{coordinator.address}_{new_key}"
+        new_unique_id = coordinator.entity_unique_id(f"{new_key}{key_suffix}")
         if registry.async_get_entity_id("button", DOMAIN, new_unique_id) is not None:
             registry.async_remove(old_entity_id)
             continue

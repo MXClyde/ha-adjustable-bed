@@ -78,3 +78,10 @@ do not make either report or the cluster reconciliation partial.
   frozen.
 - Cluster total: 2 FULL, 0 DELTA, 0 blocked, 0 missing, 0 duplicate, 0 unaccounted.
 - Assigned clusters 009 through 025: not started by this interrupted run.
+- Origin: the scheduled Phase 4B bulk run tracked by issues #436 and #443, with the durable
+  repository handoff carried by PR #528.
+- Registry: issue #443 records both exact cluster-007 package entries as `ACCEPTED / COUNTED`;
+  issue #436 lists both under completed scheduled-bulk reports and deducts them from its remaining
+  queue accounting.
+- Bulk disposition: these are scheduled-bulk completions, not early analyses. They therefore do
+  not belong in issue #447's `ACCEPTED / EXCLUDE FROM BULK` registry.
