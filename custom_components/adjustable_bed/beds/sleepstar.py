@@ -325,6 +325,11 @@ class SleepStarController(BedController):
         return True
 
     @property
+    def reports_percentage_position(self) -> bool:
+        """Return True because SLEEPSTAR positions use percentages."""
+        return True
+
+    @property
     def supports_direct_position_control(self) -> bool:
         """Return True for the five app-addressable position zones."""
         return True
