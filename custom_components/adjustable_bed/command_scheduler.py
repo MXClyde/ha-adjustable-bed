@@ -200,7 +200,9 @@ class DeviceCommandScheduler:
         self._lock = asyncio.Lock()
         self._queue: deque[CommandHandle] = deque()
         self._active: CommandHandle | None = None
-        self._active_stops: dict[str, CommandHandle] = {}
+        self._active_stops: dict[
+            str, tuple[CommandHandle, asyncio.Task[None]]
+        ] = {}
         self._recent_records: deque[CommandRecord] = deque(
             maxlen=MAX_RECENT_COMMAND_RECORDS
         )
@@ -232,7 +234,7 @@ class DeviceCommandScheduler:
     @property
     def diagnostics(self) -> dict[str, object]:
         """Return a bounded snapshot suitable for integration diagnostics."""
-        active_handles = [*self._active_stops.values()]
+        active_handles = [handle for handle, _task in self._active_stops.values()]
         if self._active is not None:
             active_handles.append(self._active)
         active = active_handles[0] if active_handles else None
@@ -319,8 +321,8 @@ class DeviceCommandScheduler:
         resources: Collection[str] = ALL_COMMAND_RESOURCES,
         *,
         group_id: str | None = None,
-    ) -> CommandHandle:
-        """Invalidate matching work and synchronously admit a safety STOP."""
+    ) -> asyncio.Task[None]:
+        """Invalidate matching work and synchronously start a safety STOP."""
         if self._closed:
             raise RuntimeError(f"Command scheduler for {self._name} is shut down")
         normalized_resources = command_resources(*resources)
@@ -336,10 +338,14 @@ class DeviceCommandScheduler:
             prepared=False,
             admitted_stop_epoch=stop_epoch,
         )
-        self._active_stops[handle.intent.intent_id] = handle
-        return handle
+        task = asyncio.create_task(
+            self._execute_admitted_stop(handle),
+            name=f"adjustable_bed_stop_{self._name}",
+        )
+        self._active_stops[handle.intent.intent_id] = (handle, task)
+        return task
 
-    async def execute_admitted_stop(self, handle: CommandHandle) -> None:
+    async def _execute_admitted_stop(self, handle: CommandHandle) -> None:
         """Execute a synchronously admitted STOP outside the ordinary queue."""
         self._mark_started(handle)
         token: Token[CommandContext | None] = _CURRENT_COMMAND_CONTEXT.set(handle.context)
@@ -492,6 +498,18 @@ class DeviceCommandScheduler:
             worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await worker
+
+        # STOP is admitted outside the ordinary worker so it can preempt an
+        # active command. It is still scheduler-owned and must settle before
+        # coordinator teardown disconnects the BLE link.
+        stop_tasks = tuple(task for _handle, task in self._active_stops.values())
+        if stop_tasks:
+            stop_drain = asyncio.gather(*stop_tasks, return_exceptions=True)
+            try:
+                await asyncio.shield(stop_drain)
+            except asyncio.CancelledError:
+                await stop_drain
+                raise
 
     def _replace_conflicts_locked(self, incoming: CommandHandle) -> bool:
         """Cancel conflicts and report whether the active handle was replaced."""

@@ -4225,11 +4225,8 @@ class AdjustableBedCoordinator:
         async def stop_operation(_context: CommandContext) -> None:
             await self._async_send_stop_command()
 
-        stop_handle = self._command_scheduler.admit_stop(
+        stop_task = self._command_scheduler.admit_stop(
             stop_operation, ALL_COMMAND_RESOURCES
-        )
-        stop_task = asyncio.create_task(
-            self._command_scheduler.execute_admitted_stop(stop_handle)
         )
 
         try:
@@ -4252,11 +4249,11 @@ class AdjustableBedCoordinator:
             try:
                 if not await self.async_ensure_connected(reset_timer=False):
                     _LOGGER.error("Cannot send stop: not connected to bed")
-                    return
+                    raise ConnectionError("Not connected to bed")
 
                 if self._controller is None:
                     _LOGGER.error("Cannot send stop: no controller available")
-                    return
+                    raise RuntimeError("No controller available")
 
                 try:
                     await self._async_refresh_controller_auth()

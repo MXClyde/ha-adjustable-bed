@@ -163,9 +163,7 @@ async def generate_support_bundle(
         "position_data": position_data,
         "notifications": diagnostics_report.notifications,
         "notification_summary": diagnostics_report.notification_summary,
-        "command_timing": (
-            coordinator.command_timing if coordinator is not None else {}
-        ),
+        "command_timing": diagnostics_report.command_timing,
         "command_trace": diagnostics_report.command_trace if coordinator is not None else [],
         "recent_logs": recent_logs,
         "evidence": evidence,
