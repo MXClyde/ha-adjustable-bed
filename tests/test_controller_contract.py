@@ -9,6 +9,7 @@ from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -635,6 +636,46 @@ async def test_base_preset_with_stop_always_sends_stop_on_error() -> None:
         await controller._preset_with_stop(b"\x02")
 
     assert controller.stop_calls == 1
+
+
+async def test_base_wall_clock_pacing_absorbs_write_latency() -> None:
+    """A paced stream subtracts BLE write time from the repeat interval."""
+    coordinator = _FactoryCoordinator()
+    client = SimpleNamespace(
+        is_connected=True,
+        services=(),
+        write_gatt_char=AsyncMock(),
+    )
+    coordinator.client = client
+    coordinator.record_command_trace = MagicMock()
+    controller = _ContractController(coordinator)
+    loop = SimpleNamespace(
+        time=MagicMock(side_effect=[10.0, 10.03, 10.1]),
+    )
+    sleep = AsyncMock()
+
+    with (
+        patch(
+            "custom_components.adjustable_bed.beds.base.asyncio.get_running_loop",
+            return_value=loop,
+        ),
+        patch(
+            "custom_components.adjustable_bed.beds.base.asyncio.sleep",
+            sleep,
+        ),
+    ):
+        await controller._write_gatt_with_retry(
+            controller.control_characteristic_uuid,
+            b"\x01",
+            repeat_count=2,
+            repeat_delay_ms=100,
+            response=False,
+            wall_clock_pacing=True,
+        )
+
+    assert client.write_gatt_char.await_count == 2
+    sleep.assert_awaited_once()
+    assert sleep.await_args.args[0] == pytest.approx(0.07)
 
 
 async def test_overridden_stop_helpers_keep_finally_cleanup() -> None:

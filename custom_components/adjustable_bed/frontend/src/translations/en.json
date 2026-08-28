@@ -12,6 +12,7 @@
   "action.stop": "Stop",
   "action.down": "Down",
   "status.connected": "Connected",
+  "status.connecting": "Connecting",
   "status.idle": "Idle — reconnects on demand",
   "status.disconnected": "Disconnected",
   "memory.set": "Save…",

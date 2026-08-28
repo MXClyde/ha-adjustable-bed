@@ -27,6 +27,7 @@ from custom_components.adjustable_bed.const import (
     BED_TYPE_KAIDI,
     BED_TYPE_KEESON,
     BED_TYPE_LEGGETT_GEN2,
+    BED_TYPE_LEGGETT_OKIN,
     BED_TYPE_LINAK,
     BED_TYPE_MALOUF_LEGACY_OKIN,
     BED_TYPE_OCTO,
@@ -1967,3 +1968,56 @@ class TestServices:
         controller.move_lumbar_stop.assert_awaited_once()
         controller.move_tilt_up.assert_awaited_once()
         controller.move_tilt_stop.assert_awaited_once()
+
+    async def test_timed_move_service_accepts_leggett_okin_pillow(
+        self,
+        hass: HomeAssistant,
+        mock_coordinator_connected,
+        enable_custom_integrations,
+    ):
+        """CU170 timed_move should accept its exposed pillow actuator."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Leggett Okin Timed Move Bed",
+            data={
+                CONF_ADDRESS: "AA:BB:CC:DD:EE:33",
+                CONF_NAME: "Leggett Okin Timed Move Bed",
+                CONF_BED_TYPE: BED_TYPE_LEGGETT_OKIN,
+                CONF_MOTOR_COUNT: 4,
+                CONF_HAS_MASSAGE: False,
+                CONF_DISABLE_ANGLE_SENSING: True,
+                CONF_PREFERRED_ADAPTER: "auto",
+            },
+            unique_id="AA:BB:CC:DD:EE:33",
+            entry_id="leggett_okin_timed_move_entry",
+        )
+        entry.add_to_hass(hass)
+
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        from homeassistant.helpers import device_registry as dr
+
+        device_registry = dr.async_get(hass)
+        devices = dr.async_entries_for_config_entry(device_registry, entry.entry_id)
+        assert len(devices) == 1
+        device_id = devices[0].id
+
+        controller = hass.data[DOMAIN][entry.entry_id].controller
+        controller.move_pillow_up = AsyncMock()
+        controller.move_pillow_stop = AsyncMock()
+
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_TIMED_MOVE,
+            {
+                "device_id": [device_id],
+                "motor": "pillow",
+                "direction": "up",
+                "duration_ms": 1000,
+            },
+            blocking=True,
+        )
+
+        controller.move_pillow_up.assert_awaited_once()
+        controller.move_pillow_stop.assert_awaited_once()

@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 from bleak.exc import BleakError
 
 from ..const import LEGGETT_OKIN_CHAR_UUID, LEGGETT_OKIN_PULSE_DEFAULTS
-from .base import BedController
+from .base import BedController, MotorControlSpec
 from .okin_protocol import build_okin_command
 
 if TYPE_CHECKING:
@@ -125,6 +125,11 @@ class LeggettOkinController(BedController):
     They support motor control, presets, massage, and under-bed lighting.
     """
 
+    # CU170 hardware accepts unconfirmed writes. Waiting for a response and then
+    # sleeping the configured interval pushes the stream beyond its 217-218 ms
+    # motion watchdog on ESPHome proxies.
+    _write_with_response = False
+
     def __init__(self, coordinator: AdjustableBedCoordinator) -> None:
         """Initialize the Leggett & Platt Okin controller."""
         super().__init__(coordinator)
@@ -172,14 +177,53 @@ class LeggettOkinController(BedController):
         return True
 
     @property
-    def has_tilt_support(self) -> bool:
-        """Return True - Okin beds have tilt (pillow) motor control."""
+    def has_pillow_support(self) -> bool:
+        """Return True - the third actuator moves the pillow platform."""
         return True
 
     @property
     def has_lumbar_support(self) -> bool:
         """Return True - Okin beds have lumbar motor control."""
         return True
+
+    @property
+    def motor_control_specs(self) -> tuple[MotorControlSpec, ...]:
+        """Expose the CU170's four physical actuators without aliases."""
+        return (
+            MotorControlSpec(
+                key="head",
+                translation_key="head",
+                open_fn=lambda ctrl: ctrl.move_head_up(),
+                close_fn=lambda ctrl: ctrl.move_head_down(),
+                stop_fn=lambda ctrl: ctrl.move_head_stop(),
+            ),
+            MotorControlSpec(
+                key="lumbar",
+                translation_key="lumbar",
+                open_fn=lambda ctrl: ctrl.move_lumbar_up(),
+                close_fn=lambda ctrl: ctrl.move_lumbar_down(),
+                stop_fn=lambda ctrl: ctrl.move_lumbar_stop(),
+            ),
+            MotorControlSpec(
+                key="pillow",
+                translation_key="pillow",
+                open_fn=lambda ctrl: ctrl.move_pillow_up(),
+                close_fn=lambda ctrl: ctrl.move_pillow_down(),
+                stop_fn=lambda ctrl: ctrl.move_pillow_stop(),
+            ),
+            MotorControlSpec(
+                key="feet",
+                translation_key="feet",
+                open_fn=lambda ctrl: ctrl.move_feet_up(),
+                close_fn=lambda ctrl: ctrl.move_feet_down(),
+                stop_fn=lambda ctrl: ctrl.move_feet_stop(),
+            ),
+        )
+
+    @property
+    def stale_motor_entity_keys(self) -> frozenset[str]:
+        """Remove duplicate aliases and the former tilt label."""
+        return frozenset({"back", "legs", "tilt"})
 
     def _build_command(self, command_value: int) -> bytes:
         """Build Okin binary command by delegating to build_okin_command.
@@ -191,6 +235,29 @@ class LeggettOkinController(BedController):
             6-byte command: [0x04, 0x02, <4-byte-command-big-endian>]
         """
         return build_okin_command(command_value)
+
+    async def write_command(
+        self,
+        command: bytes,
+        repeat_count: int = 1,
+        repeat_delay_ms: int = 100,
+        cancel_event: asyncio.Event | None = None,
+    ) -> None:
+        """Write an unconfirmed stream paced from each write's start time."""
+        await self._write_gatt_with_retry(
+            self.control_characteristic_uuid,
+            command,
+            repeat_count=repeat_count,
+            repeat_delay_ms=repeat_delay_ms,
+            cancel_event=cancel_event,
+            response=False,
+            wall_clock_pacing=True,
+        )
+
+    def motor_pulse_settings(self) -> tuple[int, int]:
+        """Keep movement streams at the proven CU170 cadence."""
+        pulse_count, _ = super().motor_pulse_settings()
+        return pulse_count, LEGGETT_OKIN_PULSE_DEFAULTS[1]
 
     def _get_move_command(self) -> int:
         """Calculate the combined motor movement command."""
@@ -204,9 +271,9 @@ class LeggettOkinController(BedController):
             command += LeggettOkinCommands.MOTOR_FEET_UP
         elif state.get("feet") == MotorDirection.DOWN:
             command += LeggettOkinCommands.MOTOR_FEET_DOWN
-        if state.get("tilt") == MotorDirection.UP:
+        if state.get("pillow") == MotorDirection.UP:
             command += LeggettOkinCommands.MOTOR_TILT_UP
-        elif state.get("tilt") == MotorDirection.DOWN:
+        elif state.get("pillow") == MotorDirection.DOWN:
             command += LeggettOkinCommands.MOTOR_TILT_DOWN
         if state.get("lumbar") == MotorDirection.UP:
             command += LeggettOkinCommands.MOTOR_LUMBAR_UP
@@ -503,18 +570,28 @@ class LeggettOkinController(BedController):
         """Step through massage wave patterns."""
         await self._tap_keycode(LeggettOkinCommands.MASSAGE_WAVE_STEP, "massage_wave_step")
 
-    # Tilt motor control
+    # Pillow motor control. Keep the tilt methods as compatibility aliases for
+    # service calls or stale entities created by older releases.
+    async def move_pillow_up(self) -> None:
+        """Move the pillow motor up."""
+        await self._move_motor("pillow", MotorDirection.UP)
+
+    async def move_pillow_down(self) -> None:
+        """Move the pillow motor down."""
+        await self._move_motor("pillow", MotorDirection.DOWN)
+
+    async def move_pillow_stop(self) -> None:
+        """Stop the pillow motor."""
+        await self._move_motor("pillow", MotorDirection.STOP)
+
     async def move_tilt_up(self) -> None:
-        """Move tilt (pillow) motor up."""
-        await self._move_motor("tilt", MotorDirection.UP)
+        await self.move_pillow_up()
 
     async def move_tilt_down(self) -> None:
-        """Move tilt (pillow) motor down."""
-        await self._move_motor("tilt", MotorDirection.DOWN)
+        await self.move_pillow_down()
 
     async def move_tilt_stop(self) -> None:
-        """Stop tilt motor."""
-        await self._move_motor("tilt", MotorDirection.STOP)
+        await self.move_pillow_stop()
 
     # Lumbar motor control
     async def move_lumbar_up(self) -> None:

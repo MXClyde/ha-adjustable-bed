@@ -153,20 +153,23 @@ export class AdjustableBedCard extends LitElement {
   // ---- sections -----------------------------------------------------------
 
   private _header(bed: BedEntities): TemplateResult {
-    // Three connectivity states. "idle" means the bed intentionally dropped the
-    // BLE link (idle timeout / manual disconnect) and reconnects on demand on the
-    // next command — surfaced via the sensor's `state_detail` attribute (issue
-    // #385) so an expected disconnect doesn't read as a fault.
+    // "idle" means the bed intentionally dropped the BLE link (idle timeout /
+    // manual disconnect) and reconnects on demand on the next command. The
+    // sensor's `state_detail` attribute distinguishes it from a fault (#385).
     const connSt = bed.connectivity ? this._state(bed.connectivity) : undefined;
-    const conn: "connected" | "idle" | "disconnected" | undefined = !bed.connectivity
-      ? undefined
-      : connSt?.state === "on"
-        ? "connected"
-        : connSt?.attributes?.state_detail === "idle"
-          ? "idle"
-          : "disconnected";
+    const conn: "connected" | "connecting" | "idle" | "disconnected" | undefined =
+      !bed.connectivity
+        ? undefined
+        : connSt?.attributes?.state_detail === "connecting"
+          ? "connecting"
+          : connSt?.state === "on"
+            ? "connected"
+            : connSt?.attributes?.state_detail === "idle"
+              ? "idle"
+              : "disconnected";
     const CONN_META = {
       connected: { cls: "ok", icon: "mdi:bluetooth-connect", key: "status.connected" },
+      connecting: { cls: "connecting", icon: "mdi:bluetooth-transfer", key: "status.connecting" },
       idle: { cls: "idle", icon: "mdi:bluetooth", key: "status.idle" },
       disconnected: { cls: "off", icon: "mdi:bluetooth-off", key: "status.disconnected" },
     } as const;
@@ -827,6 +830,9 @@ export class AdjustableBedCard extends LitElement {
     }
     .conn.ok {
       color: var(--success-color, var(--state-active-color, #43a047));
+    }
+    .conn.connecting {
+      color: var(--warning-color, var(--state-active-color, #ff9800));
     }
     .conn.idle {
       color: var(--info-color, var(--secondary-text-color));
