@@ -142,6 +142,7 @@ from custom_components.adjustable_bed.const import (
     SUTA_SERVICE_UUID,
     TIMOTION_AHF_SERVICE_UUID,
     VARIANT_AUTO,
+    get_motor_pulse_defaults,
     requires_pairing,
 )
 from custom_components.adjustable_bed.detection import BED_TYPE_DISPLAY_NAMES, detect_bed_type
@@ -3587,6 +3588,82 @@ class TestOptionsFlow:
         assert {
             child[CONF_PROTOCOL_VARIANT] for child in entry.data[CONF_PAIR_CHILDREN]
         } == {KEESON_VARIANT_ERGOMOTION}
+
+    async def test_paired_bed_type_change_uses_new_protocol_defaults(
+        self,
+        hass: HomeAssistant,
+    ) -> None:
+        """Derived timing and motor defaults survive the paired form rebuild."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Paired Keeson Bed",
+            data={
+                CONF_NAME: "Paired Keeson Bed",
+                CONF_BED_TYPE: BED_TYPE_KEESON,
+                CONF_MOTOR_COUNT: 2,
+                CONF_PROTOCOL_VARIANT: VARIANT_AUTO,
+                CONF_MOTOR_PULSE_COUNT: 10,
+                CONF_MOTOR_PULSE_DELAY_MS: 100,
+                CONF_PAIR_ID: "pair_keeson_to_octo",
+                CONF_PAIR_MODE: PAIR_MODE_SEPARATE_ADDRESS,
+                CONF_PAIR_MEMBER_ADDRESSES: [
+                    "AA:BB:CC:DD:EE:97",
+                    "AA:BB:CC:DD:EE:98",
+                ],
+                CONF_PAIR_CHILDREN: [
+                    {
+                        CONF_SIDE: side,
+                        CONF_ADDRESS: address,
+                        CONF_NAME: f"{side.title()} Keeson",
+                        CONF_BED_TYPE: BED_TYPE_KEESON,
+                        CONF_MOTOR_COUNT: 2,
+                        CONF_PROTOCOL_VARIANT: VARIANT_AUTO,
+                        CONF_MOTOR_PULSE_COUNT: 10,
+                        CONF_MOTOR_PULSE_DELAY_MS: 100,
+                    }
+                    for side, address in (
+                        (SIDE_LEFT, "AA:BB:CC:DD:EE:97"),
+                        (SIDE_RIGHT, "AA:BB:CC:DD:EE:98"),
+                    )
+                ],
+            },
+            unique_id="pair_keeson_to_octo",
+            entry_id="pair_keeson_to_octo",
+        )
+        entry.add_to_hass(hass)
+        flow = AdjustableBedOptionsFlow(entry)
+        flow.hass = hass
+        flow.handler = entry.entry_id
+
+        rebuilt = await flow._async_options_form(
+            {
+                CONF_BED_TYPE: BED_TYPE_OCTO,
+                CONF_MOTOR_COUNT: 2,
+                CONF_PROTOCOL_VARIANT: VARIANT_AUTO,
+                CONF_MOTOR_PULSE_COUNT: "10",
+                CONF_MOTOR_PULSE_DELAY_MS: "100",
+            },
+            step_id="settings",
+        )
+        defaults = get_motor_pulse_defaults(BED_TYPE_OCTO, VARIANT_AUTO)
+        saved = await flow._async_options_form(
+            {
+                CONF_BED_TYPE: BED_TYPE_OCTO,
+                CONF_MOTOR_COUNT: 2,
+                CONF_PROTOCOL_VARIANT: VARIANT_AUTO,
+            },
+            step_id="settings",
+        )
+
+        assert rebuilt["type"] == FlowResultType.FORM
+        assert saved["type"] == FlowResultType.CREATE_ENTRY
+        for child in entry.data[CONF_PAIR_CHILDREN]:
+            assert child[CONF_BED_TYPE] == BED_TYPE_OCTO
+            assert child[CONF_MOTOR_COUNT] == 2
+            assert (
+                child[CONF_MOTOR_PULSE_COUNT],
+                child[CONF_MOTOR_PULSE_DELAY_MS],
+            ) == defaults
 
     @pytest.mark.parametrize(
         ("bed_type", "variant"),

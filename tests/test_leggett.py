@@ -201,11 +201,12 @@ class TestLeggettOkinController:
         assert release_call.kwargs["repeat_count"] == 4
         assert release_call.kwargs["cancel_event"].is_set() is False
 
-    async def test_motor_stream_floors_an_unsafe_pulse_delay(self):
-        """Invalid stored timing must not turn a held command into a write flood."""
+    @pytest.mark.parametrize("stored_delay", [0, 1, 100, 300])
+    async def test_motor_stream_uses_the_proven_pulse_delay(self, stored_delay: int):
+        """Stored timing cannot flood writes or exceed the CU170 watchdog."""
         coordinator = MagicMock()
         coordinator.motor_pulse_count = 10
-        coordinator.motor_pulse_delay_ms = 0
+        coordinator.motor_pulse_delay_ms = stored_delay
         controller = LeggettOkinController(coordinator)
         controller.write_command = AsyncMock()
 

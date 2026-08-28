@@ -255,9 +255,9 @@ class LeggettOkinController(BedController):
         )
 
     def motor_pulse_settings(self) -> tuple[int, int]:
-        """Keep movement streams at or below the proven CU170 cadence."""
-        pulse_count, pulse_delay_ms = super().motor_pulse_settings()
-        return pulse_count, max(pulse_delay_ms, LEGGETT_OKIN_PULSE_DEFAULTS[1])
+        """Keep movement streams at the proven CU170 cadence."""
+        pulse_count, _ = super().motor_pulse_settings()
+        return pulse_count, LEGGETT_OKIN_PULSE_DEFAULTS[1]
 
     def _get_move_command(self) -> int:
         """Calculate the combined motor movement command."""

@@ -5012,6 +5012,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 )
                 if get_variants_for_bed_type(requested_bed_type):
                     self._pending_data[CONF_PROTOCOL_VARIANT] = requested_variant
+                    self._pending_changed_data[CONF_PROTOCOL_VARIANT] = requested_variant
                 else:
                     self._pending_data.pop(CONF_PROTOCOL_VARIANT, None)
                 requested_motor_options = _motor_count_options(
@@ -5030,15 +5031,24 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                     if requested_motor_count not in requested_motor_options:
                         requested_motor_count = requested_motor_options[0]
                 self._pending_data[CONF_MOTOR_COUNT] = requested_motor_count
+                self._pending_changed_data[CONF_MOTOR_COUNT] = requested_motor_count
                 pulse_count, pulse_delay = get_motor_pulse_defaults(
                     requested_bed_type,
                     requested_variant,
                 )
                 self._pending_data[CONF_MOTOR_PULSE_COUNT] = pulse_count
                 self._pending_data[CONF_MOTOR_PULSE_DELAY_MS] = pulse_delay
-                self._pending_data[CONF_DISABLE_ANGLE_SENSING] = not bed_type_has_position_feedback(
+                disable_angle_sensing = not bed_type_has_position_feedback(
                     requested_bed_type,
                     requested_variant,
+                )
+                self._pending_data[CONF_DISABLE_ANGLE_SENSING] = disable_angle_sensing
+                self._pending_changed_data.update(
+                    {
+                        CONF_MOTOR_PULSE_COUNT: pulse_count,
+                        CONF_MOTOR_PULSE_DELAY_MS: pulse_delay,
+                        CONF_DISABLE_ANGLE_SENSING: disable_angle_sensing,
+                    }
                 )
                 return await self._async_options_form(None, step_id=step_id)
 
