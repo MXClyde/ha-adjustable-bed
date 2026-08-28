@@ -4457,6 +4457,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
         """Initialize the options flow."""
         super().__init__(config_entry)
         self._pending_data: dict[str, Any] = {}
+        self._pending_changed_data: dict[str, Any] = {}
         # The exact BlueZ record the user confirmed removing, captured at the
         # confirmation step so the removal cannot drift onto a different one.
         self._bond_removal_record: LocalBondRecord | None = None
@@ -4469,6 +4470,21 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
         # held for the whole confirmation/removal transaction so every lookup,
         # lock and persistence write targets the same address.
         self._bond_removal_side: str | None = None
+
+    def _remember_pending_changes(
+        self,
+        schema_dict: dict[Any, Any],
+        user_input: dict[str, Any],
+    ) -> None:
+        """Preserve user edits that triggered a dependent-field rebuild."""
+        shown = _shown_option_values(schema_dict)
+        self._pending_changed_data.update(
+            {
+                key: value
+                for key, value in user_input.items()
+                if key != CONF_DISABLE_DISCOVERY and key in shown and shown[key] != value
+            }
+        )
 
     @staticmethod
     def _variant_for_bed_type(bed_type: str, data: dict[str, Any]) -> str:
@@ -4983,6 +4999,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 # Re-render once using the selected protocol so its variant,
                 # authentication, layout, remote, and position fields are
                 # visible before anything is persisted.
+                self._remember_pending_changes(schema_dict, user_input)
                 self._pending_data = {
                     **self._pending_data,
                     **user_input,
@@ -5030,7 +5047,10 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
             # user_input now so it is never written into entry data, but only
             # persist it on the success path below - otherwise a later
             # validation failure would partially apply the rejected form.
-            discovery_disabled_input: bool | None = None
+            pending_discovery = self._pending_data.get(CONF_DISABLE_DISCOVERY)
+            discovery_disabled_input = (
+                bool(pending_discovery) if isinstance(pending_discovery, bool) else None
+            )
             if CONF_DISABLE_DISCOVERY in user_input:
                 discovery_disabled_input = bool(user_input.pop(CONF_DISABLE_DISCOVERY))
             requested_variant = self._variant_for_bed_type(
@@ -5048,7 +5068,10 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 # Rebuild once more when the chosen variant changes position
                 # capability, so the user sees the new sensing default and can
                 # still explicitly override it on the following submission.
+                self._remember_pending_changes(schema_dict, user_input)
                 self._pending_data = {**self._pending_data, **user_input}
+                if discovery_disabled_input is not None:
+                    self._pending_data[CONF_DISABLE_DISCOVERY] = discovery_disabled_input
                 self._pending_data[CONF_DISABLE_ANGLE_SENSING] = not bed_type_has_position_feedback(
                     bed_type,
                     requested_variant,
@@ -5173,11 +5196,12 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 # children, since _build_paired_children treats parent data as
                 # shared fields for any key a child descriptor doesn't store.
                 shown = _shown_option_values(schema_dict)
-                changed = {
+                current_changed = {
                     key: value
                     for key, value in user_input.items()
                     if key in shown and shown[key] != value
                 }
+                changed = {**self._pending_changed_data, **current_changed}
                 new_data = {**self.config_entry.data, **changed}
                 if pulse_user_set:
                     new_data[CONF_MOTOR_PULSE_USER_SET] = True

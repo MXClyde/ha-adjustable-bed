@@ -3493,13 +3493,100 @@ class TestOptionsFlow:
                 CONF_BED_TYPE: BED_TYPE_KEESON,
                 CONF_MOTOR_COUNT: 2,
                 CONF_PROTOCOL_VARIANT: KEESON_VARIANT_ERGOMOTION,
+                CONF_DISABLE_DISCOVERY: True,
             },
         )
 
         rebuilt_markers = {marker.schema: marker for marker in rebuilt["data_schema"].schema}
         assert rebuilt["type"] == FlowResultType.FORM
         assert rebuilt_markers[CONF_DISABLE_ANGLE_SENSING].default() is False
+        assert rebuilt_markers[CONF_DISABLE_DISCOVERY].default() is True
         assert CONF_POSITION_MODE in rebuilt_markers
+
+        saved = await hass.config_entries.options.async_configure(
+            rebuilt["flow_id"],
+            user_input={
+                CONF_BED_TYPE: BED_TYPE_KEESON,
+                CONF_MOTOR_COUNT: 2,
+                CONF_PROTOCOL_VARIANT: KEESON_VARIANT_ERGOMOTION,
+                CONF_DISABLE_DISCOVERY: True,
+            },
+        )
+
+        assert saved["type"] == FlowResultType.CREATE_ENTRY
+        assert entry.data[CONF_PROTOCOL_VARIANT] == KEESON_VARIANT_ERGOMOTION
+        assert await async_is_discovery_disabled(hass) is True
+
+    async def test_paired_options_preserve_variant_change_across_rebuild(
+        self,
+        hass: HomeAssistant,
+    ) -> None:
+        """A rebuild must not lose a variant edit before paired children are saved."""
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Paired Keeson Bed",
+            data={
+                CONF_NAME: "Paired Keeson Bed",
+                CONF_BED_TYPE: BED_TYPE_KEESON,
+                CONF_MOTOR_COUNT: 2,
+                CONF_PROTOCOL_VARIANT: VARIANT_AUTO,
+                CONF_PAIR_ID: "pair_keeson_variant",
+                CONF_PAIR_MODE: PAIR_MODE_SEPARATE_ADDRESS,
+                CONF_PAIR_MEMBER_ADDRESSES: [
+                    "AA:BB:CC:DD:EE:95",
+                    "AA:BB:CC:DD:EE:96",
+                ],
+                CONF_PAIR_CHILDREN: [
+                    {
+                        CONF_SIDE: SIDE_LEFT,
+                        CONF_ADDRESS: "AA:BB:CC:DD:EE:95",
+                        CONF_NAME: "Left Keeson",
+                        CONF_BED_TYPE: BED_TYPE_KEESON,
+                        CONF_MOTOR_COUNT: 2,
+                        CONF_PROTOCOL_VARIANT: VARIANT_AUTO,
+                    },
+                    {
+                        CONF_SIDE: SIDE_RIGHT,
+                        CONF_ADDRESS: "AA:BB:CC:DD:EE:96",
+                        CONF_NAME: "Right Keeson",
+                        CONF_BED_TYPE: BED_TYPE_KEESON,
+                        CONF_MOTOR_COUNT: 2,
+                        CONF_PROTOCOL_VARIANT: VARIANT_AUTO,
+                    },
+                ],
+            },
+            unique_id="pair_keeson_variant",
+            entry_id="pair_keeson_variant",
+        )
+        entry.add_to_hass(hass)
+        flow = AdjustableBedOptionsFlow(entry)
+        flow.hass = hass
+        flow.handler = entry.entry_id
+
+        initial = await flow._async_options_form(None, step_id="settings")
+        rebuilt = await flow._async_options_form(
+            {
+                CONF_BED_TYPE: BED_TYPE_KEESON,
+                CONF_MOTOR_COUNT: 2,
+                CONF_PROTOCOL_VARIANT: KEESON_VARIANT_ERGOMOTION,
+            },
+            step_id="settings",
+        )
+        saved = await flow._async_options_form(
+            {
+                CONF_BED_TYPE: BED_TYPE_KEESON,
+                CONF_MOTOR_COUNT: 2,
+                CONF_PROTOCOL_VARIANT: KEESON_VARIANT_ERGOMOTION,
+            },
+            step_id="settings",
+        )
+
+        assert initial["type"] == FlowResultType.FORM
+        assert rebuilt["type"] == FlowResultType.FORM
+        assert saved["type"] == FlowResultType.CREATE_ENTRY
+        assert {
+            child[CONF_PROTOCOL_VARIANT] for child in entry.data[CONF_PAIR_CHILDREN]
+        } == {KEESON_VARIANT_ERGOMOTION}
 
     @pytest.mark.parametrize(
         ("bed_type", "variant"),

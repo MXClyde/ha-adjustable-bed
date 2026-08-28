@@ -351,13 +351,9 @@ export class AdjustableBedCard extends LitElement {
   private _connectionStatus(bed: BedEntities): ConnectionStatus | undefined {
     if (!bed.connectivity) return undefined;
     const state = this._state(bed.connectivity);
-    return state?.state === "on"
-      ? "connected"
-      : state?.attributes?.state_detail === "connecting"
-        ? "connecting"
-      : state?.attributes?.state_detail === "idle"
-        ? "idle"
-        : "disconnected";
+    if (state?.attributes?.state_detail === "connecting") return "connecting";
+    if (state?.state === "on") return "connected";
+    return state?.attributes?.state_detail === "idle" ? "idle" : "disconnected";
   }
 
   private _connectionDot(bed: BedEntities): typeof nothing | TemplateResult {
