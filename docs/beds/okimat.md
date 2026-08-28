@@ -71,8 +71,11 @@ Detection priority:
 3. Device name contains "okimat", "okin rf", or "okin ble" → Okimat/Okin UUID
 4. Connected GATT has OKIN UUID + CSS → Okin CST or OKIN Smart Remote / RF
    ECO BT. Nordic DFU is only an initial CST hint. Device Information model
-   `MEGAMAT MBZ` identifies RF ECO BT, while an `OKIMAT` model identifies a full
-   bed. Otherwise an already configured CST or RF ECO BT profile is preserved.
+   `MEGAMAT MBZ` identifies the confirmed staircase, while an `OKIMAT` model
+   identifies a full bed. The generic model `RF eco BT` is also used by full
+   beds, so an explicitly selected valid handset code preserves the Okin UUID
+   profile. With ambiguous shared GATT signals and no stronger model evidence,
+   an already configured CST or RF ECO BT profile is preserved.
 5. Device name is `OKIN-Receiver` / `OKIN - Receiver` → prompt for Okin-family protocol
 6. Fallback → Okimat (with warning)
 

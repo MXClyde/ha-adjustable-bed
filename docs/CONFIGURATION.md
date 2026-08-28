@@ -229,6 +229,10 @@ These variants apply to newer Sleep Number Fuzion bases (`Smart bed *`). Older B
 ### Okimat Variants
 
 Okimat beds use different remote codes that determine available features and command values.
+RF ECO BT receivers used with adjustable beds also belong on this profile. Select
+the code printed on the handset rather than the single-actuator RF ECO BT stair
+profile. For example, RF-TOPLINE `82620` exposes Back, Legs, Flat, and the
+receiver's under-bed light toggle.
 
 | Variant | Remote Model | Motors |
 |---------|--------------|--------|

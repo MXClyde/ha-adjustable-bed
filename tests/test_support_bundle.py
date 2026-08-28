@@ -32,6 +32,7 @@ from custom_components.adjustable_bed.const import (
     CONF_HAS_MASSAGE,
     CONF_MOTOR_COUNT,
     CONF_PREFERRED_ADAPTER,
+    CONF_PROTOCOL_VARIANT,
     DEVICE_INFO_CHARS,
     DOMAIN,
     LINAK_CONTROL_SERVICE_UUID,
@@ -647,6 +648,7 @@ class TestBleDiagnosticsRunner:
         coordinator = MagicMock()
         coordinator.bed_type = BED_TYPE_OKIN_RF_ECO_BT
         coordinator.observed_ble_device_name = "OKIN-050226"
+        coordinator.entry.data = {CONF_PROTOCOL_VARIANT: "auto"}
         gatt_services = [
             ServiceInfo(
                 uuid=OKIMAT_SERVICE_UUID,
@@ -699,6 +701,19 @@ class TestBleDiagnosticsRunner:
         assert "configured_profile:shared_okin_uuid" not in model_detection["signals"]
         assert model_detection["confidence"] == 0.95
         assert model_detection["ambiguous_types"] == []
+
+        coordinator.entry.data = {CONF_PROTOCOL_VARIANT: "82620"}
+        coordinator.observed_ble_device_name = "Jasper"
+        rf_eco_bed_detection = runner._build_detection_section(
+            SimpleNamespace(name="Jasper"),
+            gatt_services,
+            {"model_number": "RF eco BT"},
+        )
+
+        assert rf_eco_bed_detection["bed_type"] == BED_TYPE_OKIN_UUID
+        assert "configured_profile:shared_okin_uuid" in rf_eco_bed_detection["signals"]
+        assert "device_info:model_number" not in rf_eco_bed_detection["signals"]
+        assert rf_eco_bed_detection["confidence"] == 0.8
 
     async def test_run_diagnostics_reconnects_after_mid_enumeration_disconnect(
         self,
