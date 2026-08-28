@@ -20,6 +20,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.adjustable_bed import (
     _async_release_absorbed_singles,
     _build_paired_children,
+    _device_for_entry_and_identifier,
     _make_child_persist_cb,
     _maybe_create_pairing_issue_for,
     _shared_child_fields,
@@ -219,8 +220,8 @@ class TestPairedSetup:
         assert any(row.unique_id.endswith("_right") for row in rows)
         assert any(row.unique_id.endswith("_both") for row in rows)
 
-        device = dr.async_get(hass).async_get_device(
-            identifiers={(DOMAIN, LEFT_ADDR)}
+        device = _device_for_entry_and_identifier(
+            dr.async_get(hass), entry.entry_id, (DOMAIN, LEFT_ADDR)
         )
         assert device is not None
         mock_bleak_client.write_gatt_char.reset_mock()
@@ -582,7 +583,9 @@ class TestPairedSetup:
         row = ent_reg.async_get(row_id)
         assert row is not None
         assert row.config_entry_id == entry.entry_id
-        device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, LEFT_ADDR)})
+        device = _device_for_entry_and_identifier(
+            dr.async_get(hass), entry.entry_id, (DOMAIN, LEFT_ADDR)
+        )
         assert device is not None
         assert device.config_entry_id == entry.entry_id
 
@@ -598,11 +601,17 @@ class TestPairedSetup:
         await hass.async_block_till_done()
 
         registry = dr.async_get(hass)
-        parent = registry.async_get_device(identifiers={(DOMAIN, PAIR_ID)})
+        parent = _device_for_entry_and_identifier(
+            registry, entry.entry_id, (DOMAIN, PAIR_ID)
+        )
         assert parent is not None
 
-        left = registry.async_get_device(identifiers={(DOMAIN, LEFT_ADDR)})
-        right = registry.async_get_device(identifiers={(DOMAIN, RIGHT_ADDR)})
+        left = _device_for_entry_and_identifier(
+            registry, entry.entry_id, (DOMAIN, LEFT_ADDR)
+        )
+        right = _device_for_entry_and_identifier(
+            registry, entry.entry_id, (DOMAIN, RIGHT_ADDR)
+        )
         assert left is not None and right is not None
         assert left.via_device_id == parent.id
         assert right.via_device_id == parent.id
@@ -1613,7 +1622,9 @@ class TestPairBedsConversion:
         assert before_row.config_entry_id == left.entry_id
 
         # Customize the left side's device too.
-        left_device = dev_reg.async_get_device(identifiers={(DOMAIN, LEFT_ADDR)})
+        left_device = _device_for_entry_and_identifier(
+            dev_reg, left.entry_id, (DOMAIN, LEFT_ADDR)
+        )
         assert left_device is not None
         left_device_id = left_device.id
         dev_reg.async_update_device(left_device_id, name_by_user="Left headboard")
@@ -1658,9 +1669,15 @@ class TestPairBedsConversion:
 
         # The device survived in place (same id), keeps its user name, and now
         # nests under the synthetic parent.
-        parent = dev_reg.async_get_device(identifiers={(DOMAIN, pair.data[CONF_PAIR_ID])})
+        parent = _device_for_entry_and_identifier(
+            dev_reg,
+            pair.entry_id,
+            (DOMAIN, pair.data[CONF_PAIR_ID]),
+        )
         assert parent is not None
-        left_after = dev_reg.async_get_device(identifiers={(DOMAIN, LEFT_ADDR)})
+        left_after = _device_for_entry_and_identifier(
+            dev_reg, pair.entry_id, (DOMAIN, LEFT_ADDR)
+        )
         assert left_after is not None
         assert left_after.id == left_device_id  # same device, not recreated
         assert left_after.config_entry_id == pair.entry_id
@@ -1693,7 +1710,9 @@ class TestPairBedsConversion:
         assert final_row.name == "Kris head angle"
         assert len([e for e in ent_reg.entities.values() if e.unique_id == cover_uid]) == 1
 
-        final_device = dev_reg.async_get_device(identifiers={(DOMAIN, LEFT_ADDR)})
+        final_device = _device_for_entry_and_identifier(
+            dev_reg, left.entry_id, (DOMAIN, LEFT_ADDR)
+        )
         assert final_device is not None
         assert final_device.id == left_device_id
         assert final_device.config_entry_id == left.entry_id
@@ -2057,7 +2076,9 @@ class TestSideServiceRouting:
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-        parent = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, PAIR_ID)})
+        parent = _device_for_entry_and_identifier(
+            dr.async_get(hass), entry.entry_id, (DOMAIN, PAIR_ID)
+        )
         assert parent is not None
         for side in ("both", SIDE_LEFT, SIDE_RIGHT):
             await hass.services.async_call(
@@ -2118,7 +2139,9 @@ class TestSideServiceRouting:
         _async_ensure_paired_device_registry(hass, entry, coordinator)
         await async_register_services(hass)
 
-        parent = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, PAIR_ID)})
+        parent = _device_for_entry_and_identifier(
+            dr.async_get(hass), entry.entry_id, (DOMAIN, PAIR_ID)
+        )
         assert parent is not None
         await hass.services.async_call(
             DOMAIN,
@@ -2198,7 +2221,9 @@ class TestSideServiceRouting:
         _async_ensure_paired_device_registry(hass, entry, coordinator)
         await async_register_services(hass)
 
-        parent = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, PAIR_ID)})
+        parent = _device_for_entry_and_identifier(
+            dr.async_get(hass), entry.entry_id, (DOMAIN, PAIR_ID)
+        )
         assert parent is not None
         with pytest.raises(ServiceValidationError):
             await hass.services.async_call(
@@ -2222,7 +2247,9 @@ class TestSideServiceRouting:
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-        parent = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, PAIR_ID)})
+        parent = _device_for_entry_and_identifier(
+            dr.async_get(hass), entry.entry_id, (DOMAIN, PAIR_ID)
+        )
         assert parent is not None
 
         # This fixture disables angle sensing, so set_position still rejects the
@@ -2271,7 +2298,9 @@ class TestSideServiceRouting:
         await hass.async_block_till_done()
         coordinator = hass.data[DOMAIN][entry.entry_id]
         coordinator.async_run_child_operation = AsyncMock()
-        parent = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, PAIR_ID)})
+        parent = _device_for_entry_and_identifier(
+            dr.async_get(hass), entry.entry_id, (DOMAIN, PAIR_ID)
+        )
         assert parent is not None
 
         await hass.services.async_call(
@@ -2299,7 +2328,9 @@ class TestSideServiceRouting:
         coordinator = hass.data[DOMAIN][entry.entry_id]
         coordinator.children[SIDE_RIGHT]._controller = SimpleNamespace(motor_control_specs=())
         coordinator.async_run_child_operation = AsyncMock()
-        parent = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, PAIR_ID)})
+        parent = _device_for_entry_and_identifier(
+            dr.async_get(hass), entry.entry_id, (DOMAIN, PAIR_ID)
+        )
         assert parent is not None
 
         with pytest.raises(ServiceValidationError, match="Motor 'back' is not valid"):

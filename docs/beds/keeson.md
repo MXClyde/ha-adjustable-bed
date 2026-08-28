@@ -77,9 +77,14 @@ Brands using Keeson/Ergomotion actuators:
 
 The GlideAway ComfortBase Odessa hardware report in
 [issue #508](https://github.com/kristofferR/ha-adjustable-bed/issues/508)
-confirms these additional BaseI4/I5 massage actions. Their meanings are
-variant-specific and must not be applied to the KSBT, Sino, Purple, or
-Ergomotion profiles.
+confirms these additional BaseI4/I5 massage actions. A 3.6.0 follow-up confirmed
+the wave controls, while its logs showed that the dashboard's established
+`massage_intensity_level_*` entity IDs no longer existed, so those button
+presses never reached BLE. The entity IDs are retained for compatibility.
+Their meanings are variant-specific and must not be applied to the KSBT, Sino,
+Purple, or Ergomotion profiles. The existing `0x00000200` timer-step action is
+separate from wave selection and is displayed as **Massage: Timer** while
+retaining its established entity identity.
 
 | Action | Value |
 |--------|-------|

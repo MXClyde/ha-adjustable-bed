@@ -434,7 +434,7 @@ def _async_ensure_paired_device_registry(
     """
     registry = dr.async_get(hass)
     parent_info = coordinator.device_info
-    registry.async_get_or_create(
+    parent = registry.async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers=parent_info.get("identifiers"),
         name=parent_info.get("name"),
@@ -444,14 +444,25 @@ def _async_ensure_paired_device_registry(
     parent_identifier = (DOMAIN, coordinator.pair_id)
     for child in coordinator.children.values():
         child_info = child.device_info
-        registry.async_get_or_create(
-            config_entry_id=entry.entry_id,
-            identifiers=child_info.get("identifiers"),
-            name=child_info.get("name"),
-            manufacturer=child_info.get("manufacturer"),
-            model=child_info.get("model"),
-            via_device=parent_identifier,
-        )
+        if hasattr(registry, "async_get_device_by_identifier"):
+            registry.async_get_or_create(
+                config_entry_id=entry.entry_id,
+                identifiers=child_info.get("identifiers"),
+                name=child_info.get("name"),
+                manufacturer=child_info.get("manufacturer"),
+                model=child_info.get("model"),
+                via_device_id=parent.id,
+            )
+        else:
+            # Home Assistant before 2026.8 identifies a parent by identifier.
+            registry.async_get_or_create(
+                config_entry_id=entry.entry_id,
+                identifiers=child_info.get("identifiers"),
+                name=child_info.get("name"),
+                manufacturer=child_info.get("manufacturer"),
+                model=child_info.get("model"),
+                via_device=parent_identifier,
+            )
 
 
 def _device_for_entry_and_identifier(
@@ -803,10 +814,18 @@ async def async_unpair_entry(hass: HomeAssistant, entry: ConfigEntry) -> list[Co
 
     ent_reg = er.async_get(hass)
     dev_reg = dr.async_get(hass)
-    parent = dev_reg.async_get_device(identifiers={(DOMAIN, entry.data[CONF_PAIR_ID])})
+    parent = _device_for_entry_and_identifier(
+        dev_reg,
+        entry.entry_id,
+        (DOMAIN, entry.data[CONF_PAIR_ID]),
+    )
     child_devices: dict[str, dr.DeviceEntry] = {}
     for single, address in singles:
-        device = dev_reg.async_get_device(identifiers={(DOMAIN, address)})
+        device = _device_for_entry_and_identifier(
+            dev_reg,
+            entry.entry_id,
+            (DOMAIN, address),
+        )
         if device is not None:
             child_devices[single.entry_id] = device
 
@@ -885,7 +904,7 @@ async def async_unpair_entry(hass: HomeAssistant, entry: ConfigEntry) -> list[Co
                 continue
             current = dev_reg.async_get(device.id)
             if (
-                current is not None
+                isinstance(current, dr.DeviceEntry)
                 and single.entry_id in current.config_entries
                 and hass.config_entries.async_get_entry(single.entry_id) is not None
             ):
