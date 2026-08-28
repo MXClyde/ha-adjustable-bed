@@ -13,7 +13,7 @@ says so.
 | | |
 |---|---|
 | Service UUID | `62741523-52f9-8864-b1ab-3b3a8d65950b` |
-| Write characteristic | `62741525-52f9-8864-b1ab-3b3a8d65950b` |
+| Write characteristic | `62741525-52f9-8864-b1ab-3b3a8d65950b` (accepts unconfirmed writes) |
 | Notify characteristic | `62741625-52f9-8864-b1ab-3b3a8d65950b` |
 | Pairing | Required. Neither app calls `createBond`, but the write characteristic needs an encrypted link, so Android bonds reactively on the resulting ATT error 5. |
 | Position feedback | None. See [Notifications](#notifications). |
@@ -103,6 +103,12 @@ button is down. On release the app emits **exactly four** keycode-`0` frames and
 then goes silent. There is no distinct stop opcode; the release frame is an
 ordinary frame carrying zero.
 
+CU170 hardware testing measured a 217-218 ms motion watchdog. The integration
+therefore uses unconfirmed writes and measures the 100 ms interval from the
+start of each write. Awaiting a confirmed write and then sleeping 100 ms adds
+the BLE round trip to every gap, which repeatedly crosses the watchdog over a
+WiFi Bluetooth proxy and makes the motor stop and restart.
+
 **One-shot recalls** (the memory slots) are a burst of **exactly 10 frames at
 ~100 ms**, with **no terminator at all**. The control box drives the move to
 completion by itself. Appending a release frame here risks cancelling the motion
@@ -126,15 +132,17 @@ buzz once. Within 5 seconds, touch the Favorite Position being edited."
 
 ## Notifications
 
-The notify characteristic carries an LED/status bitmask, not positions. The
-vendor app parses it into exactly two live indicators - sleep timer (`0x8000`)
-and alarm (`0x4000`) - and no parsed value ever influences a later command.
+The notify characteristic acknowledges accepted writes and also emits status
+updates for physical-remote actions. The vendor app parses it into two live
+indicators - sleep timer (`0x8000`) and alarm (`0x4000`) - and no parsed value
+ever influences a later command.
 
 There is **no position, angle, percentage, motor-state or error feedback of any
 kind** in either app. Under-bed light state is *not* among the bits either app
-reads, so the integration exposes the light as a blind toggle. Users have
-reported that the physical remote does show light state; confirming that would
-need a BLE capture of the notify characteristic while toggling the light.
+reads. CU170 hardware testing confirms that a light-state bit is present, but
+the exact byte and mask still need a paired before/after notification capture.
+Until then the integration keeps the light as a blind toggle rather than
+guessing the bit.
 
 ## Provenance
 

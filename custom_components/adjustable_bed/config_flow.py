@@ -4457,6 +4457,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
         """Initialize the options flow."""
         super().__init__(config_entry)
         self._pending_data: dict[str, Any] = {}
+        self._pending_changed_data: dict[str, Any] = {}
         # The exact BlueZ record the user confirmed removing, captured at the
         # confirmation step so the removal cannot drift onto a different one.
         self._bond_removal_record: LocalBondRecord | None = None
@@ -4469,6 +4470,21 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
         # held for the whole confirmation/removal transaction so every lookup,
         # lock and persistence write targets the same address.
         self._bond_removal_side: str | None = None
+
+    def _remember_pending_changes(
+        self,
+        schema_dict: dict[Any, Any],
+        user_input: dict[str, Any],
+    ) -> None:
+        """Preserve user edits that triggered a dependent-field rebuild."""
+        shown = _shown_option_values(schema_dict)
+        self._pending_changed_data.update(
+            {
+                key: value
+                for key, value in user_input.items()
+                if key != CONF_DISABLE_DISCOVERY and key in shown and shown[key] != value
+            }
+        )
 
     @staticmethod
     def _variant_for_bed_type(bed_type: str, data: dict[str, Any]) -> str:
@@ -4771,9 +4787,13 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
             )
         variants = get_variants_for_bed_type(bed_type)
         form_variant = self._variant_for_bed_type(bed_type, current_data)
+        has_position_feedback = bed_type_has_position_feedback(bed_type, form_variant)
         form_pulse_defaults = get_motor_pulse_defaults(bed_type, form_variant)
         motor_count_options = _motor_count_options_for_all_variants(bed_type)
-        form_motor_count = current_data.get(CONF_MOTOR_COUNT, DEFAULT_MOTOR_COUNT)
+        try:
+            form_motor_count = int(current_data.get(CONF_MOTOR_COUNT, DEFAULT_MOTOR_COUNT))
+        except (TypeError, ValueError):
+            form_motor_count = DEFAULT_MOTOR_COUNT
         if form_motor_count not in motor_count_options:
             form_motor_count = _default_motor_count(
                 bed_type,
@@ -4844,23 +4864,32 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 ),
             ): vol.All(vol.Coerce(int), vol.Range(min=10, max=300)),
             vol.Optional(
-                CONF_DISABLE_ANGLE_SENSING,
-                default=current_data.get(CONF_DISABLE_ANGLE_SENSING, DEFAULT_DISABLE_ANGLE_SENSING),
-            ): bool,
-            vol.Optional(
-                CONF_POSITION_MODE,
-                default=current_data.get(CONF_POSITION_MODE, DEFAULT_POSITION_MODE),
-            ): vol.In(
-                {
-                    POSITION_MODE_SPEED: "Speed (recommended)",
-                    POSITION_MODE_ACCURACY: "Accuracy",
-                }
-            ),
-            vol.Optional(
                 CONF_DISABLE_DISCOVERY,
                 default=discovery_disabled,
             ): bool,
         }
+
+        if has_position_feedback:
+            schema_dict[
+                vol.Optional(
+                    CONF_DISABLE_ANGLE_SENSING,
+                    default=current_data.get(
+                        CONF_DISABLE_ANGLE_SENSING,
+                        DEFAULT_DISABLE_ANGLE_SENSING,
+                    ),
+                )
+            ] = bool
+            schema_dict[
+                vol.Optional(
+                    CONF_POSITION_MODE,
+                    default=current_data.get(CONF_POSITION_MODE, DEFAULT_POSITION_MODE),
+                )
+            ] = vol.In(
+                {
+                    POSITION_MODE_SPEED: "Speed (recommended)",
+                    POSITION_MODE_ACCURACY: "Accuracy",
+                }
+            )
 
         if supports_passive_position_reconciliation(bed_type):
             schema_dict[
@@ -4949,7 +4978,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
         if (
             bed_type
             and bed_type not in BEDS_WITH_PERCENTAGE_POSITIONS
-            and bed_type in BEDS_WITH_POSITION_FEEDBACK
+            and has_position_feedback
         ):
             schema_dict[
                 vol.Optional(
@@ -4970,6 +4999,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 # Re-render once using the selected protocol so its variant,
                 # authentication, layout, remote, and position fields are
                 # visible before anything is persisted.
+                self._remember_pending_changes(schema_dict, user_input)
                 self._pending_data = {
                     **self._pending_data,
                     **user_input,
@@ -4982,6 +5012,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 )
                 if get_variants_for_bed_type(requested_bed_type):
                     self._pending_data[CONF_PROTOCOL_VARIANT] = requested_variant
+                    self._pending_changed_data[CONF_PROTOCOL_VARIANT] = requested_variant
                 else:
                     self._pending_data.pop(CONF_PROTOCOL_VARIANT, None)
                 requested_motor_options = _motor_count_options(
@@ -5000,15 +5031,24 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                     if requested_motor_count not in requested_motor_options:
                         requested_motor_count = requested_motor_options[0]
                 self._pending_data[CONF_MOTOR_COUNT] = requested_motor_count
+                self._pending_changed_data[CONF_MOTOR_COUNT] = requested_motor_count
                 pulse_count, pulse_delay = get_motor_pulse_defaults(
                     requested_bed_type,
                     requested_variant,
                 )
                 self._pending_data[CONF_MOTOR_PULSE_COUNT] = pulse_count
                 self._pending_data[CONF_MOTOR_PULSE_DELAY_MS] = pulse_delay
-                self._pending_data[CONF_DISABLE_ANGLE_SENSING] = not bed_type_has_position_feedback(
+                disable_angle_sensing = not bed_type_has_position_feedback(
                     requested_bed_type,
                     requested_variant,
+                )
+                self._pending_data[CONF_DISABLE_ANGLE_SENSING] = disable_angle_sensing
+                self._pending_changed_data.update(
+                    {
+                        CONF_MOTOR_PULSE_COUNT: pulse_count,
+                        CONF_MOTOR_PULSE_DELAY_MS: pulse_delay,
+                        CONF_DISABLE_ANGLE_SENSING: disable_angle_sensing,
+                    }
                 )
                 return await self._async_options_form(None, step_id=step_id)
 
@@ -5017,7 +5057,10 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
             # user_input now so it is never written into entry data, but only
             # persist it on the success path below - otherwise a later
             # validation failure would partially apply the rejected form.
-            discovery_disabled_input: bool | None = None
+            pending_discovery = self._pending_data.get(CONF_DISABLE_DISCOVERY)
+            discovery_disabled_input = (
+                bool(pending_discovery) if isinstance(pending_discovery, bool) else None
+            )
             if CONF_DISABLE_DISCOVERY in user_input:
                 discovery_disabled_input = bool(user_input.pop(CONF_DISABLE_DISCOVERY))
             requested_variant = self._variant_for_bed_type(
@@ -5028,19 +5071,23 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 user_input[CONF_PROTOCOL_VARIANT] = requested_variant
             else:
                 user_input.pop(CONF_PROTOCOL_VARIANT, None)
-            if self.config_entry.data.get(
-                CONF_BED_TYPE
-            ) != bed_type and bed_type_has_position_feedback(
-                bed_type, form_variant
-            ) != bed_type_has_position_feedback(bed_type, requested_variant):
+            if has_position_feedback != bed_type_has_position_feedback(
+                bed_type,
+                requested_variant,
+            ):
                 # Rebuild once more when the chosen variant changes position
                 # capability, so the user sees the new sensing default and can
                 # still explicitly override it on the following submission.
+                self._remember_pending_changes(schema_dict, user_input)
                 self._pending_data = {**self._pending_data, **user_input}
-                self._pending_data[CONF_DISABLE_ANGLE_SENSING] = not bed_type_has_position_feedback(
+                if discovery_disabled_input is not None:
+                    self._pending_data[CONF_DISABLE_DISCOVERY] = discovery_disabled_input
+                disable_angle_sensing = not bed_type_has_position_feedback(
                     bed_type,
                     requested_variant,
                 )
+                self._pending_data[CONF_DISABLE_ANGLE_SENSING] = disable_angle_sensing
+                self._pending_changed_data[CONF_DISABLE_ANGLE_SENSING] = disable_angle_sensing
                 return await self._async_options_form(None, step_id=step_id)
             requested_motor_count = user_input.get(
                 CONF_MOTOR_COUNT,
@@ -5161,11 +5208,12 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                 # children, since _build_paired_children treats parent data as
                 # shared fields for any key a child descriptor doesn't store.
                 shown = _shown_option_values(schema_dict)
-                changed = {
+                current_changed = {
                     key: value
                     for key, value in user_input.items()
                     if key in shown and shown[key] != value
                 }
+                changed = {**self._pending_changed_data, **current_changed}
                 new_data = {**self.config_entry.data, **changed}
                 if pulse_user_set:
                     new_data[CONF_MOTOR_PULSE_USER_SET] = True

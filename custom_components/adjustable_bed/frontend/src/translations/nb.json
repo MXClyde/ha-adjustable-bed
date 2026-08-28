@@ -25,6 +25,7 @@
   "motor.bed_height": "Sengehøyde",
   "motor.stair": "Trinn",
   "status.connected": "Tilkoblet",
+  "status.connecting": "Kobler til",
   "status.idle": "Hvilemodus – kobler til ved behov",
   "status.disconnected": "Frakoblet",
   "memory.set": "Lagre…",

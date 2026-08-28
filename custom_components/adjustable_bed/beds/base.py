@@ -494,6 +494,7 @@ class BedController(ABC):
         cancel_event: asyncio.Event | None = None,
         response: bool = True,
         log_errors: bool = True,
+        wall_clock_pacing: bool = False,
     ) -> None:
         """Write a command to a GATT characteristic with retry support.
 
@@ -516,6 +517,9 @@ class BedController(ABC):
             log_errors: Whether to log BleakError failures at ERROR level.
                      Set to False for callers that recover from expected errors
                      (e.g. Linak's post-connect auth-window probes).
+            wall_clock_pacing: Measure the repeat interval from the start of each
+                     write, so BLE round-trip time is absorbed into the interval
+                     instead of added to it.
 
         Raises:
             ConnectionError: If not connected to the bed
@@ -531,13 +535,14 @@ class BedController(ABC):
         logged_command = str(payload.get("hex", "**REDACTED**")) if payload else "**REDACTED**"
 
         _LOGGER.debug(
-            "GATT write to %s (%s): %s (response=%s, repeat=%d, delay=%dms)",
+            "GATT write to %s (%s): %s (response=%s, repeat=%d, delay=%dms, wall_clock_pacing=%s)",
             self._coordinator.address,
             char_uuid,
             logged_command,
             response,
             repeat_count,
             repeat_delay_ms,
+            wall_clock_pacing,
         )
 
         characteristic_handle: int | None = None
@@ -572,6 +577,7 @@ class BedController(ABC):
                 _LOGGER.debug("Command cancelled after %d/%d writes", i, repeat_count)
                 return
 
+            write_started: float | None = None
             try:
                 client = self.client
                 if client is None or not client.is_connected:
@@ -580,6 +586,8 @@ class BedController(ABC):
                 # Acquire BLE lock for each individual write to prevent conflicts
                 # with concurrent position reads during movement
                 async with self._ble_lock:
+                    if wall_clock_pacing:
+                        write_started = asyncio.get_running_loop().time()
                     await client.write_gatt_char(char_uuid, command, response=response)
             except BleakError:
                 if log_errors:
@@ -598,7 +606,11 @@ class BedController(ABC):
                 raise
 
             if i < repeat_count - 1:
-                await asyncio.sleep(repeat_delay_ms / 1000)
+                delay_seconds = repeat_delay_ms / 1000
+                if write_started is not None:
+                    delay_seconds -= asyncio.get_running_loop().time() - write_started
+                if delay_seconds > 0:
+                    await asyncio.sleep(delay_seconds)
 
     async def write_command(
         self,

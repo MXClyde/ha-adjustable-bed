@@ -141,6 +141,41 @@ class TestLeggettOkinController:
 
         assert controller.supports_massage_off_control is False
 
+    async def test_write_stream_is_unconfirmed_and_wall_clock_paced(self):
+        """CU170 streams must not add a confirmed-write RTT to every gap."""
+        controller = LeggettOkinController(MagicMock())
+        controller._write_gatt_with_retry = AsyncMock()
+        cancel_event = MagicMock()
+
+        await controller.write_command(
+            b"command",
+            repeat_count=10,
+            repeat_delay_ms=100,
+            cancel_event=cancel_event,
+        )
+
+        controller._write_gatt_with_retry.assert_awaited_once_with(
+            controller.control_characteristic_uuid,
+            b"command",
+            repeat_count=10,
+            repeat_delay_ms=100,
+            cancel_event=cancel_event,
+            response=False,
+            wall_clock_pacing=True,
+        )
+
+    async def test_motor_surface_matches_cu170_actuators(self):
+        """Expose head, lumbar, pillow and feet once each, without aliases."""
+        controller = LeggettOkinController(MagicMock())
+
+        assert [spec.key for spec in controller.motor_control_specs] == [
+            "head",
+            "lumbar",
+            "pillow",
+            "feet",
+        ]
+        assert controller.stale_motor_entity_keys == frozenset({"back", "legs", "tilt"})
+
     async def test_motor_streams_then_sends_four_release_frames(self):
         """Held keycodes stream at the configured cadence, then release with four zeros.
 
@@ -165,6 +200,20 @@ class TestLeggettOkinController:
         assert release_call.args == (bytes.fromhex("040200000000"),)
         assert release_call.kwargs["repeat_count"] == 4
         assert release_call.kwargs["cancel_event"].is_set() is False
+
+    @pytest.mark.parametrize("stored_delay", [0, 1, 100, 300])
+    async def test_motor_stream_uses_the_proven_pulse_delay(self, stored_delay: int):
+        """Stored timing cannot flood writes or exceed the CU170 watchdog."""
+        coordinator = MagicMock()
+        coordinator.motor_pulse_count = 10
+        coordinator.motor_pulse_delay_ms = stored_delay
+        controller = LeggettOkinController(coordinator)
+        controller.write_command = AsyncMock()
+
+        await controller.move_head_up()
+
+        move_call = controller.write_command.await_args_list[0]
+        assert move_call.kwargs["repeat_delay_ms"] == LEGGETT_OKIN_PULSE_DEFAULTS[1]
 
     @pytest.mark.parametrize(
         ("slot", "keycode"),

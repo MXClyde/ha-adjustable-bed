@@ -25,6 +25,7 @@
   "motor.bed_height": "Bed height",
   "motor.stair": "Stair",
   "status.connected": "Connected",
+  "status.connecting": "Connecting",
   "status.idle": "Idle — reconnects on demand",
   "status.disconnected": "Disconnected",
   "memory.set": "Save…",
