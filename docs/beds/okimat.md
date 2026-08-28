@@ -74,8 +74,8 @@ Detection priority:
    `MEGAMAT MBZ` identifies the confirmed staircase, while an `OKIMAT` model
    identifies a full bed. The generic model `RF eco BT` is also used by full
    beds, so an explicitly selected valid handset code preserves the Okin UUID
-   profile. Otherwise an already configured CST or RF ECO BT profile is
-   preserved.
+   profile. With ambiguous shared GATT signals and no stronger model evidence,
+   an already configured CST or RF ECO BT profile is preserved.
 5. Device name is `OKIN-Receiver` / `OKIN - Receiver` → prompt for Okin-family protocol
 6. Fallback → Okimat (with warning)
 
