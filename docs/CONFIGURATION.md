@@ -140,7 +140,8 @@ These settings control how motor movement commands are sent. Adjusting them can 
 | OKIN FFE | 7 | 150ms |
 | OKIN Nordic | 10 | 100ms |
 | Leggett WiLinke | 10 | 110ms |
-| Octo | 3 | 350ms |
+| Octo Standard | 3 | 350ms |
+| Octo Star2 | 3 | 50ms |
 | Jiecang | 10 | 100ms |
 | Comfort Motion | 10 | 100ms |
 | Limoss | 12 | 80ms |

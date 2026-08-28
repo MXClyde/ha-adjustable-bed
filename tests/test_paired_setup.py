@@ -2436,6 +2436,13 @@ class TestSideServiceRouting:
             close_fn=MagicMock(),
             stop_fn=MagicMock(),
         )
+        back_legs_spec = MotorControlSpec(
+            key="back_legs",
+            translation_key="back_legs",
+            open_fn=MagicMock(),
+            close_fn=MagicMock(),
+            stop_fn=MagicMock(),
+        )
 
         # The button carries the spec's open_fn (the mapped per-side motor) and
         # keeps the same unique_id as before (no entity churn).
@@ -2447,21 +2454,34 @@ class TestSideServiceRouting:
 
         # The builder intersects each side's specs and builds from THEM, not from
         # generic COVER_DESCRIPTIONS.
-        controller = SimpleNamespace(
+        left_controller = SimpleNamespace(
             supports_motor_control=True,
             has_discrete_motor_control=False,
-            motor_control_specs=[head_spec, back_spec],
+            motor_control_specs=[head_spec, back_spec, back_legs_spec],
         )
-        child = SimpleNamespace(capability_controller=controller)
-        buttons = _combined_motor_buttons_for(coord, [child, child])
+        right_controller = SimpleNamespace(
+            supports_motor_control=True,
+            has_discrete_motor_control=False,
+            motor_control_specs=[head_spec, back_legs_spec],
+        )
+        left = SimpleNamespace(capability_controller=left_controller)
+        right = SimpleNamespace(capability_controller=right_controller)
+        buttons = _combined_motor_buttons_for(coord, [left, right])
         head_up = next(b for b in buttons if b._attr_unique_id == "pair_x_head_up_both")
         assert head_up._move_fn is motor3_up
+        back_legs_up = next(
+            b for b in buttons if b._attr_unique_id == "pair_x_back_legs_up_both"
+        )
+        assert back_legs_up._attr_translation_key == "back_legs_up"
+        assert not any(
+            button._attr_unique_id == "pair_x_back_up_both" for button in buttons
+        )
 
         # A known left side is not enough to advertise a both-sides action. The
         # other side could have a different capability surface, so suppress all
         # combined motor controls until both sources are known.
         unknown = SimpleNamespace(capability_controller=None)
-        assert _combined_motor_buttons_for(coord, [child, unknown]) == []
+        assert _combined_motor_buttons_for(coord, [left, unknown]) == []
 
 
 class TestOfflineSideEntities:

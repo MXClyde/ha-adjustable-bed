@@ -765,6 +765,12 @@
       "back_down": {
         "name": "Back Down"
       },
+      "back_legs_up": {
+        "name": "Back + Legs Up"
+      },
+      "back_legs_down": {
+        "name": "Back + Legs Down"
+      },
       "feet_up": {
         "name": "Feet Up"
       },
@@ -1318,6 +1324,9 @@
       },
       "legs": {
         "name": "Legs"
+      },
+      "back_legs": {
+        "name": "Back + Legs"
       },
       "feet": {
         "name": "Feet"

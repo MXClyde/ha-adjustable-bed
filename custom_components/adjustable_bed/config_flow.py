@@ -86,7 +86,6 @@ from .bond_verification import (
 from .const import (
     ADAPTER_AUTO,
     ALL_PROTOCOL_VARIANTS,
-    BED_MOTOR_PULSE_DEFAULTS,
     BED_TYPE_DIAGNOSTIC,
     BED_TYPE_JENSEN,
     BED_TYPE_KAIDI,
@@ -174,6 +173,7 @@ from .const import (
     DetectionResult,
     bed_type_has_position_feedback,
     disconnect_after_command_default_enabled,
+    get_motor_pulse_defaults,
     get_richmat_features,
     get_richmat_motor_count,
     grants_one_connection_per_pairing_window,
@@ -1565,9 +1565,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 errors[CONF_PROTOCOL_VARIANT] = "invalid_variant_for_bed_type"
 
             # Get bed-specific defaults for motor pulse settings
-            pulse_defaults = BED_MOTOR_PULSE_DEFAULTS.get(
-                str(selected_bed_type) if selected_bed_type else "",
-                (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS),
+            pulse_defaults = get_motor_pulse_defaults(
+                selected_bed_type,
+                protocol_variant,
+                detection_result.signals,
             )
             # Validate motor pulse count
             pulse_count_input = user_input.get(CONF_MOTOR_PULSE_COUNT)
@@ -1706,12 +1707,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         # the shared predicate keeps this in step with the paths that do know a variant.
         default_disable_angle = not bed_type_has_position_feedback(bed_type, VARIANT_AUTO)
         # Get bed-type-specific motor pulse defaults
-        pulse_defaults = (
-            BED_MOTOR_PULSE_DEFAULTS.get(
-                bed_type, (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
-            )
-            if bed_type
-            else (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
+        pulse_defaults = get_motor_pulse_defaults(
+            bed_type,
+            VARIANT_AUTO,
+            detection_result.signals,
         )
         default_pulse_count, default_pulse_delay = pulse_defaults
 
@@ -2408,6 +2407,7 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             address = self._discovery_info.address.upper()
             device_name = self._discovery_info.name or "Unknown"
             discovery_source = getattr(self._discovery_info, "source", None) or ADAPTER_AUTO
+            detection_result = detect_bed_type_detailed(self._discovery_info)
         else:
             # This shouldn't happen, but handle gracefully
             return await self.async_step_manual_entry()
@@ -2452,8 +2452,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                 errors[CONF_PROTOCOL_VARIANT] = "invalid_variant_for_bed_type"
 
             # Get bed-specific defaults for motor pulse settings
-            pulse_defaults = BED_MOTOR_PULSE_DEFAULTS.get(
-                bed_type, (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
+            pulse_defaults = get_motor_pulse_defaults(
+                bed_type,
+                protocol_variant,
+                detection_result.signals,
             )
             motor_pulse_count = pulse_defaults[0]
             motor_pulse_delay_ms = pulse_defaults[1]
@@ -2551,7 +2553,6 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
         if discovery_source not in adapters:
             discovery_source = ADAPTER_AUTO
 
-        # Check if bed type was pre-selected from two-tier actuator selection
         # Build base schema with bed type selector (alphabetically sorted)
         if preselected_bed_type:
             # Bed type was pre-selected from two-tier actuator selection.
@@ -2604,8 +2605,10 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             )
             default_disable_angle = not has_position_feedback
             # Use bed-specific motor pulse defaults if available
-            pulse_defaults = BED_MOTOR_PULSE_DEFAULTS.get(
-                defaults_bed_type, (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
+            pulse_defaults = get_motor_pulse_defaults(
+                defaults_bed_type,
+                preselected_protocol_variant,
+                detection_result.signals,
             )
             default_pulse_count, default_pulse_delay = pulse_defaults
         else:
@@ -2699,8 +2702,9 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
                     errors[CONF_PROTOCOL_VARIANT] = "invalid_variant_for_bed_type"
 
                 # Get bed-specific defaults for motor pulse settings
-                pulse_defaults = BED_MOTOR_PULSE_DEFAULTS.get(
-                    bed_type, (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
+                pulse_defaults = get_motor_pulse_defaults(
+                    bed_type,
+                    protocol_variant,
                 )
                 motor_pulse_count = pulse_defaults[0]
                 motor_pulse_delay_ms = pulse_defaults[1]
@@ -2844,8 +2848,9 @@ class AdjustableBedConfigFlow(BluetoothOperationMixin, ConfigFlow, domain=DOMAIN
             )
             default_disable_angle = not has_position_feedback
             # Use bed-specific motor pulse defaults if available
-            pulse_defaults = BED_MOTOR_PULSE_DEFAULTS.get(
-                preselected_bed_type, (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
+            pulse_defaults = get_motor_pulse_defaults(
+                preselected_bed_type,
+                preselected_protocol_variant,
             )
             default_pulse_count, default_pulse_delay = pulse_defaults
         else:
@@ -4766,6 +4771,7 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
             )
         variants = get_variants_for_bed_type(bed_type)
         form_variant = self._variant_for_bed_type(bed_type, current_data)
+        form_pulse_defaults = get_motor_pulse_defaults(bed_type, form_variant)
         motor_count_options = _motor_count_options_for_all_variants(bed_type)
         form_motor_count = current_data.get(CONF_MOTOR_COUNT, DEFAULT_MOTOR_COUNT)
         if form_motor_count not in motor_count_options:
@@ -4819,13 +4825,11 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
             ): vol.In(CONNECTION_PROFILE_OPTIONS),
             vol.Optional(
                 CONF_MOTOR_PULSE_COUNT,
-                default=str(current_data.get(CONF_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_COUNT)),
+                default=str(current_data.get(CONF_MOTOR_PULSE_COUNT, form_pulse_defaults[0])),
             ): TextSelector(TextSelectorConfig()),
             vol.Optional(
                 CONF_MOTOR_PULSE_DELAY_MS,
-                default=str(
-                    current_data.get(CONF_MOTOR_PULSE_DELAY_MS, DEFAULT_MOTOR_PULSE_DELAY_MS)
-                ),
+                default=str(current_data.get(CONF_MOTOR_PULSE_DELAY_MS, form_pulse_defaults[1])),
             ): TextSelector(TextSelectorConfig()),
             vol.Optional(
                 CONF_DISCONNECT_AFTER_COMMAND,
@@ -4996,9 +5000,9 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                     if requested_motor_count not in requested_motor_options:
                         requested_motor_count = requested_motor_options[0]
                 self._pending_data[CONF_MOTOR_COUNT] = requested_motor_count
-                pulse_count, pulse_delay = BED_MOTOR_PULSE_DEFAULTS.get(
+                pulse_count, pulse_delay = get_motor_pulse_defaults(
                     requested_bed_type,
-                    (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS),
+                    requested_variant,
                 )
                 self._pending_data[CONF_MOTOR_PULSE_COUNT] = pulse_count
                 self._pending_data[CONF_MOTOR_PULSE_DELAY_MS] = pulse_delay
@@ -5083,12 +5087,9 @@ class AdjustableBedOptionsFlow(BluetoothOperationMixin, OptionsFlowWithConfigEnt
                     errors={"base": "single_address_pairing_unsupported"},
                 )
             # Get bed-specific defaults for motor pulse settings
-            pulse_defaults = (
-                BED_MOTOR_PULSE_DEFAULTS.get(
-                    bed_type, (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
-                )
-                if bed_type
-                else (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
+            pulse_defaults = get_motor_pulse_defaults(
+                bed_type,
+                requested_variant,
             )
             # Convert text values to integers
             try:

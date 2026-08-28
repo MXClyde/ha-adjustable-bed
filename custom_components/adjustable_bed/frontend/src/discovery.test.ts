@@ -134,6 +134,23 @@ test("Okin utility buttons (sync / child lock) bucket into utility", () => {
   expect(bedIsEmpty(bed)).toBe(false);
 });
 
+test("Octo combined back and legs cover is a motor, not a preset", () => {
+  const hass = hassWith([
+    entry("cover.octo_back", "back"),
+    entry("cover.octo_legs", "legs"),
+    entry("cover.octo_back_legs", "back_legs"),
+  ]);
+  const bed = bedEntitiesForDevice(hass, "dev1");
+
+  expect(bed.motors.map((motor) => motor.key)).toEqual([
+    "back",
+    "legs",
+    "back_legs",
+  ]);
+  expect(bed.motors[2].cover).toBe("cover.octo_back_legs");
+  expect(bed.presets).toHaveLength(0);
+});
+
 test("bed with only utility buttons is not empty", () => {
   const hass = hassWith([entry("button.b_sync", "sync_positions")]);
   const bed = bedEntitiesForDevice(hass, "dev1");
