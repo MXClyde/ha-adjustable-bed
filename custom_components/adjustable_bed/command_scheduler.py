@@ -16,11 +16,13 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Collection
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Final
+from typing import Any, Final
 from uuid import uuid4
 
 ALL_COMMAND_RESOURCES: Final = frozenset({"*"})
+MAX_RECENT_COMMAND_RECORDS: Final = 20
 
 
 class CommandKind(StrEnum):
@@ -29,13 +31,7 @@ class CommandKind(StrEnum):
     COMMAND = "command"
     SEEK = "seek"
     GROUP = "group"
-
-
-class IntentLifetime(StrEnum):
-    """How long an admitted command remains valid."""
-
-    ONE_SHOT = "one_shot"
-    HELD = "held"
+    STOP = "stop"
 
 
 class CommandState(StrEnum):
@@ -44,7 +40,6 @@ class CommandState(StrEnum):
     QUEUED = "queued"
     PREPARED = "prepared"
     ACTIVE = "active"
-    CLEANING = "cleaning"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     FAILED = "failed"
@@ -59,6 +54,7 @@ class CommandOutcome(StrEnum):
     CALLER_CANCELLED = "caller_cancelled"
     GROUP_ABORTED = "group_aborted"
     SHUTDOWN = "shutdown"
+    TIMEOUT = "timeout"
     FAILED = "failed"
 
 
@@ -74,11 +70,11 @@ class CommandContext:
     cancel_event: asyncio.Event
     admitted_stop_epoch: int
     intent_id: str
+    kind: CommandKind
     group_id: str | None
     resources: frozenset[str]
     pulse_count: int | None = None
     pulse_delay_ms: int | None = None
-    hold_owner: str | None = None
     cancel_reason: CommandOutcome | None = None
     active: bool = True
     defer_disconnect: bool = False
@@ -94,14 +90,49 @@ class CommandIntent:
     operation: CommandOperation
     resources: frozenset[str] = ALL_COMMAND_RESOURCES
     kind: CommandKind = CommandKind.COMMAND
-    lifetime: IntentLifetime = IntentLifetime.ONE_SHOT
     replacement_key: str | None = None
     cancel_running: bool = True
     group_id: str | None = None
     pulse_count: int | None = None
     pulse_delay_ms: int | None = None
-    hold_owner: str | None = None
     intent_id: str = field(default_factory=lambda: uuid4().hex)
+
+
+@dataclass(frozen=True, slots=True)
+class CommandRecord:
+    """Immutable terminal snapshot of one admitted command."""
+
+    intent_id: str
+    kind: CommandKind
+    group_id: str | None
+    resources: tuple[str, ...]
+    scheduler_strategy: str
+    stop_epoch: int
+    invalidated_stop_epoch: int | None
+    admitted_at: datetime
+    started_at: datetime | None
+    finished_at: datetime
+    outcome: CommandOutcome
+    queue_wait_seconds: float
+    active_duration_seconds: float | None
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the shared JSON shape used by diagnostics and support bundles."""
+        return {
+            "intent_id": self.intent_id,
+            "kind": self.kind.value,
+            "group_id": self.group_id,
+            "resources": list(self.resources),
+            "scheduler_strategy": self.scheduler_strategy,
+            "stop_epoch": self.stop_epoch,
+            "invalidated_stop_epoch": self.invalidated_stop_epoch,
+            "admitted_at": self.admitted_at.isoformat(),
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "finished_at": self.finished_at.isoformat(),
+            "outcome": self.outcome.value,
+            "queue_wait_seconds": self.queue_wait_seconds,
+            "active_duration_seconds": self.active_duration_seconds,
+        }
 
 
 @dataclass(slots=True)
@@ -114,9 +145,13 @@ class CommandHandle:
     prepared: bool
     state: CommandState = CommandState.QUEUED
     outcome: CommandOutcome | None = None
-    admitted_at: float = field(default_factory=time.monotonic)
-    started_at: float | None = None
-    finished_at: float | None = None
+    admitted_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    admitted_monotonic: float = field(default_factory=time.monotonic)
+    started_at: datetime | None = None
+    started_monotonic: float | None = None
+    finished_at: datetime | None = None
+    finished_monotonic: float | None = None
+    invalidated_stop_epoch: int | None = None
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     commit: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -165,6 +200,12 @@ class DeviceCommandScheduler:
         self._lock = asyncio.Lock()
         self._queue: deque[CommandHandle] = deque()
         self._active: CommandHandle | None = None
+        self._active_stops: dict[
+            str, tuple[CommandHandle, asyncio.Task[None]]
+        ] = {}
+        self._recent_records: deque[CommandRecord] = deque(
+            maxlen=MAX_RECENT_COMMAND_RECORDS
+        )
         self._worker: asyncio.Task[None] | None = None
         self._stop_epoch = 0
         self._stop_barrier = asyncio.Event()
@@ -186,20 +227,57 @@ class DeviceCommandScheduler:
         return self._stop_epoch
 
     @property
+    def recent_records(self) -> tuple[CommandRecord, ...]:
+        """Return the bounded immutable terminal history."""
+        return tuple(self._recent_records)
+
+    @property
     def diagnostics(self) -> dict[str, object]:
         """Return a bounded snapshot suitable for integration diagnostics."""
-        active = self._active
+        active_handles = [handle for handle, _task in self._active_stops.values()]
+        if self._active is not None:
+            active_handles.append(self._active)
+        active = active_handles[0] if active_handles else None
         return {
             "strategy": self.strategy_name,
             "stop_epoch": self._stop_epoch,
             "queue_depth": len(self._queue),
             "active_intent_id": active.intent.intent_id if active else None,
+            "active_kind": active.intent.kind.value if active else None,
             "active_group_id": active.intent.group_id if active else None,
             "active_resources": sorted(active.intent.resources) if active else [],
             "active_state": active.state if active else None,
             "active_age_seconds": (
-                round(time.monotonic() - active.started_at, 3)
-                if active is not None and active.started_at is not None
+                round(time.monotonic() - active.started_monotonic, 3)
+                if active is not None and active.started_monotonic is not None
+                else None
+            ),
+            "active_intents": [
+                self._active_diagnostics(handle) for handle in active_handles
+            ],
+            "recent_records": [record.as_dict() for record in self._recent_records],
+        }
+
+    def _active_diagnostics(self, handle: CommandHandle) -> dict[str, object]:
+        now = time.monotonic()
+        return {
+            "intent_id": handle.intent.intent_id,
+            "kind": handle.intent.kind.value,
+            "group_id": handle.intent.group_id,
+            "resources": sorted(handle.intent.resources),
+            "scheduler_strategy": self.strategy_name,
+            "stop_epoch": handle.context.admitted_stop_epoch,
+            "state": handle.state.value,
+            "admitted_at": handle.admitted_at.isoformat(),
+            "started_at": (
+                handle.started_at.isoformat() if handle.started_at is not None else None
+            ),
+            "queue_wait_seconds": round(
+                (handle.started_monotonic or now) - handle.admitted_monotonic, 3
+            ),
+            "active_duration_seconds": (
+                round(now - handle.started_monotonic, 3)
+                if handle.started_monotonic is not None
                 else None
             ),
         }
@@ -215,26 +293,7 @@ class DeviceCommandScheduler:
 
     async def enqueue(self, intent: CommandIntent, *, prepared: bool = False) -> CommandHandle:
         """Admit an intent and return its handle without waiting for execution."""
-        loop = asyncio.get_running_loop()
-        context = CommandContext(
-            scheduler_token=self._token,
-            cancel_event=asyncio.Event(),
-            admitted_stop_epoch=self._stop_epoch,
-            intent_id=intent.intent_id,
-            group_id=intent.group_id,
-            resources=intent.resources,
-            pulse_count=intent.pulse_count,
-            pulse_delay_ms=intent.pulse_delay_ms,
-            hold_owner=intent.hold_owner,
-        )
-        handle = CommandHandle(
-            intent=intent,
-            context=context,
-            future=loop.create_future(),
-            prepared=prepared,
-        )
-        if not prepared:
-            handle.commit.set()
+        handle = self._new_handle(intent, prepared=prepared)
 
         async with self._lock:
             if self._closed:
@@ -254,6 +313,98 @@ class DeviceCommandScheduler:
                 self._worker = asyncio.create_task(
                     self._run(), name=f"adjustable_bed_commands_{self._name}"
                 )
+        return handle
+
+    def admit_stop(
+        self,
+        operation: CommandOperation,
+        resources: Collection[str] = ALL_COMMAND_RESOURCES,
+        *,
+        group_id: str | None = None,
+    ) -> asyncio.Task[None]:
+        """Invalidate matching work and synchronously start a safety STOP."""
+        if self._closed:
+            raise RuntimeError(f"Command scheduler for {self._name} is shut down")
+        normalized_resources = command_resources(*resources)
+        stop_epoch = self.request_stop(normalized_resources)
+        handle = self._new_handle(
+            CommandIntent(
+                operation,
+                resources=normalized_resources,
+                kind=CommandKind.STOP,
+                cancel_running=False,
+                group_id=group_id,
+            ),
+            prepared=False,
+            admitted_stop_epoch=stop_epoch,
+        )
+        task = asyncio.create_task(
+            self._execute_admitted_stop(handle),
+            name=f"adjustable_bed_stop_{self._name}",
+        )
+        self._active_stops[handle.intent.intent_id] = (handle, task)
+        return task
+
+    async def _execute_admitted_stop(self, handle: CommandHandle) -> None:
+        """Execute a synchronously admitted STOP outside the ordinary queue."""
+        self._mark_started(handle)
+        token: Token[CommandContext | None] = _CURRENT_COMMAND_CONTEXT.set(handle.context)
+        try:
+            await handle.intent.operation(handle.context)
+        except asyncio.CancelledError:
+            outcome = (
+                CommandOutcome.SHUTDOWN
+                if self._closed
+                else CommandOutcome.CALLER_CANCELLED
+            )
+            self._finish(handle, outcome)
+            raise
+        except TimeoutError as err:
+            self._finish(handle, CommandOutcome.TIMEOUT, error=err)
+            handle.future.exception()
+            raise
+        except Exception as err:
+            self._finish(handle, CommandOutcome.FAILED, error=err)
+            handle.future.exception()
+            raise
+        else:
+            self._finish(handle, CommandOutcome.COMPLETED)
+        finally:
+            _CURRENT_COMMAND_CONTEXT.reset(token)
+            self._active_stops.pop(handle.intent.intent_id, None)
+            self.finish_stop(handle.context.admitted_stop_epoch)
+
+    def _new_handle(
+        self,
+        intent: CommandIntent,
+        *,
+        prepared: bool,
+        admitted_stop_epoch: int | None = None,
+    ) -> CommandHandle:
+        loop = asyncio.get_running_loop()
+        context = CommandContext(
+            scheduler_token=self._token,
+            cancel_event=asyncio.Event(),
+            admitted_stop_epoch=(
+                self._stop_epoch
+                if admitted_stop_epoch is None
+                else admitted_stop_epoch
+            ),
+            intent_id=intent.intent_id,
+            kind=intent.kind,
+            group_id=intent.group_id,
+            resources=intent.resources,
+            pulse_count=intent.pulse_count,
+            pulse_delay_ms=intent.pulse_delay_ms,
+        )
+        handle = CommandHandle(
+            intent=intent,
+            context=context,
+            future=loop.create_future(),
+            prepared=prepared,
+        )
+        if not prepared:
+            handle.commit.set()
         return handle
 
     async def wait_ready(self, handle: CommandHandle) -> None:
@@ -306,13 +457,25 @@ class DeviceCommandScheduler:
         outcome: CommandOutcome = CommandOutcome.REPLACED,
     ) -> None:
         """Synchronously invalidate matching active and queued commands."""
-        self._cancel_matching(resources, outcome=outcome)
+        self._cancel_matching(
+            resources,
+            outcome=outcome,
+            invalidated_stop_epoch=(
+                self._stop_epoch
+                if outcome in {CommandOutcome.STOPPED, CommandOutcome.SHUTDOWN}
+                else None
+            ),
+        )
 
     def request_stop(self, resources: Collection[str] = ALL_COMMAND_RESOURCES) -> int:
         """Invalidate matching work and advance the monotonic STOP epoch."""
         self._stop_barrier.clear()
         self._stop_epoch += 1
-        self._cancel_matching(resources, outcome=CommandOutcome.STOPPED)
+        self._cancel_matching(
+            resources,
+            outcome=CommandOutcome.STOPPED,
+            invalidated_stop_epoch=self._stop_epoch,
+        )
         return self._stop_epoch
 
     def finish_stop(self, stop_epoch: int) -> None:
@@ -325,12 +488,28 @@ class DeviceCommandScheduler:
         self._closed = True
         self._stop_barrier.set()
         self._stop_epoch += 1
-        self._cancel_matching(ALL_COMMAND_RESOURCES, outcome=CommandOutcome.SHUTDOWN)
+        self._cancel_matching(
+            ALL_COMMAND_RESOURCES,
+            outcome=CommandOutcome.SHUTDOWN,
+            invalidated_stop_epoch=self._stop_epoch,
+        )
         worker = self._worker
         if worker is not None and not worker.done():
             worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await worker
+
+        # STOP is admitted outside the ordinary worker so it can preempt an
+        # active command. It is still scheduler-owned and must settle before
+        # coordinator teardown disconnects the BLE link.
+        stop_tasks = tuple(task for _handle, task in self._active_stops.values())
+        if stop_tasks:
+            stop_drain = asyncio.gather(*stop_tasks, return_exceptions=True)
+            try:
+                await asyncio.shield(stop_drain)
+            except asyncio.CancelledError:
+                await stop_drain
+                raise
 
     def _replace_conflicts_locked(self, incoming: CommandHandle) -> bool:
         """Cancel conflicts and report whether the active handle was replaced."""
@@ -365,18 +544,24 @@ class DeviceCommandScheduler:
         resources: Collection[str],
         *,
         outcome: CommandOutcome,
+        invalidated_stop_epoch: int | None = None,
     ) -> None:
         active = self._active
         if active is not None and _resources_overlap(active.intent.resources, resources):
             active.context.cancel_reason = outcome
             active.context.cancel_event.set()
+            active.invalidated_stop_epoch = invalidated_stop_epoch
         for queued in tuple(self._queue):
             if not _resources_overlap(queued.intent.resources, resources):
                 continue
             self._queue.remove(queued)
             queued.context.cancel_reason = outcome
             queued.context.cancel_event.set()
-            self._finish_locked(queued, outcome)
+            self._finish_locked(
+                queued,
+                outcome,
+                invalidated_stop_epoch=invalidated_stop_epoch,
+            )
 
     async def _run(self) -> None:
         try:
@@ -433,8 +618,7 @@ class DeviceCommandScheduler:
                             self._active = None
                     continue
 
-                handle.state = CommandState.ACTIVE
-                handle.started_at = time.monotonic()
+                self._mark_started(handle)
                 token: Token[CommandContext | None] = _CURRENT_COMMAND_CONTEXT.set(handle.context)
                 try:
                     await handle.intent.operation(handle.context)
@@ -460,14 +644,10 @@ class DeviceCommandScheduler:
                     # scheduler worker task itself was externally cancelled.
                     if worker_cancelled:
                         raise
+                except TimeoutError as err:
+                    self._finish(handle, CommandOutcome.TIMEOUT, error=err)
                 except Exception as err:
-                    handle.state = CommandState.FAILED
-                    handle.outcome = CommandOutcome.FAILED
-                    handle.finished_at = time.monotonic()
-                    handle.context.active = False
-                    handle.ready.set()
-                    if not handle.future.done():
-                        handle.future.set_exception(err)
+                    self._finish(handle, CommandOutcome.FAILED, error=err)
                 else:
                     outcome = CommandOutcome.COMPLETED
                     if handle.context.cancel_event.is_set():
@@ -504,19 +684,81 @@ class DeviceCommandScheduler:
                     task.cancel()
             await asyncio.gather(commit_task, cancel_task, return_exceptions=True)
 
-    def _finish(self, handle: CommandHandle, outcome: CommandOutcome) -> None:
-        self._finish_locked(handle, outcome)
+    def _finish(
+        self,
+        handle: CommandHandle,
+        outcome: CommandOutcome,
+        *,
+        error: BaseException | None = None,
+        invalidated_stop_epoch: int | None = None,
+    ) -> None:
+        self._finish_locked(
+            handle,
+            outcome,
+            error=error,
+            invalidated_stop_epoch=invalidated_stop_epoch,
+        )
 
-    @staticmethod
-    def _finish_locked(handle: CommandHandle, outcome: CommandOutcome) -> None:
+    def _mark_started(self, handle: CommandHandle) -> None:
+        handle.state = CommandState.ACTIVE
+        handle.started_at = datetime.now(UTC)
+        handle.started_monotonic = time.monotonic()
+
+    def _finish_locked(
+        self,
+        handle: CommandHandle,
+        outcome: CommandOutcome,
+        *,
+        error: BaseException | None = None,
+        invalidated_stop_epoch: int | None = None,
+    ) -> None:
+        if handle.finished_at is not None:
+            return
+        if invalidated_stop_epoch is not None:
+            handle.invalidated_stop_epoch = invalidated_stop_epoch
+        finished_at = datetime.now(UTC)
+        finished_monotonic = time.monotonic()
         handle.context.active = False
         handle.outcome = outcome
-        handle.finished_at = time.monotonic()
+        handle.finished_at = finished_at
+        handle.finished_monotonic = finished_monotonic
         handle.state = (
             CommandState.COMPLETED
             if outcome is CommandOutcome.COMPLETED
-            else CommandState.CANCELLED
+            else (
+                CommandState.FAILED
+                if outcome in {CommandOutcome.FAILED, CommandOutcome.TIMEOUT}
+                else CommandState.CANCELLED
+            )
         )
         handle.ready.set()
+        started_monotonic = handle.started_monotonic
+        queue_finished_monotonic = started_monotonic or finished_monotonic
+        self._recent_records.append(
+            CommandRecord(
+                intent_id=handle.intent.intent_id,
+                kind=handle.intent.kind,
+                group_id=handle.intent.group_id,
+                resources=tuple(sorted(handle.intent.resources)),
+                scheduler_strategy=self.strategy_name,
+                stop_epoch=handle.context.admitted_stop_epoch,
+                invalidated_stop_epoch=handle.invalidated_stop_epoch,
+                admitted_at=handle.admitted_at,
+                started_at=handle.started_at,
+                finished_at=finished_at,
+                outcome=outcome,
+                queue_wait_seconds=round(
+                    queue_finished_monotonic - handle.admitted_monotonic, 3
+                ),
+                active_duration_seconds=(
+                    round(finished_monotonic - started_monotonic, 3)
+                    if started_monotonic is not None
+                    else None
+                ),
+            )
+        )
         if not handle.future.done():
-            handle.future.set_result(None)
+            if error is not None:
+                handle.future.set_exception(error)
+            else:
+                handle.future.set_result(None)

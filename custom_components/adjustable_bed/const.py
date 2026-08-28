@@ -2502,7 +2502,7 @@ def get_motor_pulse_defaults(
         return OCTO_STAR2_PULSE_DEFAULTS
 
     if bed_type is None:
-        return DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS
+        return (DEFAULT_MOTOR_PULSE_COUNT, DEFAULT_MOTOR_PULSE_DELAY_MS)
 
     return BED_MOTOR_PULSE_DEFAULTS.get(
         bed_type,

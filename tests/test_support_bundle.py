@@ -1147,6 +1147,60 @@ class TestBleDiagnosticsRunner:
 class TestSupportBundle:
     """Test support bundle orchestration."""
 
+    async def test_command_timing_uses_same_diagnostic_snapshot_as_trace(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        enable_custom_integrations,
+    ) -> None:
+        """Bundle timing and trace should come from one diagnostic snapshot."""
+        del enable_custom_integrations
+        captured_timing = {
+            "scheduler": {"recent_records": [{"intent_id": "captured"}]}
+        }
+        diagnostic_report = DiagnosticReport(
+            metadata={"version": "2.0"},
+            device={"address": mock_config_entry.data[CONF_ADDRESS]},
+            advertisement={},
+            advertisements_by_source=[],
+            detection={"bed_type": "linak", "supported_match": True},
+            gatt_services=[],
+            gatt_summary={"available": False, "service_count": 0},
+            device_information={},
+            notifications=[],
+            notification_summary={"total_notifications": 0},
+            adapter_details={},
+            connection_history={},
+            connection_attempt_details=[],
+            command_trace=[{"intent_id": "captured"}],
+            command_timing=captured_timing,
+            errors=[],
+        )
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+
+        with (
+            patch.object(
+                BLEDiagnosticRunner,
+                "run_diagnostics",
+                new=AsyncMock(return_value=diagnostic_report),
+            ),
+            patch(
+                "custom_components.adjustable_bed.support_bundle.bluetooth.async_current_scanners",
+                return_value=[],
+            ),
+        ):
+            report = await generate_support_bundle(
+                hass,
+                address=mock_config_entry.data[CONF_ADDRESS],
+                capture_duration=0,
+                include_logs=False,
+                coordinator=coordinator,
+                entry=mock_config_entry,
+            )
+
+        assert report["command_timing"] == captured_timing
+        assert report["command_trace"] == diagnostic_report.command_trace
+
     async def test_nearby_device_inventory_ranks_deduplicates_and_caps(
         self,
         hass: HomeAssistant,
@@ -1262,7 +1316,7 @@ class TestSupportBundle:
             )
 
         assert report["target"]["mode"] == "target_address"
-        assert report["metadata"]["report_version"] == "2.2"
+        assert report["metadata"]["report_version"] == "2.3"
         assert report["integration"]["configured_device"] is False
         assert report["integration"]["kaidi_product_id"] is None
         assert report["integration"]["kaidi_sofa_acu_no"] is None
@@ -1412,7 +1466,7 @@ class TestSupportBundle:
             )
 
         pairing = report["pairing"]
-        assert report["metadata"]["report_version"] == "2.2"
+        assert report["metadata"]["report_version"] == "2.3"
         assert pairing["required"] is True
         assert pairing["connection_gated_by_bond"] is True
         assert pairing["persisted_bond_marker"] is True
@@ -1633,7 +1687,25 @@ class TestSupportBundle:
             await active_controller.write_command(b"\x03\x04")
 
         await coordinator.async_execute_controller_command(_user_command)
-        assert coordinator.command_trace[-1]["operation_name"] == "command"
+        scheduled_trace = coordinator.command_trace[-1]
+        terminal_record = coordinator._command_scheduler.recent_records[-1].as_dict()
+        assert scheduled_trace["operation_name"] == "command"
+        for key in (
+            "intent_id",
+            "kind",
+            "group_id",
+            "resources",
+            "scheduler_strategy",
+            "stop_epoch",
+        ):
+            assert scheduled_trace[key] == terminal_record[key]
+
+        command_timing = coordinator.command_timing
+        assert "last_command_start" not in command_timing
+        assert "last_command_end" not in command_timing
+        assert command_timing["protocol_operation_timing"]["last_started_at"]
+        assert command_timing["protocol_operation_timing"]["last_finished_at"]
+        assert command_timing["scheduler"]["recent_records"][-1] == terminal_record
 
 
 class TestSupportBundleLoggingWarning:

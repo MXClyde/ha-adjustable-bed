@@ -77,6 +77,7 @@ async def _async_paired_diagnostics(
                 else None
             ),
             "position_data": getattr(child, "position_data", None),
+            "command_timing": child.command_timing,
             "config": dict(child.entry.data),
         }
 
