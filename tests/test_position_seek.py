@@ -267,6 +267,27 @@ class TestSeekTermination:
         # Nothing was commanded, so no cleanup STOP goes on the wire either.
         stop.assert_not_awaited()
 
+    async def test_cancel_during_start_transition_never_starts_motion(self) -> None:
+        cancel_event = asyncio.Event()
+
+        class SettlingPolicy(PositionSeekPolicy):
+            async def async_on_seek_start(self, transition, stop) -> None:
+                # A STOP/replacement lands while the policy settles the axis.
+                cancel_event.set()
+
+        policy = SettlingPolicy(make_controller_mock())
+        runner, issue_step, stop = make_runner(
+            policy=policy, target=20.0, readings=[10.0], cancel_event=cancel_event
+        )
+
+        result = await runner.async_run(0.0)
+
+        assert result.outcome is SeekOutcome.CANCELLED
+        issue_step.assert_not_awaited()
+        # The hook may have touched the wire, so cleanup still sends STOP for
+        # explicit-stop protocols.
+        stop.assert_awaited_once_with()
+
     async def test_stop_mid_seek_cancels(self) -> None:
         cancel_event = asyncio.Event()
         policy = make_policy()
