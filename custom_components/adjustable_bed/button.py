@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -30,6 +30,12 @@ if TYPE_CHECKING:
     from .beds.base import BedController, MotorControlSpec
 
 _LOGGER = logging.getLogger(__name__)
+
+_MASSAGE_INTENSITY_BUTTON_KEY_MIGRATIONS = (
+    ("massage_intensity_1", "massage_intensity_level_1"),
+    ("massage_intensity_2", "massage_intensity_level_2"),
+    ("massage_intensity_3", "massage_intensity_level_3"),
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -392,8 +398,8 @@ BUTTON_DESCRIPTIONS: tuple[AdjustableBedButtonEntityDescription, ...] = (
         required_capability="supports_massage_wave_direction_control",
     ),
     AdjustableBedButtonEntityDescription(
-        key="massage_intensity_1",
-        translation_key="massage_intensity_1",
+        key="massage_intensity_level_1",
+        translation_key="massage_intensity_level_1",
         icon="mdi:numeric-1-circle",
         requires_massage=True,
         cancel_movement=True,
@@ -401,8 +407,8 @@ BUTTON_DESCRIPTIONS: tuple[AdjustableBedButtonEntityDescription, ...] = (
         required_capability="supports_massage_intensity_preset_control",
     ),
     AdjustableBedButtonEntityDescription(
-        key="massage_intensity_2",
-        translation_key="massage_intensity_2",
+        key="massage_intensity_level_2",
+        translation_key="massage_intensity_level_2",
         icon="mdi:numeric-2-circle",
         requires_massage=True,
         cancel_movement=True,
@@ -410,8 +416,8 @@ BUTTON_DESCRIPTIONS: tuple[AdjustableBedButtonEntityDescription, ...] = (
         required_capability="supports_massage_intensity_preset_control",
     ),
     AdjustableBedButtonEntityDescription(
-        key="massage_intensity_3",
-        translation_key="massage_intensity_3",
+        key="massage_intensity_level_3",
+        translation_key="massage_intensity_level_3",
         icon="mdi:numeric-3-circle",
         requires_massage=True,
         cancel_movement=True,
@@ -585,6 +591,9 @@ async def async_setup_entry(
     if isinstance(coordinator, PairedBedCoordinator):
         entities: list[ButtonEntity] = []
         children = list(coordinator.children.values())
+        _async_migrate_massage_intensity_button_unique_ids(
+            hass, coordinator, key_suffix="_both"
+        )
         for side, child in coordinator.children.items():
             entities.extend(
                 _button_entities_for(
@@ -618,6 +627,7 @@ def _button_entities_for(
         has_massage = True
 
     if controller is not None:
+        _async_migrate_massage_intensity_button_unique_ids(hass, coordinator)
         _async_remove_stale_button_entities(hass, coordinator, controller, has_massage)
 
     entities: list[ButtonEntity] = []
@@ -714,6 +724,32 @@ def _combined_motor_buttons_for(
     return entities
 
 
+def _async_migrate_massage_intensity_button_unique_ids(
+    hass: HomeAssistant,
+    coordinator: AdjustableBedCoordinator | PairedBedCoordinator,
+    *,
+    key_suffix: str = "",
+) -> None:
+    """Restore established intensity IDs while preserving 3.6 entity IDs."""
+    registry = er.async_get(hass)
+    for old_key, new_key in _MASSAGE_INTENSITY_BUTTON_KEY_MIGRATIONS:
+        old_unique_id = coordinator.entity_unique_id(f"{old_key}{key_suffix}")
+        old_entity_id = registry.async_get_entity_id(
+            "button",
+            DOMAIN,
+            old_unique_id,
+        )
+        if old_entity_id is None:
+            continue
+
+        new_unique_id = coordinator.entity_unique_id(f"{new_key}{key_suffix}")
+        if registry.async_get_entity_id("button", DOMAIN, new_unique_id) is not None:
+            registry.async_remove(old_entity_id)
+            continue
+
+        registry.async_update_entity(old_entity_id, new_unique_id=new_unique_id)
+
+
 def _should_add_button(
     description: AdjustableBedButtonEntityDescription,
     controller: BedController | None,
@@ -762,6 +798,24 @@ def _should_add_button(
             return False
 
     return True
+
+
+def _button_translation_key(
+    description: AdjustableBedButtonEntityDescription,
+    controllers: Iterable[BedController | None],
+) -> str:
+    """Return the action label shared by every participating controller."""
+    resolved_controllers = tuple(controllers)
+    if (
+        description.key == "massage_mode_step"
+        and resolved_controllers
+        and all(
+            controller is not None and controller.massage_mode_step_is_timer
+            for controller in resolved_controllers
+        )
+    ):
+        return "massage_timer_step"
+    return description.translation_key or description.key
 
 
 def _async_remove_stale_button_entities(
@@ -819,9 +873,11 @@ class AdjustableBedButton(AdjustableBedEntity, ButtonEntity):
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = coordinator.entity_unique_id(description.key)
-        self._attr_translation_key = coordinator.entity_translation_key(
-            description.translation_key or description.key
+        translation_key = _button_translation_key(
+            description,
+            (coordinator.capability_controller,),
         )
+        self._attr_translation_key = coordinator.entity_translation_key(translation_key)
 
         # Beds that name their memory slots (Octo CAP_MEMINFO reports e.g.
         # Zero-G or Anti-Snore) are far more useful with that name than with
@@ -941,10 +997,17 @@ class PairedBedCombinedButton(ButtonEntity):
         """Initialize the combined button."""
         self._coordinator = coordinator
         self.entity_description = description
+        base_translation_key = _button_translation_key(
+            description,
+            (
+                child.capability_controller
+                for child in coordinator.children.values()
+            ),
+        )
         self._attr_translation_key = (
-            f"{description.translation_key}_both"
+            f"{base_translation_key}_both"
             if isinstance(coordinator, SingleAddressPairedCoordinator)
-            else description.translation_key
+            else base_translation_key
         )
         self._attr_unique_id = _paired_entity_unique_id(
             coordinator, f"{description.key}_both"

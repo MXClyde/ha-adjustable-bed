@@ -772,9 +772,9 @@ class KeesonController(BedController):
         return self._variant == KEESON_VARIANT_SINO
 
     @property
-    def supports_massage_mode_step_control(self) -> bool:
-        """Hide the ambiguous mode-step control when base wave controls exist."""
-        return self._variant != KEESON_VARIANT_BASE
+    def massage_mode_step_is_timer(self) -> bool:
+        """Return True when the shared action sends the Keeson timer-step command."""
+        return self._variant != KEESON_VARIANT_SINO
 
     @property
     def supports_massage_wave_direction_control(self) -> bool:
@@ -1781,10 +1781,8 @@ class KeesonController(BedController):
             await self._write_single_shot(self._build_command(KeesonCommands.MASSAGE_FOOT_DOWN))
 
     async def massage_mode_step(self) -> None:
-        """Step through massage wave patterns."""
-        if self._variant == KEESON_VARIANT_BASE:
-            await self.massage_wave_next()
-        elif self._variant == KEESON_VARIANT_SINO:
+        """Step the profile-specific massage timer or mode."""
+        if self._variant == KEESON_VARIANT_SINO:
             self._wave_massage = (self._wave_massage % 10) + 1
             await self.write_command(
                 self._build_command(SinoCommands.MASSAGE_HEAD_WAVE_BASE + self._wave_massage),

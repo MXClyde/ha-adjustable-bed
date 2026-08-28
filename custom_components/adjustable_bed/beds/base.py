@@ -1182,6 +1182,11 @@ class BedController(ABC):
         return type(self).massage_mode_step is not BedController.massage_mode_step
 
     @property
+    def massage_mode_step_is_timer(self) -> bool:
+        """Return True when the shared mode-step action advances a timer."""
+        return False
+
+    @property
     def supports_massage_wave_direction_control(self) -> bool:
         """Return True if the controller exposes next/previous wave controls."""
         return False
