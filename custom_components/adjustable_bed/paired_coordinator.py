@@ -29,6 +29,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 
 from .command_scheduler import (
     CommandHandle,
+    CommandKind,
     CommandOutcome,
     PreparedCommandInvalidated,
     command_resources,
@@ -1343,6 +1344,7 @@ class SingleAddressSideCoordinator:
             stop,
             cancel_running=False,
             resources=self._scoped_command_resources(),
+            kind=CommandKind.STOP,
         )
 
 

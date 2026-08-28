@@ -8,7 +8,9 @@ import pytest
 
 from custom_components.adjustable_bed.command_scheduler import (
     ALL_COMMAND_RESOURCES,
+    MAX_RECENT_COMMAND_RECORDS,
     CommandIntent,
+    CommandKind,
     CommandOutcome,
     CommandState,
     DeviceCommandScheduler,
@@ -153,6 +155,10 @@ async def test_same_resource_replaces_only_after_active_cleanup() -> None:
     cleanup_release.set()
     await asyncio.gather(first_task, replacement_task)
     assert events == ["first:start", "first:cleanup", "first:done", "replacement"]
+    assert [record.outcome for record in scheduler.recent_records] == [
+        CommandOutcome.REPLACED,
+        CommandOutcome.COMPLETED,
+    ]
 
 
 async def test_ticket_cancelled_error_does_not_shutdown_replacement() -> None:
@@ -223,6 +229,10 @@ async def test_stop_epoch_invalidates_active_and_queued_work() -> None:
     assert active_handle.outcome is CommandOutcome.STOPPED
     assert queued_handle.outcome is CommandOutcome.STOPPED
     assert not queued_ran
+    assert {
+        (record.outcome, record.invalidated_stop_epoch)
+        for record in scheduler.recent_records
+    } == {(CommandOutcome.STOPPED, 1)}
 
 
 async def test_command_admitted_during_stop_waits_for_safety_lane() -> None:
@@ -336,6 +346,9 @@ async def test_caller_cancellation_drops_queued_one_shot() -> None:
     with pytest.raises(asyncio.CancelledError):
         await queued_task
 
+    assert scheduler.recent_records[-1].outcome is CommandOutcome.CALLER_CANCELLED
+    assert scheduler.recent_records[-1].started_at is None
+
     release_first.set()
     await first_task
     assert not queued_ran
@@ -383,3 +396,168 @@ async def test_context_copied_to_background_task_expires_with_command() -> None:
     await asyncio.sleep(0)
 
     assert background_context is None
+
+
+async def test_completed_record_contains_shared_diagnostic_metadata() -> None:
+    scheduler = DeviceCommandScheduler("record")
+
+    async def operation(_context) -> None:
+        await asyncio.sleep(0)
+
+    handle = await scheduler.enqueue(
+        CommandIntent(
+            operation,
+            resources=command_resources("motor:back", "motor:legs"),
+            kind=CommandKind.GROUP,
+            group_id="group-1",
+            intent_id="intent-1",
+        )
+    )
+    await handle.future
+
+    record = scheduler.recent_records[-1]
+    assert record.intent_id == "intent-1"
+    assert record.kind is CommandKind.GROUP
+    assert record.group_id == "group-1"
+    assert record.resources == ("motor:back", "motor:legs")
+    assert record.scheduler_strategy == "serial_opaque"
+    assert record.stop_epoch == 0
+    assert record.invalidated_stop_epoch is None
+    assert record.started_at is not None
+    assert record.admitted_at <= record.started_at <= record.finished_at
+    assert record.outcome is CommandOutcome.COMPLETED
+    assert record.queue_wait_seconds >= 0
+    assert record.active_duration_seconds is not None
+    assert record.active_duration_seconds >= 0
+    recent_diagnostics = scheduler.diagnostics["recent_records"]
+    assert isinstance(recent_diagnostics, list)
+    assert recent_diagnostics[-1] == record.as_dict()
+
+
+async def test_recent_record_history_is_bounded() -> None:
+    scheduler = DeviceCommandScheduler("bounded")
+
+    async def operation(_context) -> None:
+        return
+
+    for index in range(MAX_RECENT_COMMAND_RECORDS + 3):
+        await scheduler.execute(
+            CommandIntent(operation, intent_id=f"intent-{index}")
+        )
+
+    assert len(scheduler.recent_records) == MAX_RECENT_COMMAND_RECORDS
+    assert scheduler.recent_records[0].intent_id == "intent-3"
+
+
+async def test_admitted_stop_records_stop_intent_and_releases_barrier() -> None:
+    scheduler = DeviceCommandScheduler("stop-record")
+    seen_context = None
+
+    async def stop(context) -> None:
+        nonlocal seen_context
+        seen_context = current_command_context()
+        assert seen_context is context
+
+    stop_task = scheduler.admit_stop(
+        stop,
+        command_resources("motor:back"),
+        group_id="stop-group",
+    )
+    assert not scheduler._stop_barrier.is_set()
+
+    await stop_task
+
+    record = scheduler.recent_records[-1]
+    assert record.kind is CommandKind.STOP
+    assert record.group_id == "stop-group"
+    assert record.resources == ("motor:back",)
+    assert record.stop_epoch == 1
+    assert record.outcome is CommandOutcome.COMPLETED
+    assert scheduler._stop_barrier.is_set()
+    assert seen_context is not None
+
+
+async def test_shutdown_drains_stop_admitted_before_its_task_starts() -> None:
+    scheduler = DeviceCommandScheduler("stop-shutdown")
+    stop_started = asyncio.Event()
+    release_stop = asyncio.Event()
+
+    async def stop(_context) -> None:
+        assert scheduler._closed
+        stop_started.set()
+        await release_stop.wait()
+
+    stop_task = scheduler.admit_stop(stop)
+
+    async def release_after_start() -> None:
+        await stop_started.wait()
+        assert not stop_task.done()
+        release_stop.set()
+
+    release_task = asyncio.create_task(release_after_start())
+    await scheduler.async_shutdown()
+    await release_task
+
+    assert stop_task.done()
+    assert scheduler.recent_records[-1].outcome is CommandOutcome.COMPLETED
+
+
+@pytest.mark.parametrize(
+    ("error", "outcome"),
+    [
+        (TimeoutError("too slow"), CommandOutcome.TIMEOUT),
+        (RuntimeError("broken"), CommandOutcome.FAILED),
+    ],
+)
+async def test_operation_errors_have_typed_terminal_outcomes(
+    error: Exception,
+    outcome: CommandOutcome,
+) -> None:
+    scheduler = DeviceCommandScheduler("error")
+
+    async def operation(_context) -> None:
+        raise error
+
+    with pytest.raises(type(error), match=str(error)):
+        await scheduler.execute(CommandIntent(operation))
+
+    record = scheduler.recent_records[-1]
+    assert record.outcome is outcome
+    assert record.active_duration_seconds is not None
+
+
+async def test_prepared_group_abort_has_terminal_record() -> None:
+    scheduler = DeviceCommandScheduler("group-abort")
+
+    async def operation(_context) -> None:
+        pytest.fail("aborted prepared operation must not run")
+
+    handle = await scheduler.enqueue(
+        CommandIntent(operation, kind=CommandKind.GROUP, group_id="group-abort"),
+        prepared=True,
+    )
+    await scheduler.wait_ready(handle)
+    await scheduler.cancel(handle, CommandOutcome.GROUP_ABORTED)
+
+    record = scheduler.recent_records[-1]
+    assert record.outcome is CommandOutcome.GROUP_ABORTED
+    assert record.group_id == "group-abort"
+    assert record.started_at is None
+
+
+async def test_shutdown_records_active_intent_outcome() -> None:
+    scheduler = DeviceCommandScheduler("shutdown")
+    started = asyncio.Event()
+
+    async def operation(_context) -> None:
+        started.set()
+        await asyncio.Future()
+
+    task = asyncio.create_task(scheduler.execute(CommandIntent(operation)))
+    await started.wait()
+    await scheduler.async_shutdown()
+    await task
+
+    record = scheduler.recent_records[-1]
+    assert record.outcome is CommandOutcome.SHUTDOWN
+    assert record.invalidated_stop_epoch == 1

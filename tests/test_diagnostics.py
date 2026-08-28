@@ -217,6 +217,41 @@ class TestDiagnosticsOutput:
         assert controller_info["class"] == "LinakController"
         assert "characteristic_uuid" in controller_info
 
+    async def test_diagnostics_include_scheduler_terminal_records(
+        self,
+        hass: HomeAssistant,
+        mock_diagnostics_config_entry,
+        mock_coordinator_connected,  # noqa: ARG002
+        enable_custom_integrations,  # noqa: ARG002
+    ):
+        """Command diagnostics should come from scheduler admission."""
+        from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+
+        coordinator = AdjustableBedCoordinator(hass, mock_diagnostics_config_entry)
+        await coordinator.async_connect()
+
+        async def command(_controller) -> None:
+            return
+
+        await coordinator.async_execute_controller_command(
+            command,
+            resource="motor:back",
+        )
+        hass.data.setdefault(DOMAIN, {})
+        hass.data[DOMAIN][mock_diagnostics_config_entry.entry_id] = coordinator
+
+        result = await async_get_config_entry_diagnostics(
+            hass, mock_diagnostics_config_entry
+        )
+
+        timing = result["coordinator"]["command_timing"]
+        assert "last_command_start" not in timing
+        assert timing["protocol_operation_timing"]["last_started_at"]
+        record = timing["scheduler"]["recent_records"][-1]
+        assert record["kind"] == "command"
+        assert record["resources"] == ["motor:back"]
+        assert record["outcome"] == "completed"
+
     async def test_diagnostics_uses_non_connectable_advertisement_fallback(
         self,
         hass: HomeAssistant,
