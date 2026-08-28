@@ -58,7 +58,7 @@ interface BedGraphicState extends DualBedGraphicSide {
   lowerMotor: MotorEntity;
 }
 
-type ConnectionStatus = "connected" | "idle" | "disconnected";
+type ConnectionStatus = "connected" | "connecting" | "idle" | "disconnected";
 type SynchronizeSide = "left" | "right";
 
 const SYNCHRONIZABLE_MOTORS = new Set(["back", "legs", "head", "feet"]);
@@ -353,6 +353,8 @@ export class AdjustableBedCard extends LitElement {
     const state = this._state(bed.connectivity);
     return state?.state === "on"
       ? "connected"
+      : state?.attributes?.state_detail === "connecting"
+        ? "connecting"
       : state?.attributes?.state_detail === "idle"
         ? "idle"
         : "disconnected";
@@ -603,6 +605,8 @@ export class AdjustableBedCard extends LitElement {
               <ha-icon
                 icon=${status === "connected"
                   ? "mdi:bluetooth-connect"
+                  : status === "connecting"
+                    ? "mdi:bluetooth-transfer"
                   : status === "idle"
                     ? "mdi:bluetooth"
                     : "mdi:bluetooth-off"}
@@ -664,6 +668,7 @@ export class AdjustableBedCard extends LitElement {
     const conn = this._connectionStatus(bed);
     const CONN_META = {
       connected: { cls: "ok", icon: "mdi:bluetooth-connect", key: "status.connected" },
+      connecting: { cls: "connecting", icon: "mdi:bluetooth-transfer", key: "status.connecting" },
       idle: { cls: "idle", icon: "mdi:bluetooth", key: "status.idle" },
       disconnected: { cls: "off", icon: "mdi:bluetooth-off", key: "status.disconnected" },
     } as const;
@@ -1381,6 +1386,9 @@ export class AdjustableBedCard extends LitElement {
     .conn.ok {
       color: var(--success-color, var(--state-active-color, #43a047));
     }
+    .conn.connecting {
+      color: var(--warning-color, var(--state-active-color, #ff9800));
+    }
     .conn.idle {
       color: var(--info-color, var(--secondary-text-color));
     }
@@ -1451,6 +1459,9 @@ export class AdjustableBedCard extends LitElement {
     }
     .connection-dot.connected {
       background: var(--success-color, var(--state-active-color, #43a047));
+    }
+    .connection-dot.connecting {
+      background: var(--warning-color, var(--state-active-color, #ff9800));
     }
     .connection-dot.idle {
       background: var(--info-color, var(--secondary-text-color));
@@ -1980,6 +1991,9 @@ export class AdjustableBedCard extends LitElement {
     }
     .bluetooth-status.connected ha-icon {
       color: var(--success-color, var(--state-active-color, #43a047));
+    }
+    .bluetooth-status.connecting ha-icon {
+      color: var(--warning-color, var(--state-active-color, #ff9800));
     }
     .bluetooth-status.idle ha-icon {
       color: var(--info-color, var(--secondary-text-color));
