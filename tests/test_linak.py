@@ -362,6 +362,9 @@ class TestLinakController:
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         await coordinator.async_connect()
         _mark_session_ready(coordinator)
+        data_without_snapshot = dict(mock_config_entry.data)
+        data_without_snapshot.pop("capabilities", None)
+        hass.config_entries.async_update_entry(mock_config_entry, data=data_without_snapshot)
         coordinator._handle_position_update("back", 10.0)
 
         async def finish_step(
@@ -489,6 +492,7 @@ class TestLinakController:
             LinakCommands.MOVE_STOP,
         ]
         assert coordinator._seek_outcomes["back"]["outcome"] == "reached_target"
+        assert mock_config_entry.data["capabilities"]["linak"]["discovery_complete"] is True
 
     async def test_lower_endpoint_requires_two_stalled_checks_and_releases_motor(
         self,
@@ -871,7 +875,9 @@ class TestLinakCorpusProfiles:
         assert coordinator.controller._capability_discovery_deferred is True
         assert _written_commands(mock_bleak_client) == []
 
-        await coordinator.controller.write_command(LinakCommands.MOVE_HEAD_UP)
+        await coordinator.async_execute_controller_command(
+            lambda controller: controller.write_command(LinakCommands.MOVE_HEAD_UP)
+        )
 
         assert mask_attempts == 2
         assert coordinator.controller.protocol_diagnostics["model_variant"] == "advanced"
@@ -879,6 +885,7 @@ class TestLinakCorpusProfiles:
         assert coordinator.controller.passive_position_reconciliation_interval == pytest.approx(
             120.0
         )
+        assert mock_config_entry.data["capabilities"]["linak"]["actuator_mask"] == 0xC0
         assert _written_commands(mock_bleak_client) == [
             LinakCommands.MOVE_STOP,
             LinakCommands.MOVE_HEAD_UP,
@@ -999,13 +1006,18 @@ class TestLinakCorpusProfiles:
             assert LINAK_TIMER_CHAR_UUID in controller._deferred_protocol_notifications
             assert _written_commands(mock_bleak_client) == []
 
-            await controller.write_command(LinakCommands.MOVE_HEAD_UP)
+            await coordinator.async_execute_controller_command(
+                lambda live_controller: live_controller.write_command(
+                    LinakCommands.MOVE_HEAD_UP
+                )
+            )
 
         assert timer_attempts == 2
         assert LINAK_TIMER_CHAR_UUID in controller._protocol_notification_uuids
         assert not controller._deferred_protocol_notifications
         assert controller.supports_alarm is True
         assert controller.protocol_diagnostics["model_variant"] == "advanced_with_alarm"
+        assert mock_config_entry.data["capabilities"]["linak"]["timer_supported"] is True
         assert _written_commands(mock_bleak_client) == [
             LinakCommands.MOVE_STOP,
             LinakCommands.MOVE_HEAD_UP,

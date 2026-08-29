@@ -4325,6 +4325,13 @@ class AdjustableBedCoordinator:
         operation_name: str,
     ) -> None:
         """Handle disconnect timer reset or disconnect after an operation completes."""
+        if self._bed_type == BED_TYPE_LINAK and not self._command_scheduler.has_pending:
+            # A cold Linak link can defer its actuator mask and timer channel
+            # until the first command. Persist the now-resolved snapshot after
+            # that command so the entry reload reconciles its capability-gated
+            # entities without interrupting a queued operation.
+            self._backfill_linak_snapshot()
+
         if self._client is None or not self._client.is_connected:
             return
 
@@ -5483,6 +5490,11 @@ class AdjustableBedCoordinator:
                 self._record_seek_result(result)
 
             finally:
+                if self._bed_type == BED_TYPE_LINAK and not self._command_scheduler.has_pending:
+                    # Seeks own their lock lifecycle instead of going through
+                    # _async_finish_controller_operation(), so reconcile a
+                    # deferred Linak snapshot here as well.
+                    self._backfill_linak_snapshot()
                 if self._client is not None and self._client.is_connected:
                     if (
                         self._disconnect_after_operation_enabled()

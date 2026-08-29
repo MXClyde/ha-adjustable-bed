@@ -17,6 +17,7 @@ import {
   type DualBedGraphicSide,
   renderBedGraphic,
   renderDualBedGraphic,
+  selectBedGraphicMotors,
 } from "./bed-graphic";
 import {
   PLATFORM,
@@ -720,14 +721,9 @@ export class AdjustableBedCard extends LitElement {
       withPosition.some((motor) => this._angle(motor) === undefined)
     )
       return undefined;
-    const upper =
-      withPosition.find((m) => m.key === "back") ??
-      withPosition.find((m) => m.key === "head") ??
-      withPosition[0];
-    const lower =
-      withPosition.find((m) => m.key === "legs") ??
-      withPosition.find((m) => m.key === "feet") ??
-      withPosition[withPosition.length - 1];
+    const graphicMotors = selectBedGraphicMotors(withPosition);
+    if (!graphicMotors) return undefined;
+    const { upper, lower } = graphicMotors;
     const moving = bed.motors.some((m) => {
       const s = m.cover ? this._state(m.cover)?.state : undefined;
       return s === "opening" || s === "closing";
