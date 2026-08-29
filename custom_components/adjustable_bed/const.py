@@ -529,6 +529,8 @@ LEGGETT_GEN2_MANUFACTURER_PREFIXES: Final = (b"XP", b"CP")
 # Okin variant (requires pairing)
 LEGGETT_OKIN_SERVICE_UUID: Final = "62741523-52f9-8864-b1ab-3b3a8d65950b"
 LEGGETT_OKIN_CHAR_UUID: Final = "62741525-52f9-8864-b1ab-3b3a8d65950b"
+LEGGETT_OKIN_NOTIFY_CHAR_UUID: Final = "62741625-52f9-8864-b1ab-3b3a8d65950b"
+LEGGETT_OKIN_REVISION_SELECTOR_CHAR_UUID: Final = "00001721-0000-1000-8000-00805f9b34fb"
 
 # Leggett & Platt Richmat variant (WiLinke protocol, discrete massage commands)
 # Uses same service/char as Richmat WiLinke but with L&P-specific features

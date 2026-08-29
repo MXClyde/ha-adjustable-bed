@@ -1162,6 +1162,16 @@ class BedController(ABC):
         return False
 
     @property
+    def supports_control_mode_configuration(self) -> bool:
+        """Return True if the bed can switch between press-control modes."""
+        return (
+            type(self).set_control_mode_press_and_hold
+            is not BedController.set_control_mode_press_and_hold
+            and type(self).set_control_mode_press_and_release
+            is not BedController.set_control_mode_press_and_release
+        )
+
+    @property
     def has_discrete_motor_control(self) -> bool:
         """Return True if bed uses discrete (button-press) motor control.
 
@@ -1632,6 +1642,14 @@ class BedController(ABC):
             NotImplementedError: If the bed doesn't support this preset
         """
         raise NotImplementedError("Yoga preset not supported on this bed")
+
+    async def set_control_mode_press_and_hold(self) -> None:
+        """Require controls to remain pressed while their action runs."""
+        raise NotImplementedError("Control mode configuration not supported on this bed")
+
+    async def set_control_mode_press_and_release(self) -> None:
+        """Allow controls to continue their action after they are released."""
+        raise NotImplementedError("Control mode configuration not supported on this bed")
 
     # Feature methods (may not be available on all beds)
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from bleak.exc import BleakError
@@ -17,7 +19,9 @@ from custom_components.adjustable_bed.beds.leggett_gen2 import (
 from custom_components.adjustable_bed.beds.leggett_okin import (
     LeggettOkinCommands,
     LeggettOkinController,
+    parse_leggett_okin_feedback,
 )
+from custom_components.adjustable_bed.button import BUTTON_DESCRIPTIONS, _should_add_button
 from custom_components.adjustable_bed.const import (
     BED_TYPE_LEGGETT_GEN2,
     BED_TYPE_LEGGETT_PLATT,
@@ -30,10 +34,16 @@ from custom_components.adjustable_bed.const import (
     CONF_PROTOCOL_VARIANT,
     DOMAIN,
     LEGGETT_GEN2_WRITE_CHAR_UUID,
+    LEGGETT_OKIN_CHAR_UUID,
+    LEGGETT_OKIN_NOTIFY_CHAR_UUID,
     LEGGETT_OKIN_PULSE_DEFAULTS,
+    LEGGETT_OKIN_REVISION_SELECTOR_CHAR_UUID,
+    LEGGETT_OKIN_SERVICE_UUID,
     LEGGETT_VARIANT_GEN2,
     LEGGETT_VARIANT_MLRM,
     LEGGETT_VARIANT_OKIN,
+    OKIN_SMART_REMOTE_CSS_NOTIFY_CHAR_UUID,
+    OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID,
     VARIANT_AUTO,
     connection_gated_by_bond,
     requires_pairing,
@@ -130,6 +140,47 @@ class TestLeggettOkinController:
         # Command 0x1 in big-endian
         assert command[2:] == bytes([0x00, 0x00, 0x00, 0x01])
 
+    @staticmethod
+    def _controller_with_characteristics(*uuids: str) -> LeggettOkinController:
+        coordinator = MagicMock()
+        coordinator.client = SimpleNamespace(
+            is_connected=True,
+            services=[
+                SimpleNamespace(
+                    uuid=LEGGETT_OKIN_SERVICE_UUID,
+                    characteristics=[SimpleNamespace(uuid=uuid) for uuid in uuids]
+                )
+            ],
+        )
+        coordinator.cancel_command = asyncio.Event()
+        coordinator.address = "AA:BB:CC:DD:EE:FF"
+        return LeggettOkinController(coordinator)
+
+    def test_revision_zero_framing_selected_when_selector_is_absent(self):
+        """The write characteristic without 1721 selects the checksummed R0 frame."""
+        controller = self._controller_with_characteristics(LEGGETT_OKIN_CHAR_UUID)
+
+        assert controller._build_command(LeggettOkinCommands.MOTOR_HEAD_UP) == bytes.fromhex(
+            "e5fe160000000105"
+        )
+        assert controller._build_command(0) == bytes.fromhex("e5fe160000000006")
+        assert controller._build_command(
+            LeggettOkinCommands.CONTROL_MODE_PRESS_AND_HOLD
+        ) == bytes.fromhex("e5fe1608010000fd")
+        assert controller.protocol_diagnostics["protocol_revision"] == 0
+
+    def test_revision_one_framing_selected_when_selector_is_present(self):
+        """Characteristic 1721 selects the established six-byte R1 frame."""
+        controller = self._controller_with_characteristics(
+            LEGGETT_OKIN_CHAR_UUID,
+            LEGGETT_OKIN_REVISION_SELECTOR_CHAR_UUID,
+        )
+
+        assert controller._build_command(LeggettOkinCommands.MOTOR_HEAD_UP) == bytes.fromhex(
+            "040200000001"
+        )
+        assert controller.protocol_diagnostics["protocol_revision"] == 1
+
     async def test_massage_off_is_not_advertised(self):
         """Massage power is a toggle, so no massage-off button should be offered.
 
@@ -140,6 +191,54 @@ class TestLeggettOkinController:
         controller = LeggettOkinController(MagicMock())
 
         assert controller.supports_massage_off_control is False
+
+    async def test_favorites_match_the_prodigy_ce_model(self):
+        """Only Favorite 1/2/3 are editable; the third wire slot is fixed Snore."""
+        controller = LeggettOkinController(MagicMock())
+        controller.write_command = AsyncMock()
+
+        assert controller.supports_preset_zero_g is False
+        assert controller.memory_slot_names == (
+            "Favorite 1",
+            "Favorite 2",
+            "Snore",
+            "Favorite 3",
+        )
+        assert [controller.is_memory_slot_programmable(slot) for slot in range(1, 5)] == [
+            True,
+            True,
+            False,
+            True,
+        ]
+
+        await controller.program_memory(3)
+
+        controller.write_command.assert_not_awaited()
+
+        descriptions = {description.key: description for description in BUTTON_DESCRIPTIONS}
+        assert not _should_add_button(descriptions["preset_zero_g"], controller, True)
+        assert not _should_add_button(descriptions["program_memory_3"], controller, True)
+        assert _should_add_button(
+            descriptions["control_mode_press_and_hold"], controller, True
+        )
+        assert _should_add_button(
+            descriptions["control_mode_press_and_release"], controller, True
+        )
+
+    async def test_massage_wave_mode_is_advertised_and_sends_release(self):
+        """Expose the proven wave keycode through the shared mode-step entity."""
+        controller = LeggettOkinController(MagicMock())
+        controller.write_command = AsyncMock()
+
+        assert controller.supports_massage_mode_step_control is True
+
+        await controller.massage_mode_step()
+
+        wave, release = controller.write_command.await_args_list
+        assert wave.args == (bytes.fromhex("040210000000"),)
+        assert release.args == (bytes.fromhex("040200000000"),)
+        assert release.kwargs["repeat_count"] == 4
+        assert release.kwargs["cancel_event"].is_set() is False
 
     async def test_write_stream_is_unconfirmed_and_wall_clock_paced(self):
         """CU170 streams must not add a confirmed-write RTT to every gap."""
@@ -245,9 +344,94 @@ class TestLeggettOkinController:
             LeggettOkinCommands.PRESET_MEMORY_2,
             LeggettOkinCommands.PRESET_MEMORY_3,
             LeggettOkinCommands.PRESET_MEMORY_4,
-            LeggettOkinCommands.PRESET_ZERO_G,
             LeggettOkinCommands.PRESET_ANTI_SNORE,
         }
+
+    @pytest.mark.parametrize(
+        ("method_name", "command_hex"),
+        [
+            ("set_control_mode_press_and_hold", "040208010000"),
+            ("set_control_mode_press_and_release", "040201800000"),
+        ],
+    )
+    async def test_control_modes_use_the_exact_special_command_lifecycle(
+        self, method_name: str, command_hex: str
+    ):
+        """Each persistent mode is 55 attempts followed by one explicit zero."""
+        controller = LeggettOkinController(MagicMock())
+        controller.write_command = AsyncMock()
+
+        assert controller.supports_control_mode_configuration is True
+        await getattr(controller, method_name)()
+
+        command_write, release_write = controller.write_command.await_args_list
+        assert command_write.args == (bytes.fromhex(command_hex),)
+        assert command_write.kwargs == {
+            "repeat_count": 55,
+            "repeat_delay_ms": 100,
+        }
+        assert release_write.args == (bytes.fromhex("040200000000"),)
+        assert release_write.kwargs["repeat_count"] == 1
+        assert release_write.kwargs["cancel_event"].is_set() is False
+
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            ("010203", None),
+            ("06000600000000", None),
+            ("0200061234", (4660, -1)),
+            ("04000712340000", (1810, -1)),
+            ("04000812340000", (305399826, -1)),
+            ("060008123456fe0000", (135410774, -2)),
+            ("04000912340000", (2322, -1)),
+            ("04000bffff0f0f", (3855, -1)),
+            ("040055aa000000", (21930, -1)),
+            ("060055aa0000fe0000", (1437204480, -2)),
+        ],
+    )
+    def test_feedback_parser_matches_frozen_apk_vectors(
+        self, payload: str, expected: tuple[int, int] | None
+    ):
+        """Keep all ten accepted clean-room parser vectors exact."""
+        assert parse_leggett_okin_feedback(bytes.fromhex(payload)) == expected
+
+    async def test_status_channels_are_subscribed_and_settings_initialized(self):
+        """Start both APK channels and perform the optional raw 01 02 setup write."""
+        controller = self._controller_with_characteristics(
+            LEGGETT_OKIN_CHAR_UUID,
+            LEGGETT_OKIN_REVISION_SELECTOR_CHAR_UUID,
+            LEGGETT_OKIN_NOTIFY_CHAR_UUID,
+            OKIN_SMART_REMOTE_CSS_NOTIFY_CHAR_UUID,
+            OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID,
+        )
+        client = controller.client
+        assert client is not None
+        client.start_notify = AsyncMock()
+        client.stop_notify = AsyncMock()
+        client.write_gatt_char = AsyncMock()
+
+        await controller.start_notify()
+
+        assert client.start_notify.await_args_list == [
+            call(LEGGETT_OKIN_NOTIFY_CHAR_UUID, controller._handle_notification),
+            call(OKIN_SMART_REMOTE_CSS_NOTIFY_CHAR_UUID, controller._handle_notification),
+        ]
+        client.write_gatt_char.assert_awaited_once_with(
+            OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID,
+            b"\x01\x02",
+            response=True,
+        )
+        assert controller.protocol_diagnostics["settings_initialized"] is True
+
+        controller._handle_notification(
+            SimpleNamespace(uuid=LEGGETT_OKIN_NOTIFY_CHAR_UUID),
+            bytearray.fromhex("040055aa000000"),
+        )
+        assert controller.protocol_diagnostics["notification_led_mask"] == "0x000055aa"
+        assert controller.protocol_diagnostics["notification_status"] == -1
+
+        await controller.stop_notify()
+        assert client.stop_notify.await_count == 2
 
     async def test_program_memory_is_a_two_stage_hold(self):
         """Programming arms with the store keycode, releases, then holds the slot."""
