@@ -651,6 +651,12 @@
       "program_memory_6": {
         "name": "Save to Memory 6"
       },
+      "control_mode_press_and_hold": {
+        "name": "Use Press-and-Hold Controls"
+      },
+      "control_mode_press_and_release": {
+        "name": "Use Press-and-Release Controls"
+      },
       "massage_all_off": {
         "name": "Massage: Off"
       },
