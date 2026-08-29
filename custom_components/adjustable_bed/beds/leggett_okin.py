@@ -566,9 +566,9 @@ class LeggettOkinController(BedController):
         """Toggle massage / step through modes."""
         await self._tap_keycode(LeggettOkinCommands.MASSAGE_STEP, "massage_toggle")
 
-    async def massage_wave_step(self) -> None:
+    async def massage_mode_step(self) -> None:
         """Step through massage wave patterns."""
-        await self._tap_keycode(LeggettOkinCommands.MASSAGE_WAVE_STEP, "massage_wave_step")
+        await self._tap_keycode(LeggettOkinCommands.MASSAGE_WAVE_STEP, "massage_mode_step")
 
     # Pillow motor control. Keep the tilt methods as compatibility aliases for
     # service calls or stale entities created by older releases.
