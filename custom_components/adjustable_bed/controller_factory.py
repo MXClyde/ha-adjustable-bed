@@ -92,6 +92,7 @@ from .const import (
     KEESON_VARIANT_SLEEP_HARMONY,
     LEGGETT_VARIANT_MLRM,
     LEGGETT_VARIANT_OKIN,
+    LINAK_VARIANT_PERFORMANCE,
     MANUFACTURER_ID_OKIN,
     NORDIC_UART_SERVICE_UUID,
     NORDIC_UART_WRITE_CHAR_UUID,
@@ -272,7 +273,6 @@ _SIMPLE_CONTROLLERS: Final[dict[str, _ControllerSpec]] = {
     BED_TYPE_MALOUF_LEGACY_OKIN: _ControllerSpec("malouf", "MaloufLegacyOkinController"),
     BED_TYPE_LEGGETT_OKIN: _ControllerSpec("leggett_okin", "LeggettOkinController"),
     BED_TYPE_LEGGETT_WILINKE: _ControllerSpec("leggett_wilinke", "LeggettWilinkeController"),
-    BED_TYPE_LINAK: _ControllerSpec("linak", "LinakController"),
     # OKIN FFE uses the Keeson protocol with an 0xE6 prefix.
     BED_TYPE_OKIN_FFE: _ControllerSpec(
         "keeson", "KeesonController", MappingProxyType({"variant": KEESON_VARIANT_OKIN})
@@ -498,6 +498,21 @@ async def create_controller(
         from .beds.leggett_gen2 import LeggettGen2Controller
 
         return LeggettGen2Controller(coordinator, manufacturer_data=manufacturer_data)
+
+    if bed_type == BED_TYPE_LINAK:
+        from .beds.linak import LinakController
+        from .beds.linak_protocol import LinakProfile
+
+        profile = (
+            LinakProfile.PERFORMANCE
+            if protocol_variant == LINAK_VARIANT_PERFORMANCE
+            else LinakProfile.BED_CONTROL
+        )
+        return LinakController(
+            coordinator,
+            profile=profile,
+            capability_snapshot=capability_snapshot,
+        )
 
     # Brand-specific bed types
     if bed_type == BED_TYPE_RICHMAT:
@@ -790,14 +805,14 @@ async def create_controller(
         if use_star2:
             _LOGGER.debug(
                 "Using Star2 Octo variant (%s)",
-                "auto-detected from GATT" if protocol_variant in (None, VARIANT_AUTO) else "configured",
+                "auto-detected from GATT"
+                if protocol_variant in (None, VARIANT_AUTO)
+                else "configured",
             )
             return OctoStar2Controller(coordinator)
 
         _LOGGER.debug("Using standard Octo variant")
-        return OctoController(
-            coordinator, pin=octo_pin, capability_snapshot=capability_snapshot
-        )
+        return OctoController(coordinator, pin=octo_pin, capability_snapshot=capability_snapshot)
 
     if bed_type == BED_TYPE_JENSEN:
         from .beds.jensen import JensenController
@@ -839,8 +854,7 @@ async def create_controller(
         variant = protocol_variant or VARIANT_AUTO
         normalized_name = (device_name or "").strip().casefold()
         fixed_star_name = any(
-            normalized_name.startswith(prefix)
-            for prefix in SLEEPYS_BOX25_FIXED_STAR_NAME_PREFIXES
+            normalized_name.startswith(prefix) for prefix in SLEEPYS_BOX25_FIXED_STAR_NAME_PREFIXES
         )
         manufacturer_selects_star = "star" in (ble_manufacturer or "").casefold()
 

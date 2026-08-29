@@ -32,7 +32,7 @@ const CHEVRON_DOWN = "M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z";
 // keyed by the section key (without the "show_" prefix).
 function presentSections(bed: BedEntities): Record<string, boolean> {
   return {
-    graphic: bed.motors.some((m) => m.angle),
+    graphic: bed.motors.some((m) => m.angle || m.position),
     motors:
       bed.motors.some((m) => m.cover || m.up || m.down) ||
       !!bed.stop ||

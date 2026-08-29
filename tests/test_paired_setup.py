@@ -27,6 +27,7 @@ from custom_components.adjustable_bed import (
     async_unpair_entry,
 )
 from custom_components.adjustable_bed.const import (
+    BED_TYPE_BEDTECH,
     BED_TYPE_KAIDI,
     BED_TYPE_KEESON,
     BED_TYPE_LEGGETT_GEN2,
@@ -87,6 +88,24 @@ LEFT_ADDR = "AA:BB:CC:DD:EE:01"
 RIGHT_ADDR = "AA:BB:CC:DD:EE:02"
 PAIR_ID = "pair_test123456"
 
+LINAK_ADVANCED_SNAPSHOT = {
+    "profile": "bed_control",
+    "model_variant": "advanced",
+    "actuator_mask": 0xC0,
+    "timer_supported": False,
+    "discovery_complete": True,
+}
+
+
+def _linak_capabilities(*, motor_count: int = 2) -> dict:
+    """Return the persisted layout and live-discovered Linak snapshot."""
+    motor_keys = ["back", "legs"] if motor_count == 2 else ["back", "legs", "head"]
+    return {
+        "motor_count": motor_count,
+        "motor_keys": motor_keys,
+        "linak": dict(LINAK_ADVANCED_SNAPSHOT),
+    }
+
 
 def _child(side: str, address: str) -> dict:
     return {
@@ -97,7 +116,7 @@ def _child(side: str, address: str) -> dict:
         CONF_MOTOR_COUNT: 2,
         CONF_DISABLE_ANGLE_SENSING: True,
         CONF_PREFERRED_ADAPTER: "auto",
-        "capabilities": {"motor_count": 2, "motor_keys": ["back", "legs"]},
+        "capabilities": _linak_capabilities(),
     }
 
 
@@ -214,9 +233,7 @@ class TestPairedSetup:
         assert entry.entry_id == "single_address_sbi"
         assert entry.unique_id == LEFT_ADDR
         assert entry.data[CONF_PAIR_MODE] == PAIR_MODE_SINGLE_ADDRESS
-        assert isinstance(
-            hass.data[DOMAIN][entry.entry_id], SingleAddressPairedCoordinator
-        )
+        assert isinstance(hass.data[DOMAIN][entry.entry_id], SingleAddressPairedCoordinator)
         rows = er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
         assert any(row.unique_id.endswith("_left") for row in rows)
         assert any(row.unique_id.endswith("_right") for row in rows)
@@ -248,9 +265,7 @@ class TestPairedSetup:
         assert not any(
             row.unique_id.endswith(("_left", "_right", "_both"))
             for row in rows
-            if row.unique_id not in entry.data.get(
-                "single_address_origin_entity_unique_ids", []
-            )
+            if row.unique_id not in entry.data.get("single_address_origin_entity_unique_ids", [])
         )
 
     async def test_paired_entry_loads_with_both_sides(
@@ -502,6 +517,7 @@ class TestPairedSetup:
 
         assert result["type"] == FlowResultType.FORM
         assert selected == [SIDE_LEFT]
+
     async def test_unpair_keeps_offline_restored_beds(
         self,
         hass: HomeAssistant,
@@ -603,17 +619,11 @@ class TestPairedSetup:
         await hass.async_block_till_done()
 
         registry = dr.async_get(hass)
-        parent = _device_for_entry_and_identifier(
-            registry, entry.entry_id, (DOMAIN, PAIR_ID)
-        )
+        parent = _device_for_entry_and_identifier(registry, entry.entry_id, (DOMAIN, PAIR_ID))
         assert parent is not None
 
-        left = _device_for_entry_and_identifier(
-            registry, entry.entry_id, (DOMAIN, LEFT_ADDR)
-        )
-        right = _device_for_entry_and_identifier(
-            registry, entry.entry_id, (DOMAIN, RIGHT_ADDR)
-        )
+        left = _device_for_entry_and_identifier(registry, entry.entry_id, (DOMAIN, LEFT_ADDR))
+        right = _device_for_entry_and_identifier(registry, entry.entry_id, (DOMAIN, RIGHT_ADDR))
         assert left is not None and right is not None
         assert left.via_device_id == parent.id
         assert right.via_device_id == parent.id
@@ -1030,17 +1040,20 @@ class TestPairBedsConversion:
         name: str,
         bed_type: str = BED_TYPE_LINAK,
     ) -> MockConfigEntry:
+        data = {
+            CONF_ADDRESS: address,
+            CONF_NAME: name,
+            CONF_BED_TYPE: bed_type,
+            CONF_MOTOR_COUNT: 2,
+            CONF_DISABLE_ANGLE_SENSING: True,
+            CONF_PREFERRED_ADAPTER: "auto",
+        }
+        if bed_type == BED_TYPE_LINAK:
+            data["capabilities"] = _linak_capabilities()
         entry = MockConfigEntry(
             domain=DOMAIN,
             title=name,
-            data={
-                CONF_ADDRESS: address,
-                CONF_NAME: name,
-                CONF_BED_TYPE: bed_type,
-                CONF_MOTOR_COUNT: 2,
-                CONF_DISABLE_ANGLE_SENSING: True,
-                CONF_PREFERRED_ADAPTER: "auto",
-            },
+            data=data,
             unique_id=address,
             version=4,
             state=ConfigEntryState.LOADED,
@@ -1069,6 +1082,7 @@ class TestPairBedsConversion:
                 CONF_MOTOR_COUNT: 2,
                 CONF_DISABLE_ANGLE_SENSING: True,
                 CONF_PREFERRED_ADAPTER: "auto",
+                "capabilities": _linak_capabilities(),
             },
             unique_id=address,
             version=4,
@@ -1094,9 +1108,7 @@ class TestPairBedsConversion:
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             {
-                CONF_PAIR_SELECTION: encode_pair_selection(
-                    left.entry_id, right.entry_id
-                ),
+                CONF_PAIR_SELECTION: encode_pair_selection(left.entry_id, right.entry_id),
                 CONF_NAME: "Master Bed",
             },
         )
@@ -1132,24 +1144,14 @@ class TestPairBedsConversion:
             right.entry_id,
         )
         reversed_assignment = schema(
-            {
-                CONF_PAIR_SELECTION: encode_pair_selection(
-                    right.entry_id, left.entry_id
-                )
-            }
+            {CONF_PAIR_SELECTION: encode_pair_selection(right.entry_id, left.entry_id)}
         )
         assert isinstance(reversed_assignment, dict)
         assert reversed_assignment[CONF_PAIR_SELECTION] == encode_pair_selection(
             right.entry_id, left.entry_id
         )
         with pytest.raises(vol.Invalid):
-            schema(
-                {
-                    CONF_PAIR_SELECTION: encode_pair_selection(
-                        left.entry_id, left.entry_id
-                    )
-                }
-            )
+            schema({CONF_PAIR_SELECTION: encode_pair_selection(left.entry_id, left.entry_id)})
 
     async def test_pairing_blocked_for_unsafe_offline_platform_entities(
         self,
@@ -1172,11 +1174,7 @@ class TestPairBedsConversion:
         result = await self._reach_pair_step(hass)
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
-            {
-                CONF_PAIR_SELECTION: encode_pair_selection(
-                    left.entry_id, right.entry_id
-                )
-            },
+            {CONF_PAIR_SELECTION: encode_pair_selection(left.entry_id, right.entry_id)},
         )
         assert result["type"] == FlowResultType.FORM
         assert result["errors"]["base"] == "pairing_unsupported_entities"
@@ -1209,11 +1207,7 @@ class TestPairBedsConversion:
         result = await self._reach_pair_step(hass)
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
-            {
-                CONF_PAIR_SELECTION: encode_pair_selection(
-                    left.entry_id, right.entry_id
-                )
-            },
+            {CONF_PAIR_SELECTION: encode_pair_selection(left.entry_id, right.entry_id)},
         )
         assert result["type"] == FlowResultType.FORM
         assert result["errors"].get(CONF_PAIR_SELECTION) == "same_address"
@@ -1235,11 +1229,7 @@ class TestPairBedsConversion:
         result = await self._reach_pair_step(hass)
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
-            {
-                CONF_PAIR_SELECTION: encode_pair_selection(
-                    left.entry_id, right.entry_id
-                )
-            },
+            {CONF_PAIR_SELECTION: encode_pair_selection(left.entry_id, right.entry_id)},
         )
         await hass.async_block_till_done()
         assert result["type"] == FlowResultType.CREATE_ENTRY
@@ -1261,16 +1251,19 @@ class TestPairBedsConversion:
         """Matching protocols with different motor layouts cannot be paired."""
         left = self._single(hass, LEFT_ADDR, "Left")
         right = self._single(hass, RIGHT_ADDR, "Right")
-        hass.config_entries.async_update_entry(right, data={**right.data, CONF_MOTOR_COUNT: 3})
+        hass.config_entries.async_update_entry(
+            right,
+            data={
+                **right.data,
+                CONF_MOTOR_COUNT: 3,
+                "capabilities": _linak_capabilities(motor_count=3),
+            },
+        )
 
         result = await self._reach_pair_step(hass)
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
-            {
-                CONF_PAIR_SELECTION: encode_pair_selection(
-                    left.entry_id, right.entry_id
-                )
-            },
+            {CONF_PAIR_SELECTION: encode_pair_selection(left.entry_id, right.entry_id)},
         )
         assert result["type"] == FlowResultType.FORM
         assert result["errors"]["base"] == "mismatched_motor_layouts"
@@ -1325,11 +1318,7 @@ class TestPairBedsConversion:
         result = await self._reach_pair_step(hass)
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
-            {
-                CONF_PAIR_SELECTION: encode_pair_selection(
-                    left.entry_id, right.entry_id
-                )
-            },
+            {CONF_PAIR_SELECTION: encode_pair_selection(left.entry_id, right.entry_id)},
         )
 
         assert result["type"] == FlowResultType.FORM
@@ -1403,11 +1392,7 @@ class TestPairBedsConversion:
         result = await self._reach_pair_step(hass)
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
-            {
-                CONF_PAIR_SELECTION: encode_pair_selection(
-                    standard.entry_id, star2.entry_id
-                )
-            },
+            {CONF_PAIR_SELECTION: encode_pair_selection(standard.entry_id, star2.entry_id)},
         )
         assert result["type"] == FlowResultType.CREATE_ENTRY
 
@@ -1680,9 +1665,7 @@ class TestPairBedsConversion:
         assert before_row.config_entry_id == left.entry_id
 
         # Customize the left side's device too.
-        left_device = _device_for_entry_and_identifier(
-            dev_reg, left.entry_id, (DOMAIN, LEFT_ADDR)
-        )
+        left_device = _device_for_entry_and_identifier(dev_reg, left.entry_id, (DOMAIN, LEFT_ADDR))
         assert left_device is not None
         left_device_id = left_device.id
         dev_reg.async_update_device(left_device_id, name_by_user="Left headboard")
@@ -1692,9 +1675,7 @@ class TestPairBedsConversion:
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             {
-                CONF_PAIR_SELECTION: encode_pair_selection(
-                    left.entry_id, right.entry_id
-                ),
+                CONF_PAIR_SELECTION: encode_pair_selection(left.entry_id, right.entry_id),
                 CONF_NAME: "Master Bed",
             },
         )
@@ -1733,9 +1714,7 @@ class TestPairBedsConversion:
             (DOMAIN, pair.data[CONF_PAIR_ID]),
         )
         assert parent is not None
-        left_after = _device_for_entry_and_identifier(
-            dev_reg, pair.entry_id, (DOMAIN, LEFT_ADDR)
-        )
+        left_after = _device_for_entry_and_identifier(dev_reg, pair.entry_id, (DOMAIN, LEFT_ADDR))
         assert left_after is not None
         assert left_after.id == left_device_id  # same device, not recreated
         assert left_after.config_entry_id == pair.entry_id
@@ -1768,9 +1747,7 @@ class TestPairBedsConversion:
         assert final_row.name == "Kris head angle"
         assert len([e for e in ent_reg.entities.values() if e.unique_id == cover_uid]) == 1
 
-        final_device = _device_for_entry_and_identifier(
-            dev_reg, left.entry_id, (DOMAIN, LEFT_ADDR)
-        )
+        final_device = _device_for_entry_and_identifier(dev_reg, left.entry_id, (DOMAIN, LEFT_ADDR))
         assert final_device is not None
         assert final_device.id == left_device_id
         assert final_device.config_entry_id == left.entry_id
@@ -1806,11 +1783,7 @@ class TestPairBedsConversion:
         ):
             result = await hass.config_entries.flow.async_configure(
                 result["flow_id"],
-                {
-                    CONF_PAIR_SELECTION: encode_pair_selection(
-                        left.entry_id, right.entry_id
-                    )
-                },
+                {CONF_PAIR_SELECTION: encode_pair_selection(left.entry_id, right.entry_id)},
             )
             await hass.async_block_till_done()
 
@@ -1865,11 +1838,7 @@ class TestPairBedsConversion:
         with patch.object(hass.config_entries, "async_remove", _failing_remove):
             result = await hass.config_entries.flow.async_configure(
                 result["flow_id"],
-                {
-                    CONF_PAIR_SELECTION: encode_pair_selection(
-                        left.entry_id, right.entry_id
-                    )
-                },
+                {CONF_PAIR_SELECTION: encode_pair_selection(left.entry_id, right.entry_id)},
             )
             await hass.async_block_till_done()
 
@@ -1922,11 +1891,7 @@ class TestPairBedsConversion:
         ):
             result = await hass.config_entries.flow.async_configure(
                 result["flow_id"],
-                {
-                    CONF_PAIR_SELECTION: encode_pair_selection(
-                        left.entry_id, right.entry_id
-                    )
-                },
+                {CONF_PAIR_SELECTION: encode_pair_selection(left.entry_id, right.entry_id)},
             )
             await hass.async_block_till_done()
 
@@ -2020,11 +1985,7 @@ class TestPairBedsConversion:
         with patch.object(AdjustableBedCoordinator, "async_connect", fake_connect):
             result = await hass.config_entries.flow.async_configure(
                 result["flow_id"],
-                {
-                    CONF_PAIR_SELECTION: encode_pair_selection(
-                        left.entry_id, right.entry_id
-                    )
-                },
+                {CONF_PAIR_SELECTION: encode_pair_selection(left.entry_id, right.entry_id)},
             )
             await hass.async_block_till_done()
 
@@ -2080,11 +2041,7 @@ class TestPairBedsConversion:
         ):
             result = await hass.config_entries.flow.async_configure(
                 result["flow_id"],
-                {
-                    CONF_PAIR_SELECTION: encode_pair_selection(
-                        left.entry_id, right.entry_id
-                    )
-                },
+                {CONF_PAIR_SELECTION: encode_pair_selection(left.entry_id, right.entry_id)},
             )
             await hass.async_block_till_done()
 
@@ -2469,13 +2426,9 @@ class TestSideServiceRouting:
         buttons = _combined_motor_buttons_for(coord, [left, right])
         head_up = next(b for b in buttons if b._attr_unique_id == "pair_x_head_up_both")
         assert head_up._move_fn is motor3_up
-        back_legs_up = next(
-            b for b in buttons if b._attr_unique_id == "pair_x_back_legs_up_both"
-        )
+        back_legs_up = next(b for b in buttons if b._attr_unique_id == "pair_x_back_legs_up_both")
         assert back_legs_up._attr_translation_key == "back_legs_up"
-        assert not any(
-            button._attr_unique_id == "pair_x_back_up_both" for button in buttons
-        )
+        assert not any(button._attr_unique_id == "pair_x_back_up_both" for button in buttons)
 
         # A known left side is not enough to advertise a both-sides action. The
         # other side could have a different capability surface, so suppress all
@@ -2524,10 +2477,11 @@ class TestOfflineSideEntities:
         left = children[SIDE_LEFT]
         await left.async_prime_offline_controller()
 
-        # Linak under-bed lighting is a per-side switch; the exact entity must
-        # exist offline too (not just "some" switch).
+        # Modern Linak exposes automatic-drive configuration, while its app's
+        # AUX light action is toggle-only and therefore never becomes a switch.
         uids = {s.unique_id for s in _switch_entities_for(hass, left)}
-        assert f"{LEFT_ADDR}_under_bed_lights" in uids
+        assert f"{LEFT_ADDR}_linak_automatic_drive" in uids
+        assert f"{LEFT_ADDR}_under_bed_lights" not in uids
 
     async def test_capability_controller_precedence_and_default(self, hass: HomeAssistant):
         from unittest.mock import MagicMock
@@ -2622,12 +2576,25 @@ class TestPairedPairingIssue:
     async def test_pairing_issue_noop_for_non_pairing_side(self, hass: HomeAssistant):
         from homeassistant.helpers import issue_registry as ir
 
-        entry = _paired_entry(hass)
+        data = _paired_entry_data()
+        data[CONF_BED_TYPE] = BED_TYPE_BEDTECH
+        for child in data[CONF_PAIR_CHILDREN]:
+            child[CONF_BED_TYPE] = BED_TYPE_BEDTECH
+            child.pop("capabilities", None)
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Master Bed",
+            data=data,
+            unique_id=PAIR_ID,
+            entry_id="paired_non_bonding_entry",
+            version=4,
+        )
+        entry.add_to_hass(hass)
         children = _build_paired_children(hass, entry)
         left = children[SIDE_LEFT]
 
         before = len(ir.async_get(hass).issues)
-        # Linak doesn't require OS-level pairing -> no repair issue, no crash.
+        # A non-bonding protocol produces no repair issue and does not crash.
         await _maybe_create_pairing_issue_for(hass, left)
         assert len(ir.async_get(hass).issues) == before
 

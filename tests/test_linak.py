@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -13,12 +14,23 @@ from custom_components.adjustable_bed.beds.linak import (
     LinakCommands,
     LinakPositionSeekPolicy,
 )
+from custom_components.adjustable_bed.beds.linak_protocol import (
+    LinakCapabilitySnapshot,
+    LinakModelVariant,
+    LinakProfile,
+)
 from custom_components.adjustable_bed.const import (
+    CONF_PROTOCOL_VARIANT,
+    LINAK_CONFIG_CHAR_UUID,
     LINAK_CONTROL_CHAR_UUID,
+    LINAK_ERROR_CHAR_UUID,
     LINAK_POSITION_BACK_UUID,
     LINAK_POSITION_FEET_UUID,
-    LINAK_POSITION_HEAD_UUID,
     LINAK_POSITION_LEG_UUID,
+    LINAK_POSITION_MASK_UUID,
+    LINAK_POSITION_SERVICE_UUID,
+    LINAK_TIMER_SERVICE_UUID,
+    LINAK_VARIANT_PERFORMANCE,
 )
 from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
 from custom_components.adjustable_bed.position_seek import (
@@ -44,6 +56,36 @@ def _assert_repeated_command(
 def _mark_session_ready(coordinator: AdjustableBedCoordinator) -> None:
     """Skip the cold-connect readiness probe for command behavior tests."""
     coordinator.controller._session_ready = True
+
+
+@pytest.fixture(autouse=True)
+def mock_advanced_linak_gatt(
+    mock_bleak_client: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Model the default test bed as Advanced with back and legs references."""
+    position_service = SimpleNamespace(
+        uuid="99fa0020-338a-1024-8a49-009c0215f78a",
+        characteristics=[],
+    )
+    mock_bleak_client.services.__iter__ = lambda self: iter([position_service])
+    mock_bleak_client.services.__len__ = lambda self: 1
+    mock_bleak_client.services.get_service.side_effect = lambda uuid: (
+        position_service if str(uuid).lower() == position_service.uuid else None
+    )
+    original_read = mock_bleak_client.read_gatt_char.side_effect
+
+    async def read(uuid: str) -> bytes:
+        if str(uuid).lower() == LINAK_POSITION_MASK_UUID:
+            return bytes((0xC0,))
+        return await original_read(uuid)
+
+    mock_bleak_client.read_gatt_char.side_effect = read
+    monkeypatch.setattr(
+        AdjustableBedCoordinator,
+        "_async_verify_bonded",
+        AsyncMock(return_value=True),
+    )
 
 
 async def _run_position_seek(
@@ -238,7 +280,10 @@ class TestLinakController:
 
         await coordinator.controller.seek_position_step("legs", True, remaining_distance=25.0)
 
-        _assert_repeated_command(mock_bleak_client, LinakCommands.MOVE_LEGS_UP, repeat_count=6)
+        assert _written_commands(mock_bleak_client) == [
+            *([LinakCommands.MOVE_LEGS_UP] * 6),
+            LinakCommands.MOVE_STOP,
+        ]
 
     async def test_seek_position_step_uses_micro_pulse_near_target(
         self,
@@ -254,7 +299,10 @@ class TestLinakController:
 
         await coordinator.controller.seek_position_step("legs", True, remaining_distance=2.0)
 
-        _assert_repeated_command(mock_bleak_client, LinakCommands.MOVE_LEGS_UP, repeat_count=1)
+        assert _written_commands(mock_bleak_client) == [
+            LinakCommands.MOVE_LEGS_UP,
+            LinakCommands.MOVE_STOP,
+        ]
 
     async def test_linak_uses_tighter_seek_tolerance(
         self,
@@ -422,7 +470,9 @@ class TestLinakController:
         assert coordinator._seek_outcomes["back"]["outcome"] == "endpoint_reached"
         assert _written_commands(mock_bleak_client) == [
             LinakCommands.MOVE_BACK_DOWN,
+            LinakCommands.MOVE_STOP,
             LinakCommands.MOVE_BACK_DOWN,
+            LinakCommands.MOVE_STOP,
             LinakCommands.MOVE_STOP,
         ]
 
@@ -469,6 +519,7 @@ class TestLinakController:
 
         assert _written_commands(mock_bleak_client) == [
             LinakCommands.MOVE_BACK_DOWN,
+            LinakCommands.MOVE_STOP,
             LinakCommands.MOVE_STOP,
             LinakCommands.MOVE_STOP,
         ]
@@ -532,8 +583,6 @@ class TestLinakController:
             auth_error,
             None,
             None,
-            None,
-            None,
         ]
 
         await controller.start_notify(MagicMock())
@@ -546,25 +595,23 @@ class TestLinakController:
 
         assert controller._active_position_notifications == {
             LINAK_POSITION_BACK_UUID,
-            LINAK_POSITION_FEET_UUID,
-            LINAK_POSITION_HEAD_UUID,
             LINAK_POSITION_LEG_UUID,
         }
         assert not controller._deferred_position_notifications
-        assert mock_bleak_client.start_notify.call_count == 6
+        assert mock_bleak_client.start_notify.call_count == 4
         assert _written_commands(mock_bleak_client) == [
             LinakCommands.MOVE_STOP,
             LinakCommands.MOVE_HEAD_UP,
         ]
 
-    async def test_start_notify_subscribes_all_two_motor_secondary_candidates(
+    async def test_start_notify_subscribes_exact_capability_mask_axes(
         self,
         hass: HomeAssistant,
         mock_config_entry,
         mock_coordinator_connected,
         mock_bleak_client: MagicMock,
     ):
-        """Fresh 2-motor sessions should listen on all plausible second-axis channels."""
+        """Advanced sessions subscribe only to reference outputs selected by mask."""
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         await coordinator.async_connect()
 
@@ -577,9 +624,167 @@ class TestLinakController:
         assert subscribed_uuids == [
             LINAK_POSITION_BACK_UUID,
             LINAK_POSITION_LEG_UUID,
-            LINAK_POSITION_FEET_UUID,
-            LINAK_POSITION_HEAD_UUID,
         ]
+
+
+class TestLinakCorpusProfiles:
+    """Model the complete service-derived and explicit application profiles."""
+
+    async def test_standard_has_no_memories_or_position_feedback(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ) -> None:
+        mock_bleak_client.services.__iter__ = lambda self: iter(())
+        mock_bleak_client.services.__len__ = lambda self: 0
+        mock_bleak_client.services.get_service = MagicMock(return_value=None)
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+
+        await coordinator.async_connect()
+
+        assert coordinator.controller.protocol_diagnostics["model_variant"] == "standard"
+        assert coordinator.controller.memory_slot_count == 0
+        assert coordinator.controller.supports_position_feedback is False
+
+    async def test_direct_ble_factory_reset_uses_configuration_characteristic(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ) -> None:
+        """Preserve Bed Connect's reachable BLE-only factory-reset action."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await coordinator.controller.factory_reset()
+
+        mock_bleak_client.write_gatt_char.assert_awaited_once_with(
+            LINAK_CONFIG_CHAR_UUID,
+            LinakCommands.FACTORY_RESET,
+            response=True,
+        )
+
+    async def test_td3_mask_zero_keeps_four_memories_without_reference_axes(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ) -> None:
+        original_read = mock_bleak_client.read_gatt_char.side_effect
+
+        async def read(uuid: str) -> bytes:
+            if str(uuid).lower() == LINAK_POSITION_MASK_UUID:
+                return b"\x00"
+            return await original_read(uuid)
+
+        mock_bleak_client.read_gatt_char.side_effect = read
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+
+        await coordinator.async_connect()
+
+        assert coordinator.controller.protocol_diagnostics["model_variant"] == "td3"
+        assert coordinator.controller.memory_slot_count == 4
+        assert coordinator.controller.supports_position_feedback is False
+
+    async def test_timer_service_promotes_advanced_model_only_after_subscription(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ) -> None:
+        position_service = SimpleNamespace(
+            uuid=LINAK_POSITION_SERVICE_UUID,
+            characteristics=[],
+        )
+        timer_service = SimpleNamespace(uuid=LINAK_TIMER_SERVICE_UUID, characteristics=[])
+        mock_bleak_client.services.__iter__ = lambda self: iter((position_service, timer_service))
+        mock_bleak_client.services.__len__ = lambda self: 2
+        mock_bleak_client.services.get_service = MagicMock(
+            side_effect=lambda uuid: {
+                LINAK_POSITION_SERVICE_UUID: position_service,
+                LINAK_TIMER_SERVICE_UUID: timer_service,
+            }.get(str(uuid).lower())
+        )
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+
+        await coordinator.async_connect()
+
+        diagnostics = coordinator.controller.protocol_diagnostics
+        assert diagnostics["model_variant"] == "advanced_with_alarm"
+        assert diagnostics["timer_supported"] is True
+        assert coordinator.controller.supports_alarm is True
+
+    async def test_performance_profile_uses_300ms_holds_and_one_byte_release(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ) -> None:
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={
+                **mock_config_entry.data,
+                CONF_PROTOCOL_VARIANT: LINAK_VARIANT_PERFORMANCE,
+            },
+        )
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        _mark_session_ready(coordinator)
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        with patch(
+            "custom_components.adjustable_bed.beds.base.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            await coordinator.controller.move_back_up()
+
+        assert coordinator.controller.protocol_diagnostics["profile"] == "performance_legacy"
+        assert coordinator.controller.memory_slot_count == 4
+        assert coordinator.controller.supports_position_feedback is False
+        assert coordinator.controller.supports_impulse_control is True
+        assert coordinator.controller.supports_wake_control is False
+        assert coordinator.controller.supports_factory_reset is False
+        assert _written_commands(mock_bleak_client) == [
+            LinakCommands.MOVE_BACK_UP,
+            LinakCommands.MOVE_BACK_UP,
+            LinakCommands.MOVE_BACK_UP,
+            LinakCommands.MOVE_BACK_UP,
+            b"\xff",
+        ]
+
+    async def test_performance_notification_is_required_but_not_interpreted(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ) -> None:
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={
+                **mock_config_entry.data,
+                CONF_PROTOCOL_VARIANT: LINAK_VARIANT_PERFORMANCE,
+            },
+        )
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+
+        notify_call = next(
+            item
+            for item in mock_bleak_client.start_notify.call_args_list
+            if item.args[0] == LINAK_ERROR_CHAR_UUID
+        )
+        state_before = dict(coordinator.controller_state)
+        notify_call.args[1](LINAK_ERROR_CHAR_UUID, bytearray.fromhex("01 00 0D AA"))
+
+        assert coordinator.controller_state == state_before
 
 
 class TestLinakMovement:
@@ -718,9 +923,16 @@ class TestLinakPresets:
         await coordinator.async_connect()
         _mark_session_ready(coordinator)
 
-        await coordinator.controller.preset_memory(memory_num)
+        with patch(
+            "custom_components.adjustable_bed.beds.base.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            await coordinator.controller.preset_memory(memory_num)
 
-        _assert_repeated_command(mock_bleak_client, expected_command, 1)
+        assert _written_commands(mock_bleak_client) == [
+            *([expected_command] * 300),
+            LinakCommands.MOVE_STOP,
+        ]
 
     @pytest.mark.parametrize(
         "memory_num,expected_command",
@@ -755,41 +967,24 @@ class TestLinakPresets:
 class TestLinakLights:
     """Test Linak light commands."""
 
-    async def test_lights_on(
+    async def test_discrete_lights_are_not_exposed(
         self,
         hass: HomeAssistant,
         mock_config_entry,
         mock_coordinator_connected,
         mock_bleak_client: MagicMock,
     ):
-        """Test lights on command."""
+        """The analyzed apps expose AUX toggle, not guessed on/off commands."""
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         await coordinator.async_connect()
         _mark_session_ready(coordinator)
 
-        await coordinator.controller.lights_on()
-
-        mock_bleak_client.write_gatt_char.assert_called_with(
-            LINAK_CONTROL_CHAR_UUID, LinakCommands.LIGHTS_ON, response=True
-        )
-
-    async def test_lights_off(
-        self,
-        hass: HomeAssistant,
-        mock_config_entry,
-        mock_coordinator_connected,
-        mock_bleak_client: MagicMock,
-    ):
-        """Test lights off command."""
-        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
-        await coordinator.async_connect()
-        _mark_session_ready(coordinator)
-
-        await coordinator.controller.lights_off()
-
-        mock_bleak_client.write_gatt_char.assert_called_with(
-            LINAK_CONTROL_CHAR_UUID, LinakCommands.LIGHTS_OFF, response=True
-        )
+        assert coordinator.controller.supports_discrete_light_control is False
+        with pytest.raises(NotImplementedError):
+            await coordinator.controller.lights_on()
+        with pytest.raises(NotImplementedError):
+            await coordinator.controller.lights_off()
+        mock_bleak_client.write_gatt_char.assert_not_called()
 
     async def test_lights_toggle(
         self,
@@ -843,11 +1038,16 @@ class TestLinakMassage:
         await coordinator.async_connect()
         _mark_session_ready(coordinator)
 
-        await coordinator.controller.massage_toggle()
+        with patch(
+            "custom_components.adjustable_bed.beds.linak.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            await coordinator.controller.massage_toggle()
 
-        mock_bleak_client.write_gatt_char.assert_called_with(
-            LINAK_CONTROL_CHAR_UUID, LinakCommands.MASSAGE_ALL_TOGGLE, response=True
-        )
+        assert _written_commands(mock_bleak_client) == [
+            LinakCommands.MASSAGE_ZONE_1_ON,
+            LinakCommands.MASSAGE_ZONE_2_ON,
+        ]
 
 
 class TestLinakPositionData:
@@ -872,7 +1072,7 @@ class TestLinakPositionData:
             if uuid == LINAK_POSITION_BACK_UUID:
                 raise TimeoutError
             if uuid == LINAK_POSITION_LEG_UUID:
-                return bytes([0x12, 0x01])  # 274 / 548 = 22.5°
+                return bytes([0x12, 0x01, 0x00, 0x00])  # 274 / 548 = 22.5°
             return b""
 
         mock_bleak_client.read_gatt_char.side_effect = read_side_effect
@@ -881,37 +1081,39 @@ class TestLinakPositionData:
 
         callback.assert_called_once_with("legs", 22.5)
 
-    async def test_read_positions_resolves_two_motor_secondary_axis_from_feet_channel(
+    async def test_read_positions_uses_feet_axis_selected_by_mask(
         self,
         hass: HomeAssistant,
         mock_config_entry,
         mock_coordinator_connected,
         mock_bleak_client: MagicMock,
     ):
-        """A 2-motor Linak bed should fall back to the reporting second actuator."""
+        """Reference reads follow the capability mask rather than motor count."""
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         await coordinator.async_connect()
 
         controller = coordinator.controller
+        controller._capabilities = LinakCapabilitySnapshot(
+            profile=LinakProfile.BED_CONTROL,
+            model_variant=LinakModelVariant.ADVANCED,
+            actuator_mask=0x90,
+            discovery_complete=True,
+        )
         callback = MagicMock()
         controller._notify_callback = callback
 
         async def read_side_effect(uuid: str) -> bytes:
             if uuid == LINAK_POSITION_BACK_UUID:
-                return bytes([0x9A, 0x01])  # 410 / 820 = 34.0°
-            if uuid == LINAK_POSITION_LEG_UUID:
-                return bytes([0xFF, 0xFF])  # invalid
+                return bytes([0x9A, 0x01, 0x00, 0x00])  # 410 / 820 = 34.0°
             if uuid == LINAK_POSITION_FEET_UUID:
-                return bytes([0x12, 0x01])  # 274 / 548 = 22.5°
+                return bytes([0x12, 0x01, 0x00, 0x00])  # 274 / 548 = 22.5°
             return b""
 
         mock_bleak_client.read_gatt_char.side_effect = read_side_effect
 
         await controller.read_positions()
 
-        assert callback.call_args_list == [call("back", 34.0), call("legs", 22.5)]
-        assert controller._resolved_two_motor_secondary_spec is not None
-        assert controller._resolved_two_motor_secondary_spec.source_name == "feet"
+        assert callback.call_args_list == [call("back", 34.0), call("feet", 22.5)]
 
     async def test_read_positions_retries_cold_session_until_data_arrives(
         self,
@@ -990,7 +1192,7 @@ class TestLinakPositionData:
         controller = coordinator.controller
 
         # Simulate position data: 410 out of 820 max = 50% = 34 degrees
-        data = bytearray([0x9A, 0x01])  # 410 in little-endian
+        data = bytearray([0x9A, 0x01, 0x00, 0x00])  # 410 in little-endian
 
         callback = MagicMock()
         controller._notify_callback = callback
@@ -1012,7 +1214,7 @@ class TestLinakPositionData:
         controller = coordinator.controller
 
         # Max position
-        data = bytearray([0x34, 0x03])  # 820 in little-endian
+        data = bytearray([0x34, 0x03, 0x00, 0x00])  # 820 in little-endian
 
         callback = MagicMock()
         controller._notify_callback = callback
@@ -1033,7 +1235,7 @@ class TestLinakPositionData:
 
         controller = coordinator.controller
 
-        data = bytearray([0x00, 0x00])
+        data = bytearray([0x00, 0x00, 0x00, 0x00])
 
         callback = MagicMock()
         controller._notify_callback = callback
@@ -1063,3 +1265,33 @@ class TestLinakPositionData:
         controller._handle_position_data("back", data, 820, 68.0)
 
         callback.assert_not_called()
+        assert coordinator.controller_state["linak_back_reported_speed"] == 0
+        assert coordinator.controller_state["linak_back_status_flags"] == 0
+        assert coordinator.controller_state["linak_position_feedback_fault"] is False
+
+    async def test_reference_notification_publishes_speed_and_every_status_flag(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ) -> None:
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+
+        coordinator.controller._handle_position_data(
+            "back",
+            bytearray.fromhex("D2 04 A5 00"),
+            820,
+            68.0,
+        )
+
+        state = coordinator.controller_state
+        assert state["linak_back_reported_speed"] == pytest.approx(0.9765625)
+        assert state["linak_back_raw_speed"] == 10
+        assert state["linak_back_speed_direction"] == "positive"
+        assert state["linak_back_extension"] == pytest.approx(12.34)
+        assert state["linak_back_status_flags"] == 5
+        assert state["linak_back_sls"] is True
+        assert state["linak_back_end_position_up"] is False
+        assert state["linak_back_end_position_down"] is True
+        assert state["linak_back_position_lost"] is False

@@ -158,11 +158,12 @@ class TestDiagnosticsOutput:
         assert "connected" in result["ble"]
 
         # Pairing diagnostics distinguish integration decisions from backend state.
-        assert result["pairing"]["required"] is False
-        assert result["pairing"]["persisted_bond_marker"] is False
-        assert result["pairing"]["last_bond_verification"]["status"] == "not_attempted"
-        assert result["pairing"]["connection_attempts"][0]["pairing"]["decision"] == (
-            "not_required"
+        assert result["pairing"]["required"] is True
+        assert result["pairing"]["persisted_bond_marker"] is True
+        assert result["pairing"]["last_bond_verification"]["status"] == "succeeded"
+        assert (
+            result["pairing"]["connection_attempts"][0]["pairing"]["decision"]
+            == "pairing_requested"
         )
 
         # Check controller info
@@ -240,9 +241,7 @@ class TestDiagnosticsOutput:
         hass.data.setdefault(DOMAIN, {})
         hass.data[DOMAIN][mock_diagnostics_config_entry.entry_id] = coordinator
 
-        result = await async_get_config_entry_diagnostics(
-            hass, mock_diagnostics_config_entry
-        )
+        result = await async_get_config_entry_diagnostics(hass, mock_diagnostics_config_entry)
 
         timing = result["coordinator"]["command_timing"]
         assert "last_command_start" not in timing

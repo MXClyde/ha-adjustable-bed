@@ -355,6 +355,20 @@ Until [issue #436](https://github.com/kristofferR/ha-adjustable-bed/issues/436) 
 - Do not assume maintainers can physically test a discovered bed. A report may be COMPLETE when app behavior is exhaustively proven from the artifact while hardware status remains explicitly unverified. Treat physical checks and captures as deferred external validation for real users after a beta or release, not as an immediately actionable maintainer task or an automatic reason to fail the analysis.
 - Never guess protocol behavior when the required artifact or analysis layer is unavailable. Record the precise APK or runtime-table blocker. If only physical semantics remain, record a deferred validation request for real users after beta/release; do not ask a maintainer to acquire or immediately test the bed.
 
+### Mandatory post-freeze implementation convergence
+
+A COMPLETE clean-room report is evidence collection, not the end of an APK-driven
+integration task. After freezing the report, the separate comparison pass must
+account for every reachable discovery before the task can be called complete.
+
+- Build a discovery ledger covering every reachable BLE behavior, including commands, packet builders, responses and notifications, parsers, timing, release behavior, pairing/authentication, discovery rules, model/variant selection, capability gates, configuration writes, and user-visible state.
+- Give every ledger item exactly one disposition: `IMPLEMENTED`, `ALREADY_IMPLEMENTED`, or `EXCLUDED`.
+- Implement every in-scope item marked `IMPLEMENTED` in the same task, with focused artifact-vector tests, entity or service exposure where users need it, and durable protocol documentation. Do not silently defer reachable discoveries or wait for the user to ask whether anything was missed.
+- `ALREADY_IMPLEMENTED` requires a concrete code and test reference showing behavior equivalent to the frozen artifact, not a family resemblance or an assumed shared protocol.
+- `EXCLUDED` requires the exact evidence and reason. Valid reasons are an out-of-scope transport or product boundary (for example WiFi/cloud behavior in this BLE-only integration), a safety constraint, dead or unreachable artifact code, or behavior unrelated to bed integration. Convenience, uncertain model prevalence, missing maintainer hardware, or lack of an existing entity are not valid exclusions.
+- Static artifact evidence can complete the implementation even without physical hardware. Keep hardware status explicit and defer only physical validation, never the implementation itself, when the behavior is exhaustively proven.
+- The task completion summary must state the ledger totals and list every exclusion. Any item without a disposition keeps the implementation task incomplete.
+
 See **[docs/apk-analysis/TOOLING.md](docs/apk-analysis/TOOLING.md)** for decompiler setup and
 invocation (jadx, apktool, blutter, ffdec) and the required per-stack coverage. It is method-only
 by construction and states no UUID, byte value, or device-name pattern, so it is safe to hand to a

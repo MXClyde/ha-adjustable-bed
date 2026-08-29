@@ -5,12 +5,13 @@
 // Usage:
 //   bun run build          # one-shot production build
 //   bun run build.mjs --watch
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const outfile = join(here, "dist", "adjustable-bed-card.js");
 const manifest = JSON.parse(
   readFileSync(join(here, "..", "manifest.json"), "utf8"),
 );
@@ -19,7 +20,7 @@ const watch = process.argv.includes("--watch");
 /** @type {import('esbuild').BuildOptions} */
 const options = {
   entryPoints: [join(here, "src", "adjustable-bed-card.ts")],
-  outfile: join(here, "dist", "adjustable-bed-card.js"),
+  outfile,
   bundle: true,
   format: "esm",
   target: "es2021",
@@ -40,5 +41,13 @@ if (watch) {
   console.log("watching frontend/src for changes…");
 } else {
   await esbuild.build(options);
+  // Lit contains a template-literal character class with a literal tab before
+  // a newline. Preserve the same regexp semantics using an escape so generated
+  // bundles pass git's trailing-whitespace check.
+  const bundle = readFileSync(outfile, "utf8");
+  writeFileSync(
+    outfile,
+    bundle.replaceAll("[ \t\n\\f\\r]", "[ \\t\n\\f\\r]"),
+  );
   console.log(`built dist/adjustable-bed-card.js (v${manifest.version})`);
 }

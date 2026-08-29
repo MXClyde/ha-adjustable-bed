@@ -703,23 +703,25 @@ export class AdjustableBedCard extends LitElement {
   }
 
   private _graphicState(bed: BedEntities): BedGraphicState | undefined {
-    const withAngle = bed.motors.filter((motor) => motor.angle);
+    const withPosition = bed.motors.filter(
+      (motor) => motor.angle || motor.position,
+    );
     // Registry entries can outlive a configuration change. Do not draw a flat
-    // default graphic from unavailable/unknown sensors: every exposed angle
-    // must have a numeric value before the graphic and its readouts are shown.
+    // default graphic from unavailable/unknown entities: every exposed
+    // position must have a numeric value before the graphic is shown.
     if (
-      withAngle.length === 0 ||
-      withAngle.some((motor) => this._angle(motor) === undefined)
+      withPosition.length === 0 ||
+      withPosition.some((motor) => this._angle(motor) === undefined)
     )
       return undefined;
     const upper =
-      withAngle.find((m) => m.key === "back") ??
-      withAngle.find((m) => m.key === "head") ??
-      withAngle[0];
+      withPosition.find((m) => m.key === "back") ??
+      withPosition.find((m) => m.key === "head") ??
+      withPosition[0];
     const lower =
-      withAngle.find((m) => m.key === "legs") ??
-      withAngle.find((m) => m.key === "feet") ??
-      withAngle[withAngle.length - 1];
+      withPosition.find((m) => m.key === "legs") ??
+      withPosition.find((m) => m.key === "feet") ??
+      withPosition[withPosition.length - 1];
     const moving = bed.motors.some((m) => {
       const s = m.cover ? this._state(m.cover)?.state : undefined;
       return s === "opening" || s === "closing";
@@ -856,7 +858,13 @@ export class AdjustableBedCard extends LitElement {
     return html`
       ${this._heading("section.utility")}
       <div class="tiles">
-        ${bed.utility.map((id) => this._tile(id, () => this._press(id)))}
+        ${bed.utility.map((id) =>
+          this._tile(id, () =>
+            id.startsWith("switch.")
+              ? this._call("switch", "toggle", id)
+              : this._press(id),
+          ),
+        )}
       </div>
     `;
   }
@@ -1145,13 +1153,13 @@ export class AdjustableBedCard extends LitElement {
   }
 
   private _readout(m: MotorEntity): string | undefined {
-    if (m.angle) {
-      const a = this._angle(m);
-      return a === undefined ? undefined : `${Math.round(a)}°`;
-    }
-    if (m.position) {
-      const p = this._angle(m);
-      return p === undefined ? undefined : `${Math.round(p)}%`;
+    const feedbackEntity = m.angle ?? m.position;
+    if (feedbackEntity) {
+      const value = this._angle(m);
+      if (value === undefined) return undefined;
+      const unit = this._state(feedbackEntity)?.attributes.unit_of_measurement;
+      const fallbackUnit = m.angle ? "°" : "%";
+      return `${Math.round(value)}${typeof unit === "string" ? unit : fallbackUnit}`;
     }
     if (m.cover) {
       const pos = this._state(m.cover)?.attributes.current_position;

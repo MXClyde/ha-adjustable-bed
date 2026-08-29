@@ -221,6 +221,7 @@ BED_TYPE_MOTOSLEEP: Final = "motosleep"
 
 BEDS_WITH_PASSIVE_POSITION_RECONCILIATION: Final = frozenset({BED_TYPE_LINAK})
 
+
 def supports_passive_position_reconciliation(bed_type: str | None) -> bool:
     """Return True if the bed type supports passive position reconciliation."""
     return bed_type in BEDS_WITH_PASSIVE_POSITION_RECONCILIATION
@@ -386,7 +387,6 @@ SUPPORTED_BED_TYPES: Final = [
 # every member, so adding a post-connect mutation later fails loudly.
 OFFLINE_CAPABILITY_SAFE_BED_TYPES: Final = frozenset(
     {
-        BED_TYPE_LINAK,
         BED_TYPE_OKIN_HANDLE,
         BED_TYPE_DEWERTOKIN,
         BED_TYPE_OKIN_ORE,
@@ -463,12 +463,25 @@ DEVICE_INFO_CHARS: Final = {
 # Linak specific UUIDs
 LINAK_CONTROL_SERVICE_UUID: Final = "99fa0001-338a-1024-8a49-009c0215f78a"
 LINAK_CONTROL_CHAR_UUID: Final = "99fa0002-338a-1024-8a49-009c0215f78a"
+LINAK_ERROR_CHAR_UUID: Final = "99fa0003-338a-1024-8a49-009c0215f78a"
+
+LINAK_CONFIG_SERVICE_UUID: Final = "99fa0010-338a-1024-8a49-009c0215f78a"
+LINAK_CONFIG_CHAR_UUID: Final = "99fa0011-338a-1024-8a49-009c0215f78a"
 
 LINAK_POSITION_SERVICE_UUID: Final = "99fa0020-338a-1024-8a49-009c0215f78a"
+LINAK_POSITION_BASE_UUID: Final = "99fa0024-338a-1024-8a49-009c0215f78a"
 LINAK_POSITION_BACK_UUID: Final = "99fa0028-338a-1024-8a49-009c0215f78a"
 LINAK_POSITION_LEG_UUID: Final = "99fa0027-338a-1024-8a49-009c0215f78a"
 LINAK_POSITION_HEAD_UUID: Final = "99fa0026-338a-1024-8a49-009c0215f78a"
 LINAK_POSITION_FEET_UUID: Final = "99fa0025-338a-1024-8a49-009c0215f78a"
+LINAK_POSITION_MASK_UUID: Final = "99fa0029-338a-1024-8a49-009c0215f78a"
+
+LINAK_TIMER_SERVICE_UUID: Final = "99fa0050-338a-1024-8a49-009c0215f78a"
+LINAK_TIMER_CHAR_UUID: Final = "99fa0051-338a-1024-8a49-009c0215f78a"
+LINAK_DEVICE_NAME_UUID: Final = "00002a00-0000-1000-8000-00805f9b34fb"
+
+LINAK_VARIANT_BED_CONTROL: Final = "bed_control"
+LINAK_VARIANT_PERFORMANCE: Final = "performance_legacy"
 
 # Linak position calibration
 LINAK_BACK_MAX_POSITION: Final = 820
@@ -1153,6 +1166,11 @@ REMACRO_READ_CHAR_UUID: Final = "6e403589-b5a3-f393-e0a9-e50e24dcca9e"
 
 # Protocol variants
 VARIANT_AUTO: Final = "auto"
+LINAK_VARIANTS: Final = {
+    VARIANT_AUTO: "Auto (Bed Control)",
+    LINAK_VARIANT_BED_CONTROL: "Bed Control (modern, auto-detected capabilities)",
+    LINAK_VARIANT_PERFORMANCE: "Performance Series (legacy, 300 ms hold cadence)",
+}
 
 # STAR25 controllers select their packet dialect from Device Information 0x2A29.
 # StarCode is selected when the manufacturer text contains "star"; missing,
@@ -1254,20 +1272,14 @@ LEGGETT_VARIANTS: Final = {
 
 
 @overload
-def resolve_explicit_bed_type(
-    bed_type: str, protocol_variant: str | None
-) -> str: ...
+def resolve_explicit_bed_type(bed_type: str, protocol_variant: str | None) -> str: ...
 
 
 @overload
-def resolve_explicit_bed_type(
-    bed_type: None, protocol_variant: str | None
-) -> None: ...
+def resolve_explicit_bed_type(bed_type: None, protocol_variant: str | None) -> None: ...
 
 
-def resolve_explicit_bed_type(
-    bed_type: str | None, protocol_variant: str | None
-) -> str | None:
+def resolve_explicit_bed_type(bed_type: str | None, protocol_variant: str | None) -> str | None:
     """Resolve a legacy umbrella bed type to the concrete type an EXPLICIT
     protocol variant selects.
 
@@ -1289,6 +1301,7 @@ def resolve_explicit_bed_type(
         if protocol_variant == LEGGETT_VARIANT_GEN2:
             return BED_TYPE_LEGGETT_GEN2
     return bed_type
+
 
 # Richmat protocol variants (auto-detected, but can be overridden)
 RICHMAT_VARIANT_NORDIC: Final = "nordic"
@@ -1368,9 +1381,7 @@ RICHMAT_REMOTE_LP_QRRM: Final = "LP-QRRM"
 # Richmat WiLinke stop-byte compatibility.
 # Most Richmat remotes use END=0x6E, but some devices require 0x5E to stop
 # movement: QRRM remotes and BedTech BT6500 beds (issue #194).
-RICHMAT_WILINKE_STOP_COMPAT_REMOTE_CODES: Final[frozenset[str]] = frozenset(
-    {"qrrm", "bt6500"}
-)
+RICHMAT_WILINKE_STOP_COMPAT_REMOTE_CODES: Final[frozenset[str]] = frozenset({"qrrm", "bt6500"})
 
 # Display names for remote selection
 RICHMAT_REMOTES: Final = {
@@ -2035,6 +2046,8 @@ ALL_PROTOCOL_VARIANTS: Final = [
     *(_variant for _variant in OKIN_DOT_VARIANTS if _variant != VARIANT_AUTO),
     OKIN_64BIT_VARIANT_NORDIC,
     OKIN_64BIT_VARIANT_CUSTOM,
+    LINAK_VARIANT_BED_CONTROL,
+    LINAK_VARIANT_PERFORMANCE,
     SLEEPYS_BOX25_VARIANT_STAR,
     SLEEPYS_BOX25_VARIANT_LEGACY,
     # SBI/Q-Plus variants
@@ -2067,6 +2080,8 @@ BEDS_REQUIRING_PAIRING: Final[set[str]] = {
     BED_TYPE_OKIMAT,
     BED_TYPE_VIBRADORM,
     BED_TYPE_LOGICDATA,
+    # All three analyzed Linak BLE apps require Android/OS bonding before GATT.
+    BED_TYPE_LINAK,
     # Leggett & Platt Gen2 (LP Comfort Connect, 209-M001): LP Control calls
     # createBond() for an unbonded Gen2 device after service discovery. Issue
     # #385 shows repeated unbonded BlueZ connection timeouts while the box keeps
@@ -2196,9 +2211,7 @@ BEDS_WITH_POSITION_FEEDBACK: Final = frozenset(
 )
 
 
-def bed_type_has_position_feedback(
-    bed_type: str | None, protocol_variant: str | None
-) -> bool:
+def bed_type_has_position_feedback(bed_type: str | None, protocol_variant: str | None) -> bool:
     """Return True if this bed type/variant combination reports motor positions.
 
     Membership in BEDS_WITH_POSITION_FEEDBACK is not sufficient on its own:
@@ -2212,6 +2225,7 @@ def bed_type_has_position_feedback(
     if bed_type in BEDS_WITH_POSITION_FEEDBACK:
         return True
     return bed_type == BED_TYPE_KEESON and protocol_variant == KEESON_VARIANT_ERGOMOTION
+
 
 # Bed types that may have angle sensing enabled in an existing entry but report no
 # degree-angle data. Sleep Number MCR/BAM reports only sleep-number values and bed
@@ -2493,6 +2507,9 @@ def get_motor_pulse_defaults(
     detection_signals: list[str] | None = None,
 ) -> tuple[int, int]:
     """Return motor pulse defaults for a bed type and protocol variant."""
+    if bed_type == BED_TYPE_LINAK and protocol_variant == LINAK_VARIANT_PERFORMANCE:
+        return (4, 300)
+
     if bed_type == BED_TYPE_OCTO and (
         protocol_variant == OCTO_VARIANT_STAR2
         or (

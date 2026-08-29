@@ -26,7 +26,7 @@ from .entity import AdjustableBedEntity
 from .paired_coordinator import PairedBedCoordinator
 
 if TYPE_CHECKING:
-    from .beds.base import BedController
+    from .beds.base import BedController, ControllerStateBinarySensorSpec
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -110,6 +110,12 @@ def _binary_sensor_entities_for(
                 )
             continue
         entities.append(AdjustableBedConnectionSensor(coordinator, description))
+
+    if controller is not None:
+        entities.extend(
+            AdjustableBedControllerStateBinarySensor(coordinator, spec)
+            for spec in controller.controller_state_binary_sensor_specs
+        )
 
     return entities
 
@@ -216,6 +222,57 @@ class AdjustableBedConnectionSensor(AdjustableBedEntity, BinarySensorEntity):
         return attrs
 
 
+class AdjustableBedControllerStateBinarySensor(AdjustableBedEntity, BinarySensorEntity):
+    """Binary diagnostic backed by typed controller-published state."""
+
+    def __init__(
+        self,
+        coordinator: AdjustableBedCoordinator,
+        spec: ControllerStateBinarySensorSpec,
+    ) -> None:
+        """Initialize a controller-state binary sensor."""
+        super().__init__(coordinator)
+        self._spec = spec
+        self._attr_unique_id = coordinator.entity_unique_id(spec.key)
+        self._attr_translation_key = spec.translation_key
+        self._attr_icon = spec.icon
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_entity_registry_enabled_default = spec.entity_registry_enabled_default
+        self._unregister_callback: Callable[[], None] | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to controller-state changes."""
+        await super().async_added_to_hass()
+        self._unregister_callback = self._coordinator.register_controller_state_callback(
+            self._handle_controller_state_update
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Unsubscribe from controller-state changes."""
+        if self._unregister_callback is not None:
+            self._unregister_callback()
+        await super().async_will_remove_from_hass()
+
+    @callback
+    def _handle_controller_state_update(self, state: dict[str, Any]) -> None:
+        """Refresh when this sensor or one of its attributes changed."""
+        watched = {self._spec.state_key, *self._spec.attribute_keys}
+        if watched.intersection(state):
+            self.async_write_ha_state()
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return the latest controller-published boolean state."""
+        value = self._coordinator.controller_state.get(self._spec.state_key)
+        return value if isinstance(value, bool) else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return parser metadata selected by the controller spec."""
+        state = self._coordinator.controller_state
+        return {key: state[key] for key in self._spec.attribute_keys if key in state}
+
+
 class AdjustableBedPresenceSensor(AdjustableBedEntity, BinarySensorEntity):
     """Binary sensor entity for adjustable bed occupancy state."""
 
@@ -270,7 +327,9 @@ class AdjustableBedPresenceSensor(AdjustableBedEntity, BinarySensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return additional presence metadata."""
         attrs: dict[str, Any] = {}
-        side = self.entity_description.side or self._coordinator.controller_state.get("bed_presence_side")
+        side = self.entity_description.side or self._coordinator.controller_state.get(
+            "bed_presence_side"
+        )
         if side is not None:
             attrs["side"] = side
         state_key = self.entity_description.state_key or self.entity_description.key

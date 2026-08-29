@@ -213,18 +213,58 @@ def _no_advertisement_wait():
         yield
 
 
-async def _advance_progress(hass: HomeAssistant, result: Any) -> Any:
-    """Drive a progress result through to the step that follows it.
-
-    Setup now runs its BLE work as a background task behind a progress view, so
-    a submitted form returns SHOW_PROGRESS rather than the next form.
-    """
+async def _advance_only_progress(hass: HomeAssistant, result: Any) -> Any:
+    """Poll one background operation without crossing another form."""
     for _ in range(20):
         if result["type"] != FlowResultType.SHOW_PROGRESS:
             return result
         await hass.async_block_till_done()
         result = await hass.config_entries.flow.async_configure(result["flow_id"])
-    raise AssertionError("the setup progress step never completed")
+    raise AssertionError("the progress step never completed")
+
+
+async def _complete_setup_pairing(hass: HomeAssistant, result: Any) -> Any:
+    """Model a successful bond and return the setup step that follows it."""
+    if not (
+        result["type"] == FlowResultType.FORM
+        and result.get("step_id") in {"bluetooth_pairing", "manual_pairing"}
+    ):
+        return result
+
+    # Pairing behavior itself has dedicated tests below. General setup tests
+    # need a deterministic positive bond before they exercise their own step.
+    with (
+        patch.object(
+            AdjustableBedConfigFlow,
+            "_attempt_pairing",
+            new=AsyncMock(return_value=_verified_evidence()),
+        ),
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK)),
+    ):
+        action_marker = next(
+            marker for marker in result["data_schema"].schema if str(marker) == "action"
+        )
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {"action": action_marker.default()}
+        )
+        result = await _advance_only_progress(hass, result)
+        assert result["step_id"] == "pairing_result"
+        finish_input = (
+            {"action": "finish"}
+            if any(str(marker) == "action" for marker in result["data_schema"].schema)
+            else {}
+        )
+        return await hass.config_entries.flow.async_configure(result["flow_id"], finish_input)
+
+
+async def _advance_progress(hass: HomeAssistant, result: Any) -> Any:
+    """Drive pairing and background work through to the next stable form."""
+    for _ in range(20):
+        result = await _complete_setup_pairing(hass, result)
+        if result["type"] != FlowResultType.SHOW_PROGRESS:
+            return result
+        result = await _advance_only_progress(hass, result)
+    raise AssertionError("the setup flow never reached a stable step")
 
 
 class TestPairingInstructions:
@@ -574,9 +614,7 @@ class TestPairingPersistence:
         assert next(iter(result["data_schema"].schema)).default() == "pair_now"
         # The form has to say why the action is missing. "No usable bond" would
         # be false: the bond is there, on a route that may well be the one used.
-        assert (
-            "chooses which when it connects" in result["description_placeholders"]["bond_state"]
-        )
+        assert "chooses which when it connects" in result["description_placeholders"]["bond_state"]
 
         # And it cannot be forced through by submitting it directly.
         with _patch_inventory(inventory), contested:
@@ -775,9 +813,7 @@ class TestPairingPersistence:
             prediction,
             patch.object(flow, "_async_start_pairing_operation", AsyncMock()),
         ):
-            await flow.async_step_bluetooth_pairing(
-                {"action": "use_existing_bond"}
-            )
+            await flow.async_step_bluetooth_pairing({"action": "use_existing_bond"})
 
         assert flow._pairing_verify_source == "11:22:33:44:55:66"
         assert flow._pairing_route_certain is False
@@ -1461,8 +1497,7 @@ class TestBluetoothDiscoveryFlow:
         assert disconnect_after_command_default_enabled(BED_TYPE_KAIDI, None) is False
         assert disconnect_after_command_default_enabled(BED_TYPE_KEESON, VARIANT_AUTO) is False
         assert (
-            disconnect_after_command_default_enabled(BED_TYPE_KEESON, KEESON_VARIANT_SINO)
-            is False
+            disconnect_after_command_default_enabled(BED_TYPE_KEESON, KEESON_VARIANT_SINO) is False
         )
         assert (
             disconnect_after_command_default_enabled(BED_TYPE_KEESON, KEESON_VARIANT_ERGOMOTION)
@@ -1492,7 +1527,9 @@ class TestBluetoothDiscoveryFlow:
             disconnect_after_command_default_enabled(BED_TYPE_LEGGETT_PLATT, LEGGETT_VARIANT_MLRM)
             is False
         )
-        assert disconnect_after_command_default_enabled(BED_TYPE_LEGGETT_PLATT, VARIANT_AUTO) is False
+        assert (
+            disconnect_after_command_default_enabled(BED_TYPE_LEGGETT_PLATT, VARIANT_AUTO) is False
+        )
         assert disconnect_after_command_default_enabled(BED_TYPE_LEGGETT_WILINKE, None) is False
         # No bed type chosen yet (auto-detect): keep the conservative default.
         assert disconnect_after_command_default_enabled(None, None) is False
@@ -1621,12 +1658,22 @@ class TestBluetoothDiscoveryFlow:
         confirm_marker = next(iter(result["data_schema"].schema))
         assert confirm_marker.default() is True
 
-        with patch.object(
-            AdjustableBedConfigFlow, "_verification_possible", return_value=False
-        ):
+        with patch.object(AdjustableBedConfigFlow, "_verification_possible", return_value=False):
             result = await flow.async_step_disconnect_after_command(
                 {CONF_DISCONNECT_AFTER_COMMAND: False}
             )
+            assert result["step_id"] == "manual_pairing"
+            with (
+                patch.object(
+                    flow,
+                    "_attempt_pairing",
+                    new=AsyncMock(return_value=_verified_evidence()),
+                ),
+                _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK)),
+            ):
+                progress = await flow.async_step_manual_pairing({"action": "pair_now"})
+                assert progress["type"] is FlowResultType.SHOW_PROGRESS
+                result = await _finish_pairing(hass, flow)
 
         assert result["type"] == FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_DISCONNECT_AFTER_COMMAND] is False
@@ -1657,9 +1704,6 @@ class TestBluetoothDiscoveryFlow:
         )
 
         result = await _advance_progress(hass, result)
-        assert result["step_id"] == "verify_connection"
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
-
         assert result["type"] == FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_DISCONNECT_AFTER_COMMAND] is False
 
@@ -1689,17 +1733,10 @@ class TestBluetoothDiscoveryFlow:
             },
         )
 
-        # A connectable scanner is mocked, so setup runs the probe behind a
-        # progress view and then shows the verify_connection result step.
-        assert result["type"] == FlowResultType.SHOW_PROGRESS
+        # Linak setup establishes and verifies the OS bond before creating the
+        # entry. Runtime startup then performs model/capability discovery on the
+        # persistent connection instead of spending a second setup connection.
         result = await _advance_progress(hass, result)
-        assert result["type"] == FlowResultType.FORM
-        assert result["step_id"] == "verify_connection"
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"],
-            user_input={},
-        )
-
         assert result["type"] == FlowResultType.CREATE_ENTRY
         assert result["title"] == "My Bed"
         assert result["data"][CONF_ADDRESS] == mock_bluetooth_service_info.address
@@ -1807,7 +1844,6 @@ class TestBluetoothDiscoveryFlow:
             result["flow_id"],
             user_input={},
         )
-
         assert result["type"] == FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_BED_TYPE] == BED_TYPE_DIAGNOSTIC
 
@@ -1887,17 +1923,9 @@ class TestBluetoothDiscoveryFlow:
             },
         )
 
-        # A connectable scanner is mocked, so accepted input proceeds through
-        # the non-blocking progress + verify_connection steps before creating
-        # the entry.
+        # Accepted input proceeds through the Linak bonding step before the
+        # entry is created.
         result = await _advance_progress(hass, result)
-        assert result["type"] == FlowResultType.FORM
-        assert result["step_id"] == "verify_connection"
-        result = await hass.config_entries.flow.async_configure(
-            result["flow_id"],
-            user_input={},
-        )
-
         assert result["type"] == FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_MOTOR_COUNT] == 3
 
@@ -2616,6 +2644,7 @@ class TestManualFlow:
                 result["flow_id"],
                 user_input={CONF_DISCONNECT_AFTER_COMMAND: True},
             )
+            result = await _advance_progress(hass, result)
 
         assert result["type"] == FlowResultType.CREATE_ENTRY
         assert result["title"] == "Manual Bed"
@@ -2810,6 +2839,7 @@ class TestManualFlow:
                 result["flow_id"],
                 user_input={CONF_DISCONNECT_AFTER_COMMAND: True},
             )
+            result = await _advance_progress(hass, result)
 
         assert result["type"] == FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_ADDRESS] == "AA:BB:CC:DD:EE:FF"  # Normalized
@@ -3328,13 +3358,14 @@ class TestOptionsFlow:
         rebuilt_markers = {marker.schema: marker for marker in rebuilt["data_schema"].schema}
         assert rebuilt_markers[CONF_MOTOR_COUNT].default() == 2
         assert rebuilt_markers[CONF_DISABLE_ANGLE_SENSING].default() is False
-        assert CONF_PROTOCOL_VARIANT not in rebuilt_markers
+        assert rebuilt_markers[CONF_PROTOCOL_VARIANT].default() == VARIANT_AUTO
         assert CONF_OCTO_PIN not in rebuilt_markers
 
         saved = await hass.config_entries.options.async_configure(
             rebuilt["flow_id"],
             user_input={
                 CONF_BED_TYPE: BED_TYPE_LINAK,
+                CONF_PROTOCOL_VARIANT: VARIANT_AUTO,
             },
         )
 
@@ -3342,7 +3373,7 @@ class TestOptionsFlow:
         assert entry.data[CONF_BED_TYPE] == BED_TYPE_LINAK
         assert entry.data[CONF_MOTOR_COUNT] == 2
         assert entry.data[CONF_DISABLE_ANGLE_SENSING] is False
-        assert CONF_PROTOCOL_VARIANT not in entry.data
+        assert entry.data[CONF_PROTOCOL_VARIANT] == VARIANT_AUTO
         assert CONF_OCTO_PIN not in entry.data
 
     async def test_options_flow_keeps_current_legacy_bed_type_selectable(
@@ -3988,10 +4019,11 @@ def _fake_connected_client() -> MagicMock:
 
 async def test_verify_connection_success_then_creates_entry(
     hass: HomeAssistant,
-    mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+    mock_bluetooth_service_info_jiecang: BluetoothServiceInfoBleak,
     enable_custom_integrations,
 ) -> None:
     """A successful probe shows the checklist, then submit creates the entry."""
+    mock_bluetooth_service_info = mock_bluetooth_service_info_jiecang
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=mock_bluetooth_service_info
     )
@@ -4033,15 +4065,16 @@ async def test_verify_connection_success_then_creates_entry(
         created = await hass.config_entries.flow.async_configure(verify["flow_id"], user_input={})
 
     assert created["type"] == FlowResultType.CREATE_ENTRY
-    assert created["data"][CONF_BED_TYPE] == BED_TYPE_LINAK
+    assert created["data"][CONF_BED_TYPE] == BED_TYPE_JIECANG
 
 
 async def test_verify_connection_warns_when_no_writable_characteristic(
     hass: HomeAssistant,
-    mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+    mock_bluetooth_service_info_jiecang: BluetoothServiceInfoBleak,
     enable_custom_integrations,
 ) -> None:
     """Connecting to a device with no writable characteristic must not show a pass."""
+    mock_bluetooth_service_info = mock_bluetooth_service_info_jiecang
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=mock_bluetooth_service_info
     )
@@ -4087,15 +4120,16 @@ async def test_verify_connection_warns_when_no_writable_characteristic(
         created = await hass.config_entries.flow.async_configure(verify["flow_id"], user_input={})
 
     assert created["type"] == FlowResultType.CREATE_ENTRY
-    assert created["data"][CONF_BED_TYPE] == BED_TYPE_LINAK
+    assert created["data"][CONF_BED_TYPE] == BED_TYPE_JIECANG
 
 
 async def test_verify_connection_failure_still_creates_entry(
     hass: HomeAssistant,
-    mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+    mock_bluetooth_service_info_jiecang: BluetoothServiceInfoBleak,
     enable_custom_integrations,
 ) -> None:
     """A failed probe shows the error note but the user can still finish setup."""
+    mock_bluetooth_service_info = mock_bluetooth_service_info_jiecang
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=mock_bluetooth_service_info
     )
@@ -4119,15 +4153,16 @@ async def test_verify_connection_failure_still_creates_entry(
         created = await hass.config_entries.flow.async_configure(verify["flow_id"], user_input={})
 
     assert created["type"] == FlowResultType.CREATE_ENTRY
-    assert created["data"][CONF_BED_TYPE] == BED_TYPE_LINAK
+    assert created["data"][CONF_BED_TYPE] == BED_TYPE_JIECANG
 
 
 async def test_verify_connection_skipped_without_scanner(
     hass: HomeAssistant,
-    mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+    mock_bluetooth_service_info_jiecang: BluetoothServiceInfoBleak,
     enable_custom_integrations,
 ) -> None:
     """With no connectable scanner the verify step is skipped, entry created directly."""
+    mock_bluetooth_service_info = mock_bluetooth_service_info_jiecang
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=mock_bluetooth_service_info
     )
@@ -4137,9 +4172,10 @@ async def test_verify_connection_skipped_without_scanner(
         created = await hass.config_entries.flow.async_configure(
             result["flow_id"], user_input={CONF_PREFERRED_ADAPTER: "auto"}
         )
+        created = await _advance_progress(hass, created)
 
     assert created["type"] == FlowResultType.CREATE_ENTRY
-    assert created["data"][CONF_BED_TYPE] == BED_TYPE_LINAK
+    assert created["data"][CONF_BED_TYPE] == BED_TYPE_JIECANG
 
 
 # ---------------------------------------------------------------------------
@@ -4149,10 +4185,11 @@ async def test_verify_connection_skipped_without_scanner(
 
 async def test_setup_shows_a_progress_view_before_the_result(
     hass: HomeAssistant,
-    mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+    mock_bluetooth_service_info_jiecang: BluetoothServiceInfoBleak,
     enable_custom_integrations,
 ) -> None:
     """Submitting setup must render an active progress view, not a frozen form."""
+    mock_bluetooth_service_info = mock_bluetooth_service_info_jiecang
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=mock_bluetooth_service_info
     )
@@ -4185,7 +4222,7 @@ async def test_setup_shows_a_progress_view_before_the_result(
             "reading_capabilities",
             "disconnecting",
         }
-        assert progress["description_placeholders"]["name"] == "Test Bed"
+        assert progress["description_placeholders"]["name"] == "JC-35TK1WT"
 
         done = await _advance_progress(hass, progress)
         assert done["step_id"] == "verify_connection"
@@ -4196,10 +4233,11 @@ async def test_setup_shows_a_progress_view_before_the_result(
 
 async def test_the_probe_runs_once_even_if_the_progress_step_is_re_entered(
     hass: HomeAssistant,
-    mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+    mock_bluetooth_service_info_jiecang: BluetoothServiceInfoBleak,
     enable_custom_integrations,
 ) -> None:
     """A refresh or a double submit must not open a second BLE connection."""
+    mock_bluetooth_service_info = mock_bluetooth_service_info_jiecang
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=mock_bluetooth_service_info
     )
@@ -4257,10 +4295,11 @@ async def test_consumed_setup_progress_does_not_start_another_probe(
 
 async def test_a_not_advertising_bed_offers_retry_and_still_allows_finishing(
     hass: HomeAssistant,
-    mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+    mock_bluetooth_service_info_jiecang: BluetoothServiceInfoBleak,
     enable_custom_integrations,
 ) -> None:
     """The gate refusal is explained, retryable, and never blocks setup (#458)."""
+    mock_bluetooth_service_info = mock_bluetooth_service_info_jiecang
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=mock_bluetooth_service_info
     )
@@ -4296,7 +4335,7 @@ async def test_a_not_advertising_bed_offers_retry_and_still_allows_finishing(
 
 async def test_an_advertising_bed_that_cannot_be_resolved_offers_retry(
     hass: HomeAssistant,
-    mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+    mock_bluetooth_service_info_jiecang: BluetoothServiceInfoBleak,
     enable_custom_integrations,
 ) -> None:
     """A resolution gap must be retryable, not reported as "device not found".
@@ -4312,6 +4351,7 @@ async def test_an_advertising_bed_that_cannot_be_resolved_offers_retry(
     report. The advertisement is timestamped against the gate's own clock, which
     is left running so the bounded wait below can actually expire.
     """
+    mock_bluetooth_service_info = mock_bluetooth_service_info_jiecang
     _freshness = "custom_components.adjustable_bed.bluetooth_freshness"
     advertising = SimpleNamespace(
         source="hci0",
@@ -4327,15 +4367,12 @@ async def test_an_advertising_bed_that_cannot_be_resolved_offers_retry(
         patch.object(AdjustableBedConfigFlow, "_verification_possible", return_value=True),
         patch("bleak_retry_connector.establish_connection") as connects,
         patch(f"{_freshness}.async_path_for_source", return_value=None),
-        patch(
-            f"{_freshness}.bluetooth.async_last_service_info", return_value=advertising
-        ),
+        patch(f"{_freshness}.bluetooth.async_last_service_info", return_value=advertising),
         # The bed is advertising; only the handle to it is missing.
         patch(f"{_freshness}.async_resolve_ble_device", return_value=None),
         # Keep the built-in wait from holding the test for its full duration.
         patch(
-            "custom_components.adjustable_bed.config_flow"
-            "._PROBE_ADVERTISEMENT_WAIT_SECONDS",
+            "custom_components.adjustable_bed.config_flow._PROBE_ADVERTISEMENT_WAIT_SECONDS",
             0.01,
         ),
     ):
@@ -4365,10 +4402,11 @@ async def test_an_advertising_bed_that_cannot_be_resolved_offers_retry(
 
 async def test_abandoning_the_flow_mid_probe_leaves_no_connected_client(
     hass: HomeAssistant,
-    mock_bluetooth_service_info: BluetoothServiceInfoBleak,
+    mock_bluetooth_service_info_jiecang: BluetoothServiceInfoBleak,
     enable_custom_integrations,
 ) -> None:
     """Cancellation must not leak the bed's single BLE connection."""
+    mock_bluetooth_service_info = mock_bluetooth_service_info_jiecang
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_BLUETOOTH}, data=mock_bluetooth_service_info
     )
@@ -4623,9 +4661,7 @@ async def test_combined_bond_removal_targets_the_selected_child(
         )
         while progress["type"] == FlowResultType.SHOW_PROGRESS:
             await hass.async_block_till_done()
-            progress = await hass.config_entries.options.async_configure(
-                progress["flow_id"]
-            )
+            progress = await hass.config_entries.options.async_configure(progress["flow_id"])
 
     assert entered == ["unpair"]
     parent_coordinator.child_for_side.assert_any_call(SIDE_LEFT)
@@ -4823,9 +4859,7 @@ async def test_a_confirmed_unpair_does_not_reload_and_recreate_the_bond(
             )
             while progress["type"] == FlowResultType.SHOW_PROGRESS:
                 await hass.async_block_till_done()
-                progress = await hass.config_entries.options.async_configure(
-                    progress["flow_id"]
-                )
+                progress = await hass.config_entries.options.async_configure(progress["flow_id"])
 
             reload_entry.assert_not_awaited()
     finally:
@@ -5083,9 +5117,7 @@ async def test_replacing_a_bond_that_cannot_be_removed_does_not_pair(
             "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
             AsyncMock(return_value=(fresh, MagicMock())),
         ),
-        _patch_inventory(
-            LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
-        ),
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))),
         patch(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
             AsyncMock(return_value=failed),
@@ -5117,9 +5149,7 @@ async def test_unverified_bond_removal_does_not_claim_the_bond_remains(
             "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
             AsyncMock(return_value=(fresh, MagicMock())),
         ),
-        _patch_inventory(
-            LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
-        ),
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))),
         patch(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
             AsyncMock(return_value=unconfirmed),
@@ -5238,9 +5268,7 @@ async def test_bond_replacement_holds_the_address_lock_through_pairing(
             "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
             AsyncMock(return_value=(fresh, MagicMock())),
         ),
-        _patch_inventory(
-            LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
-        ),
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))),
         patch(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
             AsyncMock(side_effect=remove),
@@ -5881,9 +5909,7 @@ async def test_bond_replacement_completes_even_if_the_flow_goes_away(
             "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
             AsyncMock(return_value=(fresh, MagicMock())),
         ),
-        _patch_inventory(
-            LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
-        ),
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))),
         patch(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
             AsyncMock(return_value=removed),
@@ -5920,9 +5946,7 @@ async def test_flow_cleanup_does_not_disconnect_a_running_bond_replacement(
 
     with (
         _patch_pairing_gate(),
-        _patch_inventory(
-            LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
-        ),
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))),
         patch(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
             AsyncMock(return_value=BondRemovalResult(status=BondRemovalStatus.REMOVED)),
@@ -6118,9 +6142,7 @@ async def test_replacement_holds_the_address_lock_until_pairing_finishes(
             "custom_components.adjustable_bed.config_flow.async_get_connect_lock",
             address_lock,
         ),
-        _patch_inventory(
-            LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
-        ),
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))),
         patch(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
             side_effect=remove,
@@ -6143,9 +6165,7 @@ async def test_rpc_failure_leaves_bond_removal_unconfirmed(
         error="timed out",
     )
     with (
-        _patch_inventory(
-            LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
-        ),
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))),
         patch(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
             AsyncMock(return_value=uncertain),
@@ -6219,9 +6239,7 @@ async def test_verifying_an_existing_bond_never_invents_a_marker(
         action=SetupAction.LOCATING,
         placeholders={},
     )
-    flow.operation.result = OperationResult(
-        outcome=OperationOutcome.SUCCESS, payload=unsupported
-    )
+    flow.operation.result = OperationResult(outcome=OperationOutcome.SUCCESS, payload=unsupported)
     flow._pairing_result_shown = True
     result = await flow.async_step_pairing_result({})
 
@@ -6302,9 +6320,7 @@ async def test_bond_replacement_reuses_the_device_it_already_resolved(
             "custom_components.adjustable_bed.config_flow.async_wait_for_advertisement",
             wait,
         ),
-        _patch_inventory(
-            LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))
-        ),
+        _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK, records=(_bond_record(),))),
         patch(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
             AsyncMock(return_value=removed),
@@ -6578,9 +6594,7 @@ async def test_a_reconnect_before_removal_still_replaces_the_bond(
             "custom_components.adjustable_bed.config_flow.async_remove_local_bond",
             AsyncMock(return_value=BondRemovalResult(status=BondRemovalStatus.REMOVED)),
         ) as removal,
-        patch.object(
-            flow, "_attempt_pairing", AsyncMock(return_value=_verified_evidence())
-        ),
+        patch.object(flow, "_attempt_pairing", AsyncMock(return_value=_verified_evidence())),
     ):
         result = await flow._async_replace_bond(address, record)
 
@@ -6588,9 +6602,7 @@ async def test_a_reconnect_before_removal_still_replaces_the_bond(
     assert result.outcome is OperationOutcome.SUCCESS
 
 
-async def _unproven_pairing_entry(
-    hass: HomeAssistant, *, source: str | None
-) -> dict[str, Any]:
+async def _unproven_pairing_entry(hass: HomeAssistant, *, source: str | None) -> dict[str, Any]:
     """Finish setup after a successful pair that nothing could verify."""
     flow = _pairing_flow(hass)
     flow._pairing_mode = "new"
@@ -6608,9 +6620,7 @@ async def _unproven_pairing_entry(
         action=SetupAction.LOCATING,
         placeholders={},
     )
-    flow.operation.result = OperationResult(
-        outcome=OperationOutcome.SUCCESS, payload=unsupported
-    )
+    flow.operation.result = OperationResult(outcome=OperationOutcome.SUCCESS, payload=unsupported)
     flow._pairing_result_shown = True
     result = await flow.async_step_pairing_result({})
 

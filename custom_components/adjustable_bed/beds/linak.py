@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from time import monotonic
 from typing import TYPE_CHECKING, Any
@@ -17,17 +17,48 @@ from bleak.exc import BleakError
 
 from ..const import (
     LINAK_BACK_MAX_POSITION,
+    LINAK_CONFIG_CHAR_UUID,
     LINAK_CONTROL_CHAR_UUID,
+    LINAK_DEVICE_NAME_UUID,
+    LINAK_ERROR_CHAR_UUID,
     LINAK_FEET_MAX_POSITION,
     LINAK_HEAD_MAX_POSITION,
     LINAK_LEG_MAX_POSITION,
     LINAK_POSITION_BACK_UUID,
+    LINAK_POSITION_BASE_UUID,
     LINAK_POSITION_FEET_UUID,
     LINAK_POSITION_HEAD_UUID,
     LINAK_POSITION_LEG_UUID,
+    LINAK_POSITION_MASK_UUID,
+    LINAK_POSITION_SERVICE_UUID,
+    LINAK_TIMER_CHAR_UUID,
+    LINAK_TIMER_SERVICE_UUID,
 )
 from ..position_seek import PositionSeekPolicy, SeekSample
-from .base import BedController
+from .base import (
+    POSITION_AXIS_COMMANDS,
+    POSITION_UNIT_DEGREES,
+    BedController,
+    ControllerStateBinarySensorSpec,
+    ControllerStateSensorSpec,
+    MotorControlSpec,
+    PositionNumberSpec,
+    build_position_number_spec,
+)
+from .linak_protocol import (
+    LinakAlarmStep,
+    LinakCapabilitySnapshot,
+    LinakModelVariant,
+    LinakProfile,
+    LinakReferenceState,
+    build_automatic_drive,
+    build_simultaneous_command,
+    build_timer_event,
+    build_timer_recurrence,
+    decode_error,
+    decode_reference,
+    decode_timer,
+)
 
 if TYPE_CHECKING:
     from ..coordinator import AdjustableBedCoordinator
@@ -54,6 +85,10 @@ LINAK_COARSE_SEEK_PULSE_COUNT = 6
 LINAK_MEDIUM_SEEK_PULSE_COUNT = 4
 LINAK_FINE_SEEK_PULSE_COUNT = 2
 LINAK_MICRO_SEEK_PULSE_COUNT = 1
+LINAK_MEMORY_RECALL_DURATION_S = 30
+LINAK_PERFORMANCE_HOLD_INTERVAL_MS = 300
+LINAK_BED_CONTROL_HOLD_INTERVAL_MS = 100
+LINAK_MASSAGE_ZONE_GAP_S = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,46 +159,50 @@ class LinakCommands:
     PRESET_MEMORY_2 = bytes([0x0F, 0x00])
     PRESET_MEMORY_3 = bytes([0x0C, 0x00])
     PRESET_MEMORY_4 = bytes([0x44, 0x00])
-    PRESET_MEMORY_5 = bytes([0x83, 0x00])
-    PRESET_MEMORY_6 = bytes([0x84, 0x00])
 
     # Program presets
     PROGRAM_MEMORY_1 = bytes([0x38, 0x00])
     PROGRAM_MEMORY_2 = bytes([0x39, 0x00])
     PROGRAM_MEMORY_3 = bytes([0x3A, 0x00])
     PROGRAM_MEMORY_4 = bytes([0x45, 0x00])
-    PROGRAM_MEMORY_5 = bytes([0x85, 0x00])
-    PROGRAM_MEMORY_6 = bytes([0x86, 0x00])
 
     # Under-bed lights
-    LIGHTS_ON = bytes([0x92, 0x00])
-    LIGHTS_OFF = bytes([0x93, 0x00])
     LIGHTS_TOGGLE = bytes([0x94, 0x00])
 
     # Massage - all
     MASSAGE_ALL_OFF = bytes([0x80, 0x00])
-    MASSAGE_ALL_TOGGLE = bytes([0x91, 0x00])
     MASSAGE_ALL_UP = bytes([0xA8, 0x00])
     MASSAGE_ALL_DOWN = bytes([0xA9, 0x00])
 
     # Massage - head
-    MASSAGE_HEAD_TOGGLE = bytes([0xA6, 0x00])
     MASSAGE_HEAD_UP = bytes([0x8D, 0x00])
     MASSAGE_HEAD_DOWN = bytes([0x8E, 0x00])
 
     # Massage - foot
-    MASSAGE_FOOT_TOGGLE = bytes([0xA7, 0x00])
     MASSAGE_FOOT_UP = bytes([0x8F, 0x00])
     MASSAGE_FOOT_DOWN = bytes([0x90, 0x00])
 
     # Massage mode
     MASSAGE_MODE_STEP = bytes([0x81, 0x00])
+    MASSAGE_WAVE_FREQUENCY_UP = bytes([0x87, 0x00])
+    MASSAGE_WAVE_FREQUENCY_DOWN = bytes([0x88, 0x00])
+    MASSAGE_ZONE_1_ON = bytes([0x89, 0x00])
+    MASSAGE_ZONE_1_OFF = bytes([0x8A, 0x00])
+    MASSAGE_ZONE_2_ON = bytes([0x8B, 0x00])
+    MASSAGE_ZONE_2_OFF = bytes([0x8C, 0x00])
+    IMPULSE_TOGGLE = bytes([0x4D, 0x00])
+    RESET_DEFAULTS = bytes([0x4E, 0x00])
+    FACTORY_RESET = bytes([0x7F, 0x3E, 0x80])
+    WAKE = bytes([0xFE, 0x00])
 
     # Motor movement commands
     # Note: 0x00 is INITIALIZE_DOWN, not stop. 0xFF is the correct stop command.
     # Using 0x00 can cause a brief reverse movement.
     MOVE_STOP = bytes([0xFF, 0x00])
+    MOVE_ALL_DOWN = bytes([0x00, 0x00])
     MOVE_ALL_UP = bytes([0x01, 0x00])
+    MOVE_BASE_DOWN = bytes([0x06, 0x00])
+    MOVE_BASE_UP = bytes([0x07, 0x00])
 
     # Individual motor control
     MOVE_HEAD_UP = bytes([0x03, 0x00])
@@ -179,9 +218,25 @@ class LinakCommands:
 class LinakController(BedController):
     """Controller for Linak beds."""
 
-    def __init__(self, coordinator: AdjustableBedCoordinator) -> None:
+    def __init__(
+        self,
+        coordinator: AdjustableBedCoordinator,
+        *,
+        profile: LinakProfile = LinakProfile.BED_CONTROL,
+        capability_snapshot: Mapping[str, Any] | None = None,
+    ) -> None:
         """Initialize the Linak controller."""
         super().__init__(coordinator)
+        self._profile = profile
+        self._capabilities = LinakCapabilitySnapshot.from_mapping(
+            capability_snapshot,
+            profile=profile,
+        )
+        if profile is LinakProfile.PERFORMANCE:
+            self._capabilities = LinakCapabilitySnapshot(
+                profile=profile,
+                discovery_complete=True,
+            )
         self._notify_callback: Callable[[str, float], None] | None = None
         self._notify_handles: dict[str, int] = {}
         self._active_position_notifications: set[str] = set()
@@ -189,19 +244,20 @@ class LinakController(BedController):
         self._resolved_two_motor_secondary_spec: LinakPositionSpec | None = None
         self._session_ready = False
         self._session_started_monotonic = monotonic()
+        self._protocol_notification_uuids: set[str] = set()
+        self._timer_candidate = False
+        self._performance_wave_active = False
+        self._publish_capability_state()
         _LOGGER.debug(
-            "LinakController initialized (motor_count: %d)",
+            "LinakController initialized (motor_count: %d, profile: %s)",
             coordinator.motor_count,
+            profile.value,
         )
 
     @property
     def supports_preset_flat(self) -> bool:
-        """Return False - Linak has no native flat command.
-
-        Linak's preset_flat() uses Memory 1, which may not be programmed as flat.
-        Users should use the memory presets directly instead.
-        """
-        return False
+        """Return True for the app's native held flat/init-down command."""
+        return True
 
     @property
     def supports_lights(self) -> bool:
@@ -210,13 +266,13 @@ class LinakController(BedController):
 
     @property
     def supports_discrete_light_control(self) -> bool:
-        """Return True - Linak has separate on/off commands."""
-        return True
+        """Return False because current apps expose only AUX/light toggle."""
+        return False
 
     @property
     def supports_memory_presets(self) -> bool:
-        """Return True - Linak beds support memory presets."""
-        return True
+        """Return whether the resolved app profile exposes memory recall."""
+        return self.memory_slot_count > 0
 
     @property
     def auto_stops_on_idle(self) -> bool:
@@ -285,13 +341,350 @@ class LinakController(BedController):
 
     @property
     def memory_slot_count(self) -> int:
-        """Return 6 - Linak beds support memory slots 1-6."""
-        return 6
+        """Return the resolved app-visible memory capacity."""
+        return self._capabilities.memory_slots
 
     @property
     def supports_memory_programming(self) -> bool:
         """Return True - Linak beds support programming memory positions."""
+        return self.memory_slot_count > 0
+
+    @property
+    def supports_position_feedback(self) -> bool:
+        """Return whether an advanced Bed Control mask selected reference outputs."""
+        return bool(self._capabilities.position_axes)
+
+    @property
+    def requires_notification_channel(self) -> bool:
+        """Keep protocol error/timer notifications active without angle sensing."""
         return True
+
+    @property
+    def supports_preset_both_up(self) -> bool:
+        """Return True for the native held all-up command."""
+        return self._profile is LinakProfile.BED_CONTROL
+
+    @property
+    def supports_massage(self) -> bool:
+        """Return True because both reachable Linak app profiles expose massage."""
+        return True
+
+    @property
+    def auto_enable_massage(self) -> bool:
+        """Legacy Performance is a massage-specific profile; Bed Control is configured."""
+        return self._profile is LinakProfile.PERFORMANCE
+
+    @property
+    def supports_massage_off_control(self) -> bool:
+        """Return whether the selected app profile defines an all-off command."""
+        return self._profile is LinakProfile.BED_CONTROL
+
+    @property
+    def supports_massage_toggle_control(self) -> bool:
+        """Return True because both app profiles expose a start/toggle action."""
+        return True
+
+    @property
+    def supports_massage_intensity_step_control(self) -> bool:
+        """Return whether the profile exposes all-zone intensity steps."""
+        return self._profile is LinakProfile.BED_CONTROL
+
+    @property
+    def supports_head_massage_toggle_control(self) -> bool:
+        """Return whether the profile exposes app-reachable zone selection."""
+        return self._profile is LinakProfile.BED_CONTROL
+
+    @property
+    def supports_foot_massage_toggle_control(self) -> bool:
+        """Return whether the profile exposes app-reachable zone selection."""
+        return self._profile is LinakProfile.BED_CONTROL
+
+    @property
+    def supports_massage_mode_step_control(self) -> bool:
+        """Return True for the wave-mode toggle reachable in both profiles."""
+        return True
+
+    @property
+    def supports_massage_wave_frequency_control(self) -> bool:
+        """Return whether legacy Performance exposes wave-frequency steps."""
+        return self._profile is LinakProfile.PERFORMANCE
+
+    @property
+    def supports_impulse_control(self) -> bool:
+        """Return whether legacy Performance exposes impulse mode."""
+        return self._profile is LinakProfile.PERFORMANCE
+
+    @property
+    def supports_reset_defaults(self) -> bool:
+        """Return True because both BLE app profiles expose reset."""
+        return True
+
+    @property
+    def supports_factory_reset(self) -> bool:
+        """Return whether the direct-BLE Bed Connect path exposes factory reset."""
+        return self._profile is LinakProfile.BED_CONTROL
+
+    @property
+    def supports_wake_control(self) -> bool:
+        """Return whether modern Bed Control exposes its wake command."""
+        return self._profile is LinakProfile.BED_CONTROL
+
+    @property
+    def supports_automatic_drive(self) -> bool:
+        """Return whether modern Bed Control exposes automatic-drive config."""
+        return self._profile is LinakProfile.BED_CONTROL
+
+    @property
+    def has_bed_height_support(self) -> bool:
+        """Return whether the advanced mask exposes the BASE actuator."""
+        return "base" in self._capabilities.position_axes
+
+    @property
+    def supports_alarm(self) -> bool:
+        """Return whether timer subscription promoted this advanced model."""
+        return self._capabilities.timer_supported
+
+    @property
+    def supports_device_rename(self) -> bool:
+        """Return whether the modern Bed Control profile exposes Generic Access rename."""
+        return self._profile is LinakProfile.BED_CONTROL
+
+    @property
+    def supports_simultaneous_movement(self) -> bool:
+        """Return whether the modern profile exposes two-section opcodes."""
+        return self._profile is LinakProfile.BED_CONTROL
+
+    @property
+    def simultaneous_movement_axes(self) -> tuple[str, ...]:
+        """Return only axes exposed by the resolved model or configured layout."""
+        if not self.supports_simultaneous_movement:
+            return ()
+        if self._capabilities.position_axes:
+            return self._capabilities.position_axes
+        return tuple(
+            "base" if spec.key == "bed_height" else spec.key for spec in super().motor_control_specs
+        )
+
+    @property
+    def _stop_command(self) -> bytes:
+        """Return the profile-specific release frame."""
+        if self._profile is LinakProfile.PERFORMANCE:
+            return bytes((0xFF,))
+        return LinakCommands.MOVE_STOP
+
+    def motor_pulse_settings(self) -> tuple[int, int]:
+        """Use the legacy app's 300 ms cadence without changing hold duration."""
+        pulse_count, pulse_delay = super().motor_pulse_settings()
+        if self._profile is LinakProfile.BED_CONTROL:
+            return pulse_count, pulse_delay
+        duration_ms = max(0, pulse_count - 1) * pulse_delay
+        adjusted_count = max(
+            1,
+            (duration_ms + LINAK_PERFORMANCE_HOLD_INTERVAL_MS - 1)
+            // LINAK_PERFORMANCE_HOLD_INTERVAL_MS
+            + 1,
+        )
+        return adjusted_count, LINAK_PERFORMANCE_HOLD_INTERVAL_MS
+
+    @property
+    def protocol_diagnostics(self) -> dict[str, Any]:
+        """Return the resolved profile, model variant, mask, and alarm state."""
+        return {
+            **self._capabilities.as_dict(),
+            "position_axes": list(self._capabilities.position_axes),
+            "timer_candidate": self._timer_candidate,
+        }
+
+    def capability_snapshot(self) -> dict[str, Any]:
+        """Return a serializable snapshot for offline entity gating."""
+        return self._capabilities.as_dict()
+
+    def _publish_capability_state(self) -> None:
+        """Publish capability state used by diagnostics entities."""
+        self.forward_controller_state_updates(
+            {
+                "linak_profile": self._profile.value,
+                "linak_model_variant": (
+                    self._profile.value
+                    if self._profile is LinakProfile.PERFORMANCE
+                    else self._capabilities.model_variant.value
+                ),
+                "linak_actuator_mask": self._capabilities.actuator_mask,
+                "linak_position_axes": list(self._capabilities.position_axes),
+                "linak_alarm_supported": self._capabilities.timer_supported,
+            }
+        )
+
+    def _has_service(self, uuid: str) -> bool:
+        """Return whether the connected GATT collection contains a service UUID."""
+        if self.client is None or self.client.services is None:
+            return False
+        services = self.client.services
+        getter = getattr(services, "get_service", None)
+        if callable(getter):
+            try:
+                return getter(uuid) is not None
+            except KeyError, BleakError:
+                pass
+        return any(
+            str(getattr(service, "uuid", "")).lower() == uuid.lower() for service in services
+        )
+
+    async def async_discover_capabilities(self) -> None:
+        """Resolve Standard, TD3, and Advanced from services and mask byte 0."""
+        if self._profile is LinakProfile.PERFORMANCE:
+            self._publish_capability_state()
+            return
+        if self.client is None or not self.client.is_connected:
+            return
+
+        if not self._has_service(LINAK_POSITION_SERVICE_UUID):
+            self._capabilities = LinakCapabilitySnapshot(
+                profile=self._profile,
+                model_variant=LinakModelVariant.STANDARD,
+                discovery_complete=True,
+            )
+            self._timer_candidate = False
+            self._publish_capability_state()
+            return
+
+        self._timer_candidate = self._has_service(LINAK_TIMER_SERVICE_UUID)
+        try:
+            async with self._ble_lock:
+                data = await self.client.read_gatt_char(LINAK_POSITION_MASK_UUID)
+            if not data:
+                raise ValueError("Linak capability mask is empty")
+        except (BleakError, TimeoutError, ValueError) as err:
+            _LOGGER.warning(
+                "Could not resolve Linak capability mask for %s; retaining cached capabilities: %s",
+                self._coordinator.address,
+                err,
+            )
+            self._publish_capability_state()
+            return
+
+        mask = data[0]
+        self._capabilities = LinakCapabilitySnapshot(
+            profile=self._profile,
+            model_variant=(LinakModelVariant.TD3 if mask == 0 else LinakModelVariant.ADVANCED),
+            actuator_mask=mask,
+            discovery_complete=True,
+        )
+        self._publish_capability_state()
+
+    @property
+    def controller_state_sensor_specs(self) -> tuple[ControllerStateSensorSpec, ...]:
+        """Expose parsed speed, errors, and timer state."""
+        specs: list[ControllerStateSensorSpec] = [
+            ControllerStateSensorSpec(
+                key="linak_protocol_error",
+                translation_key="linak_protocol_error",
+                state_key="linak_protocol_error",
+                icon="mdi:alert-circle-outline",
+                attribute_keys=("linak_protocol_error_code", "linak_protocol_error_payload"),
+            ),
+        ]
+        for axis in self._capabilities.position_axes:
+            specs.append(
+                ControllerStateSensorSpec(
+                    key=f"linak_{axis}_reported_speed",
+                    translation_key=f"linak_{axis}_reported_speed",
+                    state_key=f"linak_{axis}_reported_speed",
+                    icon="mdi:speedometer",
+                    attribute_keys=(
+                        f"linak_{axis}_raw_speed",
+                        f"linak_{axis}_speed_direction",
+                        f"linak_{axis}_extension",
+                        f"linak_{axis}_status_flags",
+                        f"linak_{axis}_sls",
+                        f"linak_{axis}_end_position_up",
+                        f"linak_{axis}_end_position_down",
+                        f"linak_{axis}_position_lost",
+                    ),
+                    suggested_display_precision=3,
+                )
+            )
+        if self.supports_alarm:
+            specs.append(
+                ControllerStateSensorSpec(
+                    key="linak_alarm_status",
+                    translation_key="linak_alarm_status",
+                    state_key="linak_alarm_status",
+                    icon="mdi:alarm",
+                    attribute_keys=(
+                        "linak_alarm_timer_index",
+                        "linak_alarm_enabled",
+                        "linak_alarm_seconds",
+                        "linak_alarm_first_action",
+                        "linak_alarm_lifetime",
+                        "linak_alarm_pause",
+                        "linak_alarm_error_code",
+                    ),
+                )
+            )
+        return tuple(specs)
+
+    @property
+    def controller_state_binary_sensor_specs(
+        self,
+    ) -> tuple[ControllerStateBinarySensorSpec, ...]:
+        """Expose one aggregate position-lost diagnostic."""
+        if not self._capabilities.position_axes:
+            return ()
+        return (
+            ControllerStateBinarySensorSpec(
+                key="linak_position_feedback_fault",
+                translation_key="linak_position_feedback_fault",
+                state_key="linak_position_feedback_fault",
+                icon="mdi:alert",
+                attribute_keys=("linak_fault_axes",),
+            ),
+        )
+
+    @property
+    def position_number_specs(self) -> tuple[PositionNumberSpec, ...]:
+        """Return sliders only for reference-output axes with calibrated angles."""
+        return tuple(
+            build_position_number_spec(
+                axis,
+                max_value=self._coordinator.get_max_angle(axis),
+                unit=POSITION_UNIT_DEGREES,
+            )
+            for axis in self._capabilities.position_axes
+            if axis in {"back", "legs", "head", "feet"}
+        )
+
+    @property
+    def motor_control_specs(self) -> tuple[MotorControlSpec, ...]:
+        """Use the advanced mask for exact axes, with BASE mapped to bed height."""
+        if not self._capabilities.position_axes:
+            return super().motor_control_specs
+        specs: list[MotorControlSpec] = []
+        for axis in self._capabilities.position_axes:
+            if axis == "base":
+                specs.append(
+                    MotorControlSpec(
+                        key="bed_height",
+                        translation_key="bed_height",
+                        open_fn=lambda ctrl: ctrl.move_bed_height_up(),
+                        close_fn=lambda ctrl: ctrl.move_bed_height_down(),
+                        stop_fn=lambda ctrl: ctrl.move_bed_height_stop(),
+                    )
+                )
+                continue
+            open_fn, close_fn, stop_fn = POSITION_AXIS_COMMANDS[axis]
+            specs.append(
+                MotorControlSpec(
+                    key=axis,
+                    translation_key=axis,
+                    open_fn=open_fn,
+                    close_fn=close_fn,
+                    stop_fn=stop_fn,
+                    position_key=axis,
+                    max_angle=self._coordinator.get_max_angle(axis),
+                )
+            )
+        return tuple(specs)
 
     @property
     def control_characteristic_uuid(self) -> str:
@@ -304,9 +697,7 @@ class LinakController(BedController):
         message = str(err).lower()
         return "insufficient authentication" in message or "error=5" in message
 
-    def _make_position_handler(
-        self, spec: LinakPositionSpec
-    ) -> Callable[[Any, bytearray], None]:
+    def _make_position_handler(self, spec: LinakPositionSpec) -> Callable[[Any, bytearray], None]:
         """Build a notification callback for a Linak position characteristic."""
 
         def handler(_: Any, data: bytearray) -> None:
@@ -332,6 +723,169 @@ class LinakController(BedController):
 
         return handler
 
+    def _handle_error_data(self, data: bytes | bytearray) -> None:
+        """Parse and publish the control-error characteristic."""
+        try:
+            error = decode_error(data)
+        except ValueError as err:
+            _LOGGER.warning("Ignoring invalid Linak error payload %s: %s", bytes(data).hex(), err)
+            return
+        if error is None:
+            self.forward_controller_state_updates(
+                {
+                    "linak_protocol_error": "none",
+                    "linak_protocol_error_code": 0,
+                    "linak_protocol_error_payload": "",
+                }
+            )
+            return
+        self.forward_controller_state_updates(
+            {
+                "linak_protocol_error": error.name,
+                "linak_protocol_error_code": error.code,
+                "linak_protocol_error_payload": error.payload.hex(),
+            }
+        )
+
+    def _make_error_handler(self) -> Callable[[Any, bytearray], None]:
+        """Build the control-error notification handler."""
+
+        def handler(_: Any, data: bytearray) -> None:
+            self.forward_raw_notification(LINAK_ERROR_CHAR_UUID, bytes(data))
+            self._handle_error_data(data)
+
+        return handler
+
+    def _make_performance_notify_handler(self) -> Callable[[Any, bytearray], None]:
+        """Forward legacy notifications without inventing payload semantics."""
+
+        def handler(_: Any, data: bytearray) -> None:
+            self.forward_raw_notification(LINAK_ERROR_CHAR_UUID, bytes(data))
+
+        return handler
+
+    def _make_config_handler(self) -> Callable[[Any, bytearray], None]:
+        """Build the raw configuration notification handler."""
+
+        def handler(_: Any, data: bytearray) -> None:
+            self.forward_raw_notification(LINAK_CONFIG_CHAR_UUID, bytes(data))
+
+        return handler
+
+    def _handle_timer_data(self, data: bytes | bytearray) -> None:
+        """Parse and publish timer info and lifecycle events."""
+        try:
+            timer = decode_timer(data)
+        except ValueError as err:
+            _LOGGER.warning("Ignoring invalid Linak timer payload %s: %s", bytes(data).hex(), err)
+            return
+        first_action = timer.first_action
+        self.forward_controller_state_updates(
+            {
+                "linak_alarm_status": timer.status,
+                "linak_alarm_timer_index": timer.timer_index,
+                "linak_alarm_enabled": timer.enabled,
+                "linak_alarm_seconds": timer.seconds,
+                "linak_alarm_first_action": (
+                    first_action.action.value if first_action is not None else None
+                ),
+                "linak_alarm_lifetime": (
+                    first_action.lifetime if first_action is not None else None
+                ),
+                "linak_alarm_pause": first_action.pause if first_action is not None else None,
+                "linak_alarm_error_code": timer.error_code,
+            }
+        )
+
+    def _make_timer_handler(self) -> Callable[[Any, bytearray], None]:
+        """Build the timer notification handler."""
+
+        def handler(_: Any, data: bytearray) -> None:
+            self.forward_raw_notification(LINAK_TIMER_CHAR_UUID, bytes(data))
+            self._handle_timer_data(data)
+
+        return handler
+
+    async def _subscribe_protocol_characteristic(
+        self,
+        uuid: str,
+        handler: Callable[[Any, bytearray], None],
+    ) -> bool:
+        """Subscribe once to a non-position protocol characteristic."""
+        if uuid in self._protocol_notification_uuids:
+            return True
+        if self.client is None or not self.client.is_connected:
+            return False
+        try:
+            async with self._ble_lock:
+                await self.client.start_notify(uuid, handler)
+        except BleakError as err:
+            _LOGGER.debug("Could not subscribe to Linak characteristic %s: %s", uuid, err)
+            return False
+        self._protocol_notification_uuids.add(uuid)
+        return True
+
+    async def _read_protocol_characteristic(
+        self,
+        uuid: str,
+        handler: Callable[[bytes | bytearray], None],
+    ) -> None:
+        """Best-effort initial read for a subscribed protocol characteristic."""
+        if self.client is None or not self.client.is_connected:
+            return
+        try:
+            async with self._ble_lock:
+                data = await self.client.read_gatt_char(uuid)
+        except BleakError as err:
+            _LOGGER.debug("Could not read Linak characteristic %s: %s", uuid, err)
+            return
+        if data:
+            handler(data)
+
+    async def _start_protocol_notifications(self) -> None:
+        """Start mandatory error/config and conditional timer channels."""
+        error_handler = (
+            self._make_performance_notify_handler()
+            if self._profile is LinakProfile.PERFORMANCE
+            else self._make_error_handler()
+        )
+        error_ready = await self._subscribe_protocol_characteristic(
+            LINAK_ERROR_CHAR_UUID,
+            error_handler,
+        )
+        if error_ready and self._profile is LinakProfile.BED_CONTROL:
+            await self._read_protocol_characteristic(
+                LINAK_ERROR_CHAR_UUID,
+                self._handle_error_data,
+            )
+
+        if self._profile is LinakProfile.BED_CONTROL:
+            await self._subscribe_protocol_characteristic(
+                LINAK_CONFIG_CHAR_UUID,
+                self._make_config_handler(),
+            )
+
+        if not self._timer_candidate:
+            return
+        timer_ready = await self._subscribe_protocol_characteristic(
+            LINAK_TIMER_CHAR_UUID,
+            self._make_timer_handler(),
+        )
+        if not timer_ready:
+            return
+        self._capabilities = LinakCapabilitySnapshot(
+            profile=self._profile,
+            model_variant=LinakModelVariant.ADVANCED_WITH_ALARM,
+            actuator_mask=self._capabilities.actuator_mask,
+            timer_supported=True,
+            discovery_complete=True,
+        )
+        self._publish_capability_state()
+        await self._read_protocol_characteristic(
+            LINAK_TIMER_CHAR_UUID,
+            self._handle_timer_data,
+        )
+
     def _back_position_spec(self) -> LinakPositionSpec:
         """Return the Linak back/rest position characteristic."""
         return LinakPositionSpec(
@@ -340,6 +894,16 @@ class LinakController(BedController):
             uuid=LINAK_POSITION_BACK_UUID,
             max_position=LINAK_BACK_MAX_POSITION,
             max_angle=self._coordinator.back_max_angle,
+        )
+
+    def _base_position_spec(self) -> LinakPositionSpec:
+        """Return BASE reference output as raw bed-height feedback."""
+        return LinakPositionSpec(
+            axis_name="base",
+            source_name="base",
+            uuid=LINAK_POSITION_BASE_UUID,
+            max_position=0xFFFF,
+            max_angle=0,
         )
 
     def _legs_position_spec(self) -> LinakPositionSpec:
@@ -397,32 +961,20 @@ class LinakController(BedController):
         ]
 
     def _build_position_characteristics(self, motor_count: int) -> list[LinakPositionSpec]:
-        """Return the readable/notifiable position characteristics for this bed."""
-        position_specs = [self._back_position_spec()]
-
-        if motor_count <= 2:
-            position_specs.append(self._two_motor_secondary_spec())
-            return position_specs
-
-        position_specs.append(self._legs_position_spec())
-
-        if motor_count > 2:
-            position_specs.append(self._head_position_spec())
-
-        if motor_count > 3:
-            position_specs.append(self._feet_position_spec())
-
-        return position_specs
+        """Return the exact reference outputs selected by capability mask."""
+        del motor_count
+        specs = {
+            "base": self._base_position_spec(),
+            "feet": self._feet_position_spec(),
+            "head": self._head_position_spec(),
+            "legs": self._legs_position_spec(),
+            "back": self._back_position_spec(),
+        }
+        return [specs[axis] for axis in self._capabilities.position_axes]
 
     def _build_notification_characteristics(self, motor_count: int) -> list[LinakPositionSpec]:
         """Return Linak position characteristics to subscribe for live updates."""
-        if motor_count > 2:
-            return self._build_position_characteristics(motor_count)
-
-        specs_by_uuid = {self._back_position_spec().uuid: self._back_position_spec()}
-        for spec in self._two_motor_secondary_candidates():
-            specs_by_uuid[spec.uuid] = spec
-        return list(specs_by_uuid.values())
+        return self._build_position_characteristics(motor_count)
 
     def _maybe_resolve_two_motor_secondary_notification(self, spec: LinakPositionSpec) -> None:
         """Lock onto the reporting second actuator for 2-motor Linak beds."""
@@ -549,9 +1101,7 @@ class LinakController(BedController):
                 ", ".join(failed),
             )
 
-    async def _await_control_ready(
-        self, cancel_event: asyncio.Event | None = None
-    ) -> None:
+    async def _await_control_ready(self, cancel_event: asyncio.Event | None = None) -> None:
         """Wait until Linak accepts control writes after a fresh BLE connect."""
         if self._session_ready:
             return
@@ -583,7 +1133,7 @@ class LinakController(BedController):
             try:
                 await self._write_gatt_with_retry(
                     self.control_characteristic_uuid,
-                    LinakCommands.MOVE_STOP,
+                    self._stop_command,
                     repeat_count=1,
                     repeat_delay_ms=0,
                     cancel_event=cancel_event,
@@ -647,10 +1197,8 @@ class LinakController(BedController):
         )
         _LOGGER.debug("Command sequence ended (%d writes attempted)", repeat_count)
 
-    async def start_notify(
-        self, callback: Callable[[str, float], None] | None = None
-    ) -> None:
-        """Start listening for position notifications."""
+    async def start_notify(self, callback: Callable[[str, float], None] | None = None) -> None:
+        """Start mandatory protocol notifications and optional position feedback."""
         self._notify_callback = callback
 
         if self.client is None or not self.client.is_connected:
@@ -659,6 +1207,11 @@ class LinakController(BedController):
                 self.client,
                 getattr(self.client, "is_connected", "N/A") if self.client else "N/A",
             )
+            return
+
+        await self._start_protocol_notifications()
+
+        if callback is None or not self.supports_position_feedback:
             return
 
         motor_count = self._coordinator.motor_count
@@ -735,16 +1288,32 @@ class LinakController(BedController):
         max_position: int,
         max_angle: float,
     ) -> float | None:
-        """Decode raw Linak position bytes into an angle."""
-        if len(data) < 2:
+        """Decode a reference sample, publish status/speed, and derive angle."""
+        try:
+            reference = decode_reference(data)
+        except ValueError:
             _LOGGER.warning(
-                "Received invalid position data for %s: expected 2+ bytes, got %d",
+                "Received invalid position data for %s: expected exactly 4 bytes, got %d",
                 source_name,
                 len(data),
             )
+            # Bed Control catches malformed reference payloads and emits an
+            # all-zero reference state. Do the same so a stale non-zero speed
+            # or position-lost flag never survives a bad notification.
+            self._publish_reference_state(
+                source_name,
+                LinakReferenceState(
+                    extension=0,
+                    raw_extension=0,
+                    status_flags=0,
+                    raw_speed=0,
+                    speed=0,
+                ),
+            )
             return None
 
-        raw_position = data[0] | (data[1] << 8)
+        self._publish_reference_state(source_name, reference)
+        raw_position = reference.raw_extension
 
         if raw_position > max_position * 1.1:
             _LOGGER.debug(
@@ -770,6 +1339,38 @@ class LinakController(BedController):
         )
         return angle
 
+    def _publish_reference_state(
+        self,
+        source_name: str,
+        reference: LinakReferenceState,
+    ) -> None:
+        """Publish the complete reference-output state without guessing units."""
+        prefix = f"linak_{source_name}"
+        updates: dict[str, Any] = {
+            f"{prefix}_reported_speed": reference.speed,
+            f"{prefix}_raw_speed": reference.raw_speed,
+            f"{prefix}_speed_direction": reference.speed_direction,
+            f"{prefix}_extension": reference.extension,
+            f"{prefix}_status_flags": reference.status_flags,
+            f"{prefix}_sls": reference.sls,
+            f"{prefix}_end_position_up": reference.end_position_up,
+            f"{prefix}_end_position_down": reference.end_position_down,
+            f"{prefix}_position_lost": reference.position_lost,
+        }
+        current = self._coordinator.controller_state
+        fault_axes = [
+            axis
+            for axis in self._capabilities.position_axes
+            if (
+                reference.position_lost
+                if axis == source_name
+                else current.get(f"linak_{axis}_position_lost") is True
+            )
+        ]
+        updates["linak_position_feedback_fault"] = bool(fault_axes)
+        updates["linak_fault_axes"] = fault_axes
+        self.forward_controller_state_updates(updates)
+
     def _handle_position_data(
         self,
         name: str,
@@ -794,12 +1395,18 @@ class LinakController(BedController):
 
     async def stop_notify(self) -> None:
         """Stop listening for position notifications."""
+        self._notify_callback = None
         if self.client is None or not self.client.is_connected:
             return
 
         self._active_position_notifications.clear()
         self._deferred_position_notifications.clear()
+        self._protocol_notification_uuids.clear()
         uuids = [
+            LINAK_ERROR_CHAR_UUID,
+            LINAK_CONFIG_CHAR_UUID,
+            LINAK_TIMER_CHAR_UUID,
+            LINAK_POSITION_BASE_UUID,
             LINAK_POSITION_BACK_UUID,
             LINAK_POSITION_LEG_UUID,
             LINAK_POSITION_HEAD_UUID,
@@ -820,6 +1427,8 @@ class LinakController(BedController):
             _LOGGER.warning("Cannot read positions: not connected")
             return
 
+        if not self.supports_position_feedback:
+            return
         expected_axes = self._expected_position_axes(motor_count)
         received_axes = await self._read_positions_once(motor_count)
         if self._session_ready or received_axes >= expected_axes:
@@ -842,25 +1451,14 @@ class LinakController(BedController):
                 await self._ensure_position_notifications_started()
 
             missing_axes = expected_axes - received_axes
-            received_axes.update(
-                await self._read_positions_once(motor_count, axes=missing_axes)
-            )
+            received_axes.update(await self._read_positions_once(motor_count, axes=missing_axes))
             if received_axes >= expected_axes:
                 return
 
     def _expected_position_axes(self, motor_count: int) -> set[str]:
         """Return the logical axes expected from a Linak position read."""
-        expected_axes = {"back"}
-        if motor_count <= 2:
-            expected_axes.add("legs")
-            return expected_axes
-
-        expected_axes.add("legs")
-        if motor_count > 2:
-            expected_axes.add("head")
-        if motor_count > 3:
-            expected_axes.add("feet")
-        return expected_axes
+        del motor_count
+        return set(self._capabilities.position_axes)
 
     async def _read_positions_once(
         self,
@@ -869,20 +1467,6 @@ class LinakController(BedController):
         axes: set[str] | None = None,
     ) -> set[str]:
         """Read Linak positions once and return the axes that produced data."""
-        if motor_count <= 2:
-            received_axes: set[str] = set()
-            back_angle = None
-            secondary_angle = None
-            if axes is None or "back" in axes:
-                back_angle = await self._read_position_characteristic(self._back_position_spec())
-            if axes is None or "legs" in axes:
-                secondary_angle = await self._read_two_motor_secondary_position()
-            if back_angle is not None:
-                received_axes.add("back")
-            if secondary_angle is not None:
-                received_axes.add("legs")
-            return received_axes
-
         received_axes: set[str] = set()
         for spec in self._build_position_characteristics(motor_count):
             if axes is not None and spec.axis_name not in axes:
@@ -917,7 +1501,10 @@ class LinakController(BedController):
         if self.client is None or not self.client.is_connected:
             return
 
-        await self._read_position_characteristic(self._back_position_spec(), timeout_seconds=0.4)
+        if "back" in self._capabilities.position_axes:
+            await self._read_position_characteristic(
+                self._back_position_spec(), timeout_seconds=0.4
+            )
 
     async def prepare_for_position_read(self) -> None:
         """Wait for Linak's post-connect auth window before passive reads."""
@@ -925,12 +1512,12 @@ class LinakController(BedController):
 
     # Motor control methods
     # Linak protocol requires continuous command sending to keep motors moving.
-    # The default per-entry settings use 15 repeats @ 100ms, or about 1.5
-    # seconds of movement, followed by _send_stop() from the base helper.
+    # Bed Control uses the configured 100 ms default. The explicit Performance
+    # profile preserves the configured hold duration at its proven 300 ms cadence.
 
     async def _send_stop(self) -> None:
         """Send Linak's explicit STOP/release frame."""
-        await self.write_command(LinakCommands.MOVE_STOP, cancel_event=asyncio.Event())
+        await self.write_command(self._stop_command, cancel_event=asyncio.Event())
 
     def _seek_step_repeat_count(self, remaining_distance: float | None) -> int:
         """Return an adaptive Linak seek pulse size for the remaining error."""
@@ -971,11 +1558,17 @@ class LinakController(BedController):
             return
 
         repeat_count = self._seek_step_repeat_count(remaining_distance)
-        await self.write_command(
-            command,
-            repeat_count=repeat_count,
-            repeat_delay_ms=LINAK_POSITION_SEEK_PULSE_DELAY_MS,
-        )
+        try:
+            await self.write_command(
+                command,
+                repeat_count=repeat_count,
+                repeat_delay_ms=LINAK_POSITION_SEEK_PULSE_DELAY_MS,
+            )
+        finally:
+            # A Linak movement frame remains active until the release frame is
+            # written. Release each adaptive burst before awaiting feedback so
+            # a short seek cannot coast several degrees past its target.
+            await self._send_stop()
 
     async def move_head_up(self) -> None:
         """Move head up."""
@@ -1025,15 +1618,46 @@ class LinakController(BedController):
         """Stop feet motor."""
         await self._send_stop()
 
+    async def move_bed_height_up(self) -> None:
+        """Raise the BASE actuator exposed by the modern capability mask."""
+        await self._move_with_stop(LinakCommands.MOVE_BASE_UP)
+
+    async def move_bed_height_down(self) -> None:
+        """Lower the BASE actuator exposed by the modern capability mask."""
+        await self._move_with_stop(LinakCommands.MOVE_BASE_DOWN)
+
+    async def move_bed_height_stop(self) -> None:
+        """Stop the BASE actuator."""
+        await self._send_stop()
+
     async def stop_all(self) -> None:
         """Stop all motors."""
         await self._send_stop()
 
     # Preset methods
     async def preset_flat(self) -> None:
-        """Go to flat position (uses memory 1 which is typically flat)."""
-        # Memory preset 1 is typically configured as flat position on Linak beds
-        await self.preset_memory(1)
+        """Run the app's held flat/initialise-down action."""
+        await self._held_preset(LinakCommands.MOVE_ALL_DOWN)
+
+    async def preset_both_up(self) -> None:
+        """Run the modern app's held all-up action."""
+        if not self.supports_preset_both_up:
+            raise NotImplementedError("All-up is not exposed by this Linak profile")
+        await self._held_preset(LinakCommands.MOVE_ALL_UP)
+
+    async def _held_preset(self, command: bytes) -> None:
+        """Hold a favorite-like command for the app's 30 second ceiling."""
+        interval_ms = (
+            LINAK_PERFORMANCE_HOLD_INTERVAL_MS
+            if self._profile is LinakProfile.PERFORMANCE
+            else LINAK_BED_CONTROL_HOLD_INTERVAL_MS
+        )
+        repeat_count = max(1, LINAK_MEMORY_RECALL_DURATION_S * 1000 // interval_ms)
+        await self._preset_with_stop(
+            command,
+            repeat_count=repeat_count,
+            repeat_delay_ms=interval_ms,
+        )
 
     async def preset_memory(self, memory_num: int) -> None:
         """Go to memory preset."""
@@ -1042,11 +1666,10 @@ class LinakController(BedController):
             2: LinakCommands.PRESET_MEMORY_2,
             3: LinakCommands.PRESET_MEMORY_3,
             4: LinakCommands.PRESET_MEMORY_4,
-            5: LinakCommands.PRESET_MEMORY_5,
-            6: LinakCommands.PRESET_MEMORY_6,
         }
-        if command := commands.get(memory_num):
-            await self.write_command(command)
+        if memory_num > self.memory_slot_count or (command := commands.get(memory_num)) is None:
+            raise ValueError(f"Linak memory {memory_num} is not available")
+        await self._held_preset(command)
 
     async def program_memory(self, memory_num: int) -> None:
         """Program current position to memory."""
@@ -1055,20 +1678,19 @@ class LinakController(BedController):
             2: LinakCommands.PROGRAM_MEMORY_2,
             3: LinakCommands.PROGRAM_MEMORY_3,
             4: LinakCommands.PROGRAM_MEMORY_4,
-            5: LinakCommands.PROGRAM_MEMORY_5,
-            6: LinakCommands.PROGRAM_MEMORY_6,
         }
-        if command := commands.get(memory_num):
-            await self.write_command(command)
+        if memory_num > self.memory_slot_count or (command := commands.get(memory_num)) is None:
+            raise ValueError(f"Linak memory {memory_num} is not available")
+        await self.write_command(command)
 
     # Light methods
     async def lights_on(self) -> None:
-        """Turn on under-bed lights."""
-        await self.write_command(LinakCommands.LIGHTS_ON)
+        """Reject a discrete action the applications do not expose."""
+        raise NotImplementedError("Linak exposes only an AUX/light toggle")
 
     async def lights_off(self) -> None:
-        """Turn off under-bed lights."""
-        await self.write_command(LinakCommands.LIGHTS_OFF)
+        """Reject a discrete action the applications do not expose."""
+        raise NotImplementedError("Linak exposes only an AUX/light toggle")
 
     async def lights_toggle(self) -> None:
         """Toggle under-bed lights."""
@@ -1077,26 +1699,57 @@ class LinakController(BedController):
     # Massage methods
     async def massage_off(self) -> None:
         """Turn off massage."""
+        if not self.supports_massage_off_control:
+            raise NotImplementedError("Massage off is not exposed by this Linak profile")
         await self.write_command(LinakCommands.MASSAGE_ALL_OFF)
 
     async def massage_toggle(self) -> None:
         """Toggle massage."""
-        await self.write_command(LinakCommands.MASSAGE_ALL_TOGGLE)
+        if self._profile is LinakProfile.PERFORMANCE:
+            if self._performance_wave_active:
+                await self.write_command(LinakCommands.MASSAGE_MODE_STEP)
+                self._performance_wave_active = False
+            await self.write_command(bytes((0x91, 0x00)))
+            return
+        await self._write_massage_zone_sequence(
+            LinakCommands.MASSAGE_ZONE_1_ON,
+            LinakCommands.MASSAGE_ZONE_2_ON,
+        )
 
     async def massage_head_toggle(self) -> None:
         """Toggle head massage."""
-        await self.write_command(LinakCommands.MASSAGE_HEAD_TOGGLE)
+        if not self.supports_head_massage_toggle_control:
+            raise NotImplementedError("Zone selection is not exposed by this Linak profile")
+        await self._write_massage_zone_sequence(
+            LinakCommands.MASSAGE_ZONE_1_ON,
+            LinakCommands.MASSAGE_ZONE_2_OFF,
+        )
 
     async def massage_foot_toggle(self) -> None:
         """Toggle foot massage."""
-        await self.write_command(LinakCommands.MASSAGE_FOOT_TOGGLE)
+        if not self.supports_foot_massage_toggle_control:
+            raise NotImplementedError("Zone selection is not exposed by this Linak profile")
+        await self._write_massage_zone_sequence(
+            LinakCommands.MASSAGE_ZONE_1_OFF,
+            LinakCommands.MASSAGE_ZONE_2_ON,
+        )
+
+    async def _write_massage_zone_sequence(self, first: bytes, second: bytes) -> None:
+        """Send the modern app's two-zone selection sequence."""
+        await self.write_command(first)
+        await asyncio.sleep(LINAK_MASSAGE_ZONE_GAP_S)
+        await self.write_command(second)
 
     async def massage_intensity_up(self) -> None:
         """Increase massage intensity."""
+        if not self.supports_massage_intensity_step_control:
+            raise NotImplementedError("All-zone intensity is not exposed by this profile")
         await self.write_command(LinakCommands.MASSAGE_ALL_UP)
 
     async def massage_intensity_down(self) -> None:
         """Decrease massage intensity."""
+        if not self.supports_massage_intensity_step_control:
+            raise NotImplementedError("All-zone intensity is not exposed by this profile")
         await self.write_command(LinakCommands.MASSAGE_ALL_DOWN)
 
     async def massage_head_up(self) -> None:
@@ -1118,3 +1771,120 @@ class LinakController(BedController):
     async def massage_mode_step(self) -> None:
         """Step through massage modes."""
         await self.write_command(LinakCommands.MASSAGE_MODE_STEP)
+        if self._profile is LinakProfile.PERFORMANCE:
+            self._performance_wave_active = not self._performance_wave_active
+
+    async def massage_wave_frequency_up(self) -> None:
+        """Increase legacy Performance wave frequency."""
+        if not self.supports_massage_wave_frequency_control:
+            raise NotImplementedError("Wave frequency is not exposed by this profile")
+        await self.write_command(LinakCommands.MASSAGE_WAVE_FREQUENCY_UP)
+        self._performance_wave_active = True
+
+    async def massage_wave_frequency_down(self) -> None:
+        """Decrease legacy Performance wave frequency."""
+        if not self.supports_massage_wave_frequency_control:
+            raise NotImplementedError("Wave frequency is not exposed by this profile")
+        await self.write_command(LinakCommands.MASSAGE_WAVE_FREQUENCY_DOWN)
+        self._performance_wave_active = True
+
+    async def impulse_toggle(self) -> None:
+        """Toggle the legacy Performance impulse mode."""
+        if not self.supports_impulse_control:
+            raise NotImplementedError("Impulse mode is not exposed by this profile")
+        await self.write_command(LinakCommands.IMPULSE_TOGGLE)
+
+    async def reset_defaults(self) -> None:
+        """Reset the controller settings exposed by both app profiles."""
+        await self.write_command(LinakCommands.RESET_DEFAULTS)
+
+    async def factory_reset(self) -> None:
+        """Run Bed Connect's distinct configuration-level factory reset."""
+        if not self.supports_factory_reset:
+            raise NotImplementedError("Factory reset is unavailable for this profile")
+        await self._write_gatt_with_retry(
+            LINAK_CONFIG_CHAR_UUID,
+            LinakCommands.FACTORY_RESET,
+        )
+
+    async def wake(self) -> None:
+        """Send the modern Bed Control wake action."""
+        if not self.supports_wake_control:
+            raise NotImplementedError("Wake is not exposed by this Linak profile")
+        await self.write_command(LinakCommands.WAKE)
+
+    async def set_automatic_drive(self, enabled: bool) -> None:
+        """Write modern Bed Control's automatic-drive configuration."""
+        if not self.supports_automatic_drive:
+            raise NotImplementedError("Automatic drive is not exposed by this profile")
+        await self._write_gatt_with_retry(
+            LINAK_CONFIG_CHAR_UUID,
+            build_automatic_drive(enabled),
+        )
+        self.forward_controller_state_updates({"linak_automatic_drive": enabled})
+
+    async def rename_device(self, name: str) -> None:
+        """Write the modern app's raw Generic Access device name."""
+        if not self.supports_device_rename:
+            raise NotImplementedError("Rename is not exposed by this Linak profile")
+        encoded = name.encode()
+        if not name or len(name) > 17 or len(encoded) > 17:
+            raise ValueError("Linak device names must contain 1 to 17 bytes")
+        await self._write_gatt_with_retry(LINAK_DEVICE_NAME_UUID, encoded)
+
+    async def program_alarm(
+        self,
+        seconds: int,
+        actions: Sequence[Any],
+        recurrence_count: int,
+        recurrence_minutes: int,
+    ) -> None:
+        """Program an alarm using the complete app write sequence."""
+        if not self.supports_alarm:
+            raise NotImplementedError("Alarm programming is unavailable for this model")
+        if not all(isinstance(action, LinakAlarmStep) for action in actions):
+            raise TypeError("Linak alarms require LinakAlarmStep actions")
+        alarm_steps = tuple(action for action in actions if isinstance(action, LinakAlarmStep))
+        await self.set_automatic_drive(True)
+        for packet in (
+            build_timer_event(seconds, alarm_steps),
+            build_timer_recurrence(recurrence_count, recurrence_minutes),
+            bytes((0x20,)),
+        ):
+            await self._write_gatt_with_retry(LINAK_TIMER_CHAR_UUID, packet)
+
+    async def move_simultaneously(
+        self,
+        first_axis: str,
+        first_up: bool,
+        second_axis: str,
+        second_up: bool,
+        duration_ms: int | None = None,
+    ) -> None:
+        """Move two different sections with one modern Bed Control opcode."""
+        if not self.supports_simultaneous_movement:
+            raise NotImplementedError("Simultaneous movement is unavailable")
+        available_axes = set(self.simultaneous_movement_axes)
+        unavailable_axes = {first_axis, second_axis} - available_axes
+        if unavailable_axes:
+            unavailable = ", ".join(sorted(unavailable_axes))
+            raise ValueError(f"Linak model does not expose simultaneous axis: {unavailable}")
+        command = build_simultaneous_command(
+            first_axis,
+            first_up,
+            second_axis,
+            second_up,
+        )
+        if duration_ms is None:
+            await self._move_with_stop(command)
+            return
+        _, pulse_delay_ms = self.motor_pulse_settings()
+        repeat_count = max(2, (duration_ms + pulse_delay_ms - 1) // pulse_delay_ms + 1)
+        try:
+            await self.write_command(
+                command,
+                repeat_count=repeat_count,
+                repeat_delay_ms=pulse_delay_ms,
+            )
+        finally:
+            await self._send_stop()

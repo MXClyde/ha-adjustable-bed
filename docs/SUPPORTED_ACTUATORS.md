@@ -4,7 +4,7 @@ This document provides an overview of supported bed brands. Click on a brand nam
 
 | Brand | Status | Key Features |
 |-------|--------|--------------|
-| [Linak](beds/linak.md) | ✅ Supported | Position feedback, 6 memory presets, massage, lights |
+| [Linak](beds/linak.md) | ✅ Supported | Auto-detected models, up to 5 axes, 0/4 memories, speed/status/errors, massage, alarms, lights |
 | [Keeson](beds/keeson.md) | ✅ Supported | Position feedback (Ergomotion), 4 presets, massage, lights |
 | [Richmat](beds/richmat.md) | ✅ Supported | 1-5 memory presets, massage (discrete), RGB lights + timer, sync mode, motors 5-7 |
 | [MotoSleep](beds/motosleep.md) | ✅ Supported | 2 memory presets, massage, lights, Zero-G |
