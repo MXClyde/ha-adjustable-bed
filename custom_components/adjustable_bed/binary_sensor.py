@@ -112,6 +112,11 @@ def _binary_sensor_entities_for(
         entities.append(AdjustableBedConnectionSensor(coordinator, description))
 
     if controller is not None:
+        _async_remove_stale_controller_state_binary_sensor_entities(
+            hass,
+            coordinator,
+            keys=controller.stale_controller_state_binary_sensor_entity_keys,
+        )
         entities.extend(
             AdjustableBedControllerStateBinarySensor(coordinator, spec)
             for spec in controller.controller_state_binary_sensor_specs
@@ -133,6 +138,22 @@ def _async_remove_stale_presence_entity(
     )
     if entity_id is not None:
         registry.async_remove(entity_id)
+
+
+def _async_remove_stale_controller_state_binary_sensor_entities(
+    hass: HomeAssistant,
+    coordinator: AdjustableBedCoordinator,
+    *,
+    keys: frozenset[str],
+) -> None:
+    """Remove controller diagnostics omitted by the current capability snapshot."""
+    registry = er.async_get(hass)
+    for key in keys:
+        entity_id = registry.async_get_entity_id(
+            "binary_sensor", DOMAIN, coordinator.entity_unique_id(key)
+        )
+        if entity_id is not None:
+            registry.async_remove(entity_id)
 
 
 class AdjustableBedConnectionSensor(AdjustableBedEntity, BinarySensorEntity):

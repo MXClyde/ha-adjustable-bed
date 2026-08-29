@@ -79,6 +79,19 @@ LINAK_POSITION_SEEK_CACHED_FEEDBACK_MAX_AGE_S = 0.5
 LINAK_LOWER_ENDPOINT_MAX_ANGLE_DEGREES = 1.1
 LINAK_LOWER_ENDPOINT_STALL_CONFIRMATIONS = 2
 LINAK_COARSE_SEEK_DISTANCE_DEGREES = 20.0
+LINAK_CONTROLLER_STATE_SENSOR_ENTITY_KEYS = frozenset(
+    {
+        "linak_protocol_error",
+        "linak_alarm_status",
+        *(
+            f"linak_{axis}_reported_speed"
+            for axis in ("base", "feet", "head", "legs", "back")
+        ),
+    }
+)
+LINAK_CONTROLLER_STATE_BINARY_SENSOR_ENTITY_KEYS = frozenset(
+    {"linak_position_feedback_fault"}
+)
 LINAK_MEDIUM_SEEK_DISTANCE_DEGREES = 10.0
 LINAK_FINE_SEEK_DISTANCE_DEGREES = 4.0
 LINAK_CHAINED_SEEK_MIN_REMAINING_DEGREES = LINAK_FINE_SEEK_DISTANCE_DEGREES
@@ -659,6 +672,18 @@ class LinakController(BedController):
         )
 
     @property
+    def stale_controller_state_sensor_entity_keys(self) -> frozenset[str]:
+        """Remove diagnostics omitted by the current profile and capability mask."""
+        active = {spec.key for spec in self.controller_state_sensor_specs}
+        return LINAK_CONTROLLER_STATE_SENSOR_ENTITY_KEYS - active
+
+    @property
+    def stale_controller_state_binary_sensor_entity_keys(self) -> frozenset[str]:
+        """Remove the aggregate feedback fault when no reference axes remain."""
+        active = {spec.key for spec in self.controller_state_binary_sensor_specs}
+        return LINAK_CONTROLLER_STATE_BINARY_SENSOR_ENTITY_KEYS - active
+
+    @property
     def position_number_specs(self) -> tuple[PositionNumberSpec, ...]:
         """Return sliders only for reference-output axes with calibrated angles."""
         return tuple(
@@ -702,6 +727,11 @@ class LinakController(BedController):
                 )
             )
         return tuple(specs)
+
+    @property
+    def stale_motor_entity_keys(self) -> frozenset[str]:
+        """Clean up covers omitted by the current Linak actuator mask or profile."""
+        return frozenset({"back", "legs", "head", "feet", "bed_height"})
 
     @property
     def control_characteristic_uuid(self) -> str:

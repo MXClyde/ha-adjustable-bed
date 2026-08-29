@@ -50,6 +50,7 @@ from custom_components.adjustable_bed.const import (
     LEGGETT_GEN2_WRITE_CHAR_UUID,
     LINAK_POSITION_MASK_UUID,
     LINAK_POSITION_SERVICE_UUID,
+    LINAK_VARIANT_PERFORMANCE,
     MALOUF_LAYOUT_HILO,
     OCTO_VARIANT_STANDARD,
     SLEEP_NUMBER_VARIANT_LEFT,
@@ -2916,6 +2917,24 @@ class TestSensorEntities:
                 f"AA:BB:CC:DD:EE:FF_{key}",
                 config_entry=entry,
             )
+        for key in (
+            "linak_back_reported_speed",
+            "linak_legs_reported_speed",
+            "linak_alarm_status",
+        ):
+            registry.async_get_or_create(
+                "sensor",
+                DOMAIN,
+                f"AA:BB:CC:DD:EE:FF_{key}",
+                config_entry=entry,
+            )
+        for key in ("back", "legs", "head", "feet", "bed_height"):
+            registry.async_get_or_create(
+                "cover",
+                DOMAIN,
+                f"AA:BB:CC:DD:EE:FF_{key}",
+                config_entry=entry,
+            )
 
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
@@ -2928,6 +2947,92 @@ class TestSensorEntities:
             assert (
                 registry.async_get_entity_id("number", DOMAIN, f"AA:BB:CC:DD:EE:FF_{key}") is None
             )
+        assert (
+            registry.async_get_entity_id(
+                "sensor", DOMAIN, "AA:BB:CC:DD:EE:FF_linak_back_reported_speed"
+            )
+            is not None
+        )
+        for key in ("linak_legs_reported_speed", "linak_alarm_status"):
+            assert (
+                registry.async_get_entity_id(
+                    "sensor", DOMAIN, f"AA:BB:CC:DD:EE:FF_{key}"
+                )
+                is None
+            )
+        assert (
+            registry.async_get_entity_id("cover", DOMAIN, "AA:BB:CC:DD:EE:FF_back")
+            is not None
+        )
+        for key in ("legs", "head", "feet", "bed_height"):
+            assert (
+                registry.async_get_entity_id(
+                    "cover", DOMAIN, f"AA:BB:CC:DD:EE:FF_{key}"
+                )
+                is None
+            )
+
+    async def test_linak_performance_removes_inapplicable_diagnostics(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+        mock_coordinator_connected,
+        enable_custom_integrations,
+    ) -> None:
+        """A profile change must remove diagnostics that Performance cannot parse."""
+        mock_config_entry_data[CONF_PROTOCOL_VARIANT] = LINAK_VARIANT_PERFORMANCE
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Performance Bed",
+            data=mock_config_entry_data,
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id="linak_performance_cleanup_entry_id",
+        )
+        entry.add_to_hass(hass)
+
+        from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(hass)
+        for key in (
+            "linak_protocol_error",
+            "linak_back_reported_speed",
+            "linak_alarm_status",
+        ):
+            registry.async_get_or_create(
+                "sensor",
+                DOMAIN,
+                f"AA:BB:CC:DD:EE:FF_{key}",
+                config_entry=entry,
+            )
+        registry.async_get_or_create(
+            "binary_sensor",
+            DOMAIN,
+            "AA:BB:CC:DD:EE:FF_linak_position_feedback_fault",
+            config_entry=entry,
+        )
+
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        for key in (
+            "linak_protocol_error",
+            "linak_back_reported_speed",
+            "linak_alarm_status",
+        ):
+            assert (
+                registry.async_get_entity_id(
+                    "sensor", DOMAIN, f"AA:BB:CC:DD:EE:FF_{key}"
+                )
+                is None
+            )
+        assert (
+            registry.async_get_entity_id(
+                "binary_sensor",
+                DOMAIN,
+                "AA:BB:CC:DD:EE:FF_linak_position_feedback_fault",
+            )
+            is None
+        )
 
     async def test_non_feedback_bed_creates_no_angle_sensors_when_enabled(
         self,

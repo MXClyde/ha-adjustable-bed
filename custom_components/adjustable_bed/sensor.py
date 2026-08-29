@@ -227,6 +227,11 @@ def _sensor_entities_for(
                 entities.append(AdjustableBedMassageSensor(coordinator, massage_desc))
 
     if controller is not None:
+        _async_remove_stale_sensor_entities(
+            hass,
+            coordinator,
+            keys=tuple(controller.stale_controller_state_sensor_entity_keys),
+        )
         entities.extend(
             AdjustableBedControllerStateSensor(coordinator, spec)
             for spec in controller.controller_state_sensor_specs

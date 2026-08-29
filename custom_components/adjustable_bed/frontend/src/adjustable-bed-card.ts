@@ -1213,6 +1213,7 @@ export class AdjustableBedCard extends LitElement {
     bed.firmness.forEach((x) => ids.add(x));
     bed.massage.buttons.forEach((x) => ids.add(x));
     bed.massage.numbers.forEach((x) => ids.add(x));
+    bed.utility.forEach((x) => ids.add(x));
     bed.climate.entities.forEach((x) => ids.add(x));
     bed.climate.selects.forEach((x) => ids.add(x));
     return [...ids];

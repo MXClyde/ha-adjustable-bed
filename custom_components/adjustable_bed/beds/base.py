@@ -1176,6 +1176,16 @@ class BedController(ABC):
         return ()
 
     @property
+    def stale_controller_state_sensor_entity_keys(self) -> frozenset[str]:
+        """Return controller-state sensor entity keys omitted by this snapshot."""
+        return frozenset()
+
+    @property
+    def stale_controller_state_binary_sensor_entity_keys(self) -> frozenset[str]:
+        """Return controller-state binary sensor keys omitted by this snapshot."""
+        return frozenset()
+
+    @property
     def supports_wake_control(self) -> bool:
         """Return True if the app exposes a user-triggered wake/preparation command."""
         return type(self).wake is not BedController.wake
