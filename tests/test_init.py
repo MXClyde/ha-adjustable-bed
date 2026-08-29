@@ -1384,11 +1384,10 @@ class TestServices:
             blocking=True,
         )
 
-        mock_bleak_client.write_gatt_char.assert_awaited_once_with(
-            LINAK_DEVICE_NAME_UUID,
-            "Seng Å".encode(),
-            response=True,
-        )
+        assert mock_bleak_client.write_gatt_char.await_args_list == [
+            call(LINAK_CONTROL_CHAR_UUID, bytes.fromhex("FF 00"), response=True),
+            call(LINAK_DEVICE_NAME_UUID, "Seng Å".encode(), response=True),
+        ]
         mock_bleak_client.disconnect.assert_awaited_once()
 
     async def test_linak_simultaneous_move_rejects_axis_missing_from_model(
@@ -1545,6 +1544,7 @@ class TestServices:
         )
 
         assert mock_bleak_client.write_gatt_char.await_args_list == [
+            call(LINAK_CONTROL_CHAR_UUID, bytes.fromhex("FF 00"), response=True),
             call(LINAK_CONFIG_CHAR_UUID, bytes.fromhex("89 3B 80 00 01"), response=True),
             call(
                 LINAK_TIMER_CHAR_UUID,

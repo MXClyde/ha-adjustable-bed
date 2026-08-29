@@ -3067,12 +3067,15 @@ class AdjustableBedCoordinator:
                     # Reset Limoss normalization state on each connection.
                     cast(Any, self._controller).reset_max_raw_estimate()
 
-                self._refresh_passive_position_reconciliation_schedule()
-
                 # Start position notifications (no-op if angle sensing disabled).
                 # Sleep Number MCR performs its notify+init startup earlier.
                 if self._bed_type != BED_TYPE_SLEEP_NUMBER_MCR:
                     await self.async_start_notify()
+
+                # Notification startup may finish deferred capability discovery
+                # after the BLE authentication window, so schedule from the final
+                # resolved controller state.
+                self._refresh_passive_position_reconciliation_schedule()
 
                 if self._bed_type == BED_TYPE_LINAK:
                     self._backfill_linak_snapshot()

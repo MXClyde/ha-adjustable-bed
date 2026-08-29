@@ -169,7 +169,11 @@ def _sensor_entities_for(
     # Only protocols in the explicit angle-sensing capability set may expose degree
     # sensors. Clean up entities created by older permissive logic so unsupported
     # beds cannot leave dead "unknown" angles in Home Assistant or the card.
-    if bed_type not in BEDS_WITH_ANGLE_SENSING:
+    if bed_type == BED_TYPE_LINAK:
+        # Linak position numbers already expose the app's exact reference values.
+        # Remove every legacy angle entity, including axes omitted by a new mask.
+        _async_remove_stale_angle_entities(hass, coordinator)
+    elif bed_type not in BEDS_WITH_ANGLE_SENSING:
         _async_remove_stale_angle_entities(hass, coordinator)
     elif position_number_keys:
         # A position number already exposes the same live value while also
@@ -190,21 +194,15 @@ def _sensor_entities_for(
 
     # Set up angle sensors only when both the protocol and configuration support it.
     if not coordinator.disable_angle_sensing:
-        if bed_type not in BEDS_WITH_ANGLE_SENSING:
+        if bed_type == BED_TYPE_LINAK:
+            _LOGGER.debug("Skipping duplicate Linak angle sensors")
+        elif bed_type not in BEDS_WITH_ANGLE_SENSING:
             _LOGGER.debug("Skipping angle sensors for %s - no angle feedback", bed_type)
         else:
-            linak_position_keys = (
-                {spec.position_key for spec in controller.position_number_specs}
-                if bed_type == BED_TYPE_LINAK and controller is not None
-                else None
-            )
             for description in SENSOR_DESCRIPTIONS:
                 if description.position_key in position_number_keys:
                     continue
-                if linak_position_keys is not None:
-                    if description.position_key in linak_position_keys:
-                        entities.append(AdjustableBedAngleSensor(coordinator, description))
-                elif motor_count >= description.min_motors:
+                if motor_count >= description.min_motors:
                     entities.append(AdjustableBedAngleSensor(coordinator, description))
     else:
         _LOGGER.debug("Angle sensing disabled, skipping angle sensor creation")

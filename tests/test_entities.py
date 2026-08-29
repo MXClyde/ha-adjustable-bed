@@ -2857,7 +2857,13 @@ class TestSensorEntities:
         from homeassistant.helpers import entity_registry as er
 
         registry = er.async_get(hass)
-        for key in ("back_angle", "legs_angle", "linak_model_variant"):
+        for key in (
+            "back_angle",
+            "legs_angle",
+            "head_angle",
+            "feet_angle",
+            "linak_model_variant",
+        ):
             registry.async_get_or_create(
                 "sensor",
                 DOMAIN,
@@ -2882,7 +2888,13 @@ class TestSensorEntities:
 
         assert sensor_states == []
         assert len(position_states) == 2
-        for key in ("back_angle", "legs_angle", "linak_model_variant"):
+        for key in (
+            "back_angle",
+            "legs_angle",
+            "head_angle",
+            "feet_angle",
+            "linak_model_variant",
+        ):
             assert (
                 registry.async_get_entity_id("sensor", DOMAIN, f"AA:BB:CC:DD:EE:FF_{key}") is None
             )
@@ -2994,6 +3006,7 @@ class TestSensorEntities:
 
         registry = er.async_get(hass)
         for key in (
+            "back_angle",
             "linak_protocol_error",
             "linak_back_reported_speed",
             "linak_alarm_status",
@@ -3015,6 +3028,7 @@ class TestSensorEntities:
         await hass.async_block_till_done()
 
         for key in (
+            "back_angle",
             "linak_protocol_error",
             "linak_back_reported_speed",
             "linak_alarm_status",

@@ -726,6 +726,44 @@ class TestLinakCorpusProfiles:
         assert coordinator.controller.protocol_diagnostics["model_variant"] == "standard"
         assert coordinator.controller.memory_slot_count == 0
         assert coordinator.controller.supports_position_feedback is False
+        assert coordinator.controller.passive_position_reconciliation_interval is None
+
+    async def test_capability_mask_retries_after_cold_session_auth_window(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ) -> None:
+        """An authenticated mask read must resolve before entity capabilities freeze."""
+        original_read = mock_bleak_client.read_gatt_char.side_effect
+        mask_attempts = 0
+        auth_error = BleakError(
+            "Bluetooth GATT Error address=CB:3D:68:A7:7B:D0 handle=14 "
+            "error=5 description=Insufficient authentication"
+        )
+
+        async def read(uuid: str) -> bytes:
+            nonlocal mask_attempts
+            if str(uuid).lower() == LINAK_POSITION_MASK_UUID:
+                mask_attempts += 1
+                if mask_attempts == 1:
+                    raise auth_error
+                return b"\xc0"
+            return await original_read(uuid)
+
+        mock_bleak_client.read_gatt_char.side_effect = read
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+
+        await coordinator.async_connect()
+
+        assert mask_attempts == 2
+        assert coordinator.controller.protocol_diagnostics["model_variant"] == "advanced"
+        assert coordinator.controller.supports_position_feedback is True
+        assert coordinator.controller.passive_position_reconciliation_interval == pytest.approx(
+            120.0
+        )
+        assert _written_commands(mock_bleak_client) == [LinakCommands.MOVE_STOP]
 
     async def test_direct_ble_factory_reset_uses_configuration_characteristic(
         self,
@@ -741,11 +779,10 @@ class TestLinakCorpusProfiles:
 
         await coordinator.controller.factory_reset()
 
-        mock_bleak_client.write_gatt_char.assert_awaited_once_with(
-            LINAK_CONFIG_CHAR_UUID,
-            LinakCommands.FACTORY_RESET,
-            response=True,
-        )
+        assert mock_bleak_client.write_gatt_char.await_args_list == [
+            call(LINAK_CONTROL_CHAR_UUID, LinakCommands.MOVE_STOP, response=True),
+            call(LINAK_CONFIG_CHAR_UUID, LinakCommands.FACTORY_RESET, response=True),
+        ]
 
     async def test_td3_mask_zero_keeps_four_memories_without_reference_axes(
         self,
@@ -769,6 +806,7 @@ class TestLinakCorpusProfiles:
         assert coordinator.controller.protocol_diagnostics["model_variant"] == "td3"
         assert coordinator.controller.memory_slot_count == 4
         assert coordinator.controller.supports_position_feedback is False
+        assert coordinator.controller.passive_position_reconciliation_interval is None
 
     async def test_timer_service_promotes_advanced_model_only_after_subscription(
         self,
@@ -873,6 +911,7 @@ class TestLinakCorpusProfiles:
         assert coordinator.controller.protocol_diagnostics["profile"] == "performance_legacy"
         assert coordinator.controller.memory_slot_count == 4
         assert coordinator.controller.supports_position_feedback is False
+        assert coordinator.controller.passive_position_reconciliation_interval is None
         assert coordinator.controller.supports_impulse_control is True
         assert coordinator.controller.supports_wake_control is False
         assert coordinator.controller.supports_factory_reset is False

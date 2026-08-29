@@ -270,6 +270,7 @@ class LinakController(BedController):
         self._session_started_monotonic = monotonic()
         self._protocol_notification_uuids: set[str] = set()
         self._deferred_protocol_notifications: set[str] = set()
+        self._capability_discovery_deferred = False
         self._timer_candidate = False
         self._performance_wave_active = False
         self._publish_capability_state()
@@ -357,6 +358,8 @@ class LinakController(BedController):
     @property
     def passive_position_reconciliation_interval(self) -> float | None:
         """Return a low-frequency idle read interval for out-of-band movement."""
+        if not self.supports_position_feedback:
+            return None
         return LINAK_PASSIVE_POSITION_RECONCILIATION_INTERVAL_S
 
     @property
@@ -558,11 +561,13 @@ class LinakController(BedController):
     async def async_discover_capabilities(self) -> None:
         """Resolve Standard, TD3, and Advanced from services and mask byte 0."""
         if self._profile is LinakProfile.PERFORMANCE:
+            self._capability_discovery_deferred = False
             self._publish_capability_state()
             return
         if self.client is None or not self.client.is_connected:
             return
 
+        self._capability_discovery_deferred = False
         if not self._has_service(LINAK_POSITION_SERVICE_UUID):
             self._capabilities = LinakCapabilitySnapshot(
                 profile=self._profile,
@@ -579,7 +584,22 @@ class LinakController(BedController):
                 data = await self.client.read_gatt_char(LINAK_POSITION_MASK_UUID)
             if not data:
                 raise ValueError("Linak capability mask is empty")
-        except (BleakError, TimeoutError, ValueError) as err:
+        except BleakError as err:
+            if self._is_authentication_window_error(err):
+                self._capability_discovery_deferred = True
+                _LOGGER.debug(
+                    "Deferring Linak capability-mask discovery until control is ready: %s",
+                    err,
+                )
+            else:
+                _LOGGER.warning(
+                    "Could not resolve Linak capability mask for %s; retaining cached capabilities: %s",
+                    self._coordinator.address,
+                    err,
+                )
+            self._publish_capability_state()
+            return
+        except (TimeoutError, ValueError) as err:
             _LOGGER.warning(
                 "Could not resolve Linak capability mask for %s; retaining cached capabilities: %s",
                 self._coordinator.address,
@@ -1161,6 +1181,8 @@ class LinakController(BedController):
     async def _await_control_ready(self, cancel_event: asyncio.Event | None = None) -> None:
         """Wait until Linak accepts control writes after a fresh BLE connect."""
         if self._session_ready:
+            if self._capability_discovery_deferred:
+                await self.async_discover_capabilities()
             return
 
         effective_cancel = cancel_event or self._coordinator.cancel_command
@@ -1220,6 +1242,8 @@ class LinakController(BedController):
                 continue
 
             self._session_ready = True
+            if self._capability_discovery_deferred:
+                await self.async_discover_capabilities()
             if self._deferred_position_notifications:
                 await self._ensure_position_notifications_started()
             if self._deferred_protocol_notifications:
@@ -1269,9 +1293,9 @@ class LinakController(BedController):
             return
 
         await self._start_protocol_notifications()
-        if self._deferred_protocol_notifications:
+        if self._deferred_protocol_notifications or self._capability_discovery_deferred:
             # Error/config/timer channels are capability-bearing, so resolve
-            # the known post-connect auth window before entity setup snapshots
+            # their known post-connect auth window before entity setup snapshots
             # this controller. Position channels may remain lazily deferred.
             await self._await_control_ready()
 
@@ -1863,11 +1887,16 @@ class LinakController(BedController):
         """Reset the controller settings exposed by both app profiles."""
         await self.write_command(LinakCommands.RESET_DEFAULTS)
 
+    async def _write_protected_characteristic(self, uuid: str, data: bytes) -> None:
+        """Wait out the cold-session auth window before a protected GATT write."""
+        await self._await_control_ready()
+        await self._write_gatt_with_retry(uuid, data)
+
     async def factory_reset(self) -> None:
         """Run Bed Connect's distinct configuration-level factory reset."""
         if not self.supports_factory_reset:
             raise NotImplementedError("Factory reset is unavailable for this profile")
-        await self._write_gatt_with_retry(
+        await self._write_protected_characteristic(
             LINAK_CONFIG_CHAR_UUID,
             LinakCommands.FACTORY_RESET,
         )
@@ -1882,7 +1911,7 @@ class LinakController(BedController):
         """Write modern Bed Control's automatic-drive configuration."""
         if not self.supports_automatic_drive:
             raise NotImplementedError("Automatic drive is not exposed by this profile")
-        await self._write_gatt_with_retry(
+        await self._write_protected_characteristic(
             LINAK_CONFIG_CHAR_UUID,
             build_automatic_drive(enabled),
         )
@@ -1895,7 +1924,7 @@ class LinakController(BedController):
         encoded = name.encode()
         if not name or len(name) > 17 or len(encoded) > 17:
             raise ValueError("Linak device names must contain 1 to 17 bytes")
-        await self._write_gatt_with_retry(LINAK_DEVICE_NAME_UUID, encoded)
+        await self._write_protected_characteristic(LINAK_DEVICE_NAME_UUID, encoded)
 
     async def program_alarm(
         self,
@@ -1916,7 +1945,7 @@ class LinakController(BedController):
             build_timer_recurrence(recurrence_count, recurrence_minutes),
             bytes((0x20,)),
         ):
-            await self._write_gatt_with_retry(LINAK_TIMER_CHAR_UUID, packet)
+            await self._write_protected_characteristic(LINAK_TIMER_CHAR_UUID, packet)
 
     async def move_simultaneously(
         self,
