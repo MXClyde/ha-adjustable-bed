@@ -61,6 +61,7 @@ SHARED_CAPABILITY_FLAGS: tuple[str, ...] = (
     "supports_motor_control",
     "supports_stop_all",
     "supports_fan_control",
+    "supports_control_mode_configuration",
 )
 
 
@@ -635,6 +636,10 @@ async def test_declared_capabilities_map_to_implemented_methods(bed_type: str) -
         for method_name in ("fan_left_cycle", "fan_right_cycle", "fan_sync_cycle"):
             assert _is_overridden(controller, method_name)
         assert controller.fan_level_max > 0
+
+    if controller.supports_control_mode_configuration:
+        assert _is_overridden(controller, "set_control_mode_press_and_hold")
+        assert _is_overridden(controller, "set_control_mode_press_and_release")
 
 
 async def test_base_move_with_stop_always_sends_stop_on_error() -> None:
