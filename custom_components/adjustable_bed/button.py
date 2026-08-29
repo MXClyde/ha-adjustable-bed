@@ -689,13 +689,11 @@ def _button_entities_for(
     hass: HomeAssistant, coordinator: AdjustableBedCoordinator
 ) -> list[ButtonEntity]:
     """Build button entities for a single (child or standalone) coordinator."""
-    has_massage = coordinator.has_massage
     # capability_controller: an offline paired side still gets its buttons built
     # from a client-free controller minted from config (see coordinator); stale
     # cleanup below runs against it too (only when non-None).
     controller = coordinator.capability_controller
-    if controller is not None and controller.auto_enable_massage:
-        has_massage = True
+    has_massage = _massage_entities_enabled(coordinator, controller)
 
     if controller is not None:
         _async_migrate_massage_intensity_button_unique_ids(hass, coordinator)
@@ -741,7 +739,11 @@ def _combined_button_entities_for(
             # {pair_id}_stop_both unique_id); don't also build a generic one.
             continue
         if not all(
-            _should_add_button(description, child.capability_controller, child.has_massage)
+            _should_add_button(
+                description,
+                child.capability_controller,
+                _massage_entities_enabled(child, child.capability_controller),
+            )
             for child in eligible
         ):
             continue
@@ -752,6 +754,14 @@ def _combined_button_entities_for(
     # "both sides" up/down motion buttons from the cover descriptors.
     entities.extend(_combined_motor_buttons_for(coordinator, eligible))
     return entities
+
+
+def _massage_entities_enabled(
+    coordinator: AdjustableBedCoordinator,
+    controller: BedController | None,
+) -> bool:
+    """Return the effective configured or protocol-declared massage capability."""
+    return coordinator.has_massage or bool(controller and controller.auto_enable_massage)
 
 
 def _combined_motor_buttons_for(
