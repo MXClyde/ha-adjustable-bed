@@ -29,6 +29,7 @@ from .const import (
     BED_TYPE_ERGOMOTION,
     BED_TYPE_KAIDI,
     BED_TYPE_KEESON,
+    BED_TYPE_LINAK,
     BED_TYPE_SLEEPYS_BOX25,
     CONF_BED_TYPE,
     CONF_MOTOR_COUNT,
@@ -734,6 +735,11 @@ async def _set_position_plan(
             valid_motors = {
                 m for m, cfg in motor_configs.items() if motor_count >= cfg.get("min_motors", 2)
             }
+            if bed_type == BED_TYPE_LINAK:
+                resolved_axes = {
+                    spec.position_key for spec in controller.position_number_specs
+                }
+                valid_motors &= resolved_axes
 
         # Validate motor is valid for this bed
         if motor not in valid_motors:
@@ -1118,7 +1124,10 @@ async def handle_linak_move_simultaneously(call: ServiceCall) -> None:
         )
 
     try:
-        resources = (f"motor:{first_motor}", f"motor:{second_motor}")
+        resources = tuple(
+            f"motor:{'bed_height' if motor == 'base' else motor}"
+            for motor in (first_motor, second_motor)
+        )
         for coordinator, side in targets:
             await _execute_sided(coordinator, side, move, resources=resources)
     except Exception:

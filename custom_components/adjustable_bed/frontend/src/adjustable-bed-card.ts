@@ -704,11 +704,17 @@ export class AdjustableBedCard extends LitElement {
 
   private _graphicState(bed: BedEntities): BedGraphicState | undefined {
     const withPosition = bed.motors.filter(
-      (motor) => motor.angle || motor.position,
+      (motor) => {
+        const feedbackEntity = motor.angle ?? motor.position;
+        return (
+          feedbackEntity !== undefined &&
+          this._state(feedbackEntity)?.attributes.unit_of_measurement === "°"
+        );
+      },
     );
     // Registry entries can outlive a configuration change. Do not draw a flat
-    // default graphic from unavailable/unknown entities: every exposed
-    // position must have a numeric value before the graphic is shown.
+    // default graphic from unavailable/unknown entities. Percentage positions
+    // cannot be rendered as angles, and every degree value must be numeric.
     if (
       withPosition.length === 0 ||
       withPosition.some((motor) => this._angle(motor) === undefined)

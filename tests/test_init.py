@@ -1429,6 +1429,89 @@ class TestServices:
 
         mock_bleak_client.write_gatt_char.assert_not_called()
 
+    async def test_linak_simultaneous_move_maps_base_to_bed_height_resource(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        enable_custom_integrations,
+    ) -> None:
+        """BASE must overlap the bed-height cover's scheduler reservation."""
+        _configure_linak_advanced(mock_bleak_client, actuator_mask=0x88)
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        device_registry = dr.async_get(hass)
+        device_id = dr.async_entries_for_config_entry(
+            device_registry, mock_config_entry.entry_id
+        )[0].id
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+        execute = AsyncMock()
+
+        with patch.object(
+            coordinator,
+            "async_execute_controller_command",
+            new=execute,
+        ):
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_LINAK_MOVE_SIMULTANEOUS,
+                {
+                    "device_id": [device_id],
+                    "first_motor": "base",
+                    "first_direction": "down",
+                    "second_motor": "back",
+                    "second_direction": "up",
+                    "duration_ms": 100,
+                },
+                blocking=True,
+            )
+
+        assert execute.await_args.kwargs["resources"] == (
+            "motor:bed_height",
+            "motor:back",
+        )
+
+    async def test_linak_set_position_rejects_axis_missing_from_model(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        enable_custom_integrations,
+    ) -> None:
+        """Position services must follow the resolved Advanced actuator mask."""
+        from homeassistant.exceptions import ServiceValidationError
+
+        _configure_linak_advanced(mock_bleak_client, actuator_mask=0x80)
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={
+                **mock_config_entry.data,
+                CONF_DISABLE_ANGLE_SENSING: False,
+            },
+        )
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        device_registry = dr.async_get(hass)
+        device_id = dr.async_entries_for_config_entry(
+            device_registry, mock_config_entry.entry_id
+        )[0].id
+
+        with pytest.raises(ServiceValidationError, match="Valid motors: back"):
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_SET_POSITION,
+                {
+                    "device_id": [device_id],
+                    "motor": "legs",
+                    "position": 20,
+                },
+                blocking=True,
+            )
+
     async def test_linak_alarm_service_writes_configuration_event_recurrence_and_commit(
         self,
         hass: HomeAssistant,
@@ -2071,6 +2154,11 @@ class TestServices:
         coordinator = MagicMock()
         coordinator.entry = entry
         coordinator.controller = MagicMock()
+        coordinator.controller.position_number_specs = (
+            SimpleNamespace(position_key="back"),
+            SimpleNamespace(position_key="legs"),
+        )
+        coordinator.capability_controller = coordinator.controller
         coordinator.name = entry.title
         coordinator.entry = entry
         coordinator.disable_angle_sensing = False
@@ -2175,6 +2263,11 @@ class TestServices:
         coordinator = MagicMock()
         coordinator.entry = entry
         coordinator.controller = MagicMock()
+        coordinator.controller.position_number_specs = (
+            SimpleNamespace(position_key="back"),
+            SimpleNamespace(position_key="legs"),
+        )
+        coordinator.capability_controller = coordinator.controller
         coordinator.name = entry.title
         coordinator.entry = entry
         coordinator.disable_angle_sensing = False

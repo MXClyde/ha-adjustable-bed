@@ -2312,6 +2312,16 @@ class TestSideServiceRouting:
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
         coordinator = hass.data[DOMAIN][entry.entry_id]
+        from custom_components.adjustable_bed.beds.linak_protocol import (
+            LinakCapabilitySnapshot,
+            LinakProfile,
+        )
+
+        for child in coordinator.children.values():
+            child.controller._capabilities = LinakCapabilitySnapshot.from_mapping(
+                LINAK_ADVANCED_SNAPSHOT,
+                profile=LinakProfile.BED_CONTROL,
+            )
         coordinator.async_run_child_operation = AsyncMock()
         parent = _device_for_entry_and_identifier(
             dr.async_get(hass), entry.entry_id, (DOMAIN, PAIR_ID)
