@@ -57,6 +57,7 @@ from custom_components.adjustable_bed.const import (
     LEGGETT_VARIANT_GEN2,
     LEGGETT_VARIANT_MLRM,
     LEGGETT_VARIANT_OKIN,
+    LINAK_VARIANT_PERFORMANCE,
     OCTO_VARIANT_STAR2,
     OFFLINE_CAPABILITY_SAFE_BED_TYPES,
     PAIR_MODE_SEPARATE_ADDRESS,
@@ -661,6 +662,40 @@ class TestPairedSetup:
         # per-motor "both sides" up/down motion buttons instead.
         for key in ("back_up", "back_down", "legs_up", "legs_down"):
             assert f"{PAIR_ID}_{key}_both" in both_uids
+
+    async def test_performance_profile_auto_enables_combined_massage_buttons(
+        self,
+        hass: HomeAssistant,
+        mock_coordinator_connected,
+        enable_custom_integrations,
+    ) -> None:
+        """Protocol-declared massage should apply to paired parent controls."""
+        entry = _paired_entry(hass)
+        children = [
+            {
+                **child,
+                CONF_PROTOCOL_VARIANT: LINAK_VARIANT_PERFORMANCE,
+                CONF_HAS_MASSAGE: False,
+            }
+            for child in entry.data[CONF_PAIR_CHILDREN]
+        ]
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, CONF_PAIR_CHILDREN: children},
+        )
+
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        registry = er.async_get(hass)
+        assert (
+            registry.async_get_entity_id(
+                "button",
+                DOMAIN,
+                f"{PAIR_ID}_massage_all_toggle_both",
+            )
+            is not None
+        )
 
     async def test_paired_entry_migrates_combined_massage_intensity_ids(
         self,
