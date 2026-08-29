@@ -29,6 +29,7 @@ from custom_components.adjustable_bed.const import (
     LINAK_POSITION_LEG_UUID,
     LINAK_POSITION_MASK_UUID,
     LINAK_POSITION_SERVICE_UUID,
+    LINAK_TIMER_CHAR_UUID,
     LINAK_TIMER_SERVICE_UUID,
     LINAK_VARIANT_PERFORMANCE,
 )
@@ -314,7 +315,83 @@ class TestLinakController:
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         await coordinator.async_connect()
 
-        assert coordinator.controller.position_seek_tolerance == pytest.approx(0.75)
+        assert coordinator.controller.position_seek_tolerance == pytest.approx(0.3)
+
+    async def test_seek_uses_fresh_reference_notifications_without_gatt_read(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ) -> None:
+        """Fresh Linak notifications should drive the seek without slow active reads."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        _mark_session_ready(coordinator)
+        coordinator._handle_position_update("back", 10.0)
+
+        async def finish_step(
+            position_key: str,
+            moving_up: bool,
+            remaining_distance: float | None,
+        ) -> None:
+            assert (position_key, moving_up, remaining_distance) == ("back", True, 10.0)
+            coordinator._handle_position_update("back", 20.0)
+
+        read_positions = AsyncMock()
+        with (
+            patch.object(
+                coordinator.controller,
+                "seek_position_step",
+                new=AsyncMock(side_effect=finish_step),
+            ),
+            patch.object(coordinator, "_async_read_positions", new=read_positions),
+        ):
+            await coordinator.async_seek_position(
+                "back",
+                20.0,
+                lambda controller: controller.move_back_up(),
+                lambda controller: controller.move_back_down(),
+                lambda controller: controller.move_back_stop(),
+            )
+
+        read_positions.assert_not_awaited()
+        assert coordinator._seek_outcomes["back"]["outcome"] == "reached_target"
+
+    async def test_seek_falls_back_to_gatt_read_when_notification_is_stale(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ) -> None:
+        """A stopped Linak notification stream must retain conservative readback."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        _mark_session_ready(coordinator)
+        coordinator._handle_position_update("back", 10.0)
+        coordinator._position_data_updated_monotonic["back"] = 0.0
+
+        async def refresh_position() -> None:
+            coordinator._handle_position_update("back", 20.0)
+
+        read_positions = AsyncMock(side_effect=refresh_position)
+        with (
+            patch.object(
+                coordinator.controller,
+                "seek_position_step",
+                new=AsyncMock(),
+            ),
+            patch.object(coordinator, "_async_read_positions", new=read_positions),
+        ):
+            await coordinator.async_seek_position(
+                "back",
+                20.0,
+                lambda controller: controller.move_back_up(),
+                lambda controller: controller.move_back_down(),
+                lambda controller: controller.move_back_stop(),
+            )
+
+        read_positions.assert_awaited_once_with()
+        assert coordinator._seek_outcomes["back"]["outcome"] == "reached_target"
 
     async def test_linak_reissues_seek_after_first_stalled_read(
         self,
@@ -409,7 +486,7 @@ class TestLinakController:
         result, issue_step, _stop = await _run_position_seek(
             coordinator.controller.position_seek_policy,
             initial=40.0,
-            readings=[15.0, 15.0, 0.5],
+            readings=[15.0, 15.0, 0.2],
         )
 
         assert result.outcome is SeekOutcome.REACHED_TARGET
@@ -431,6 +508,7 @@ class TestLinakController:
         await coordinator.async_connect()
         _mark_session_ready(coordinator)
         coordinator._handle_position_update("back", 1.1)
+        coordinator._position_data_updated_monotonic["back"] = 0.0
         mock_bleak_client.write_gatt_char.reset_mock()
         readings = iter([1.1, 1.1])
         events: list[str] = []
@@ -488,6 +566,7 @@ class TestLinakController:
         await coordinator.async_connect()
         _mark_session_ready(coordinator)
         coordinator._handle_position_update("back", 1.1)
+        coordinator._position_data_updated_monotonic["back"] = 0.0
         mock_bleak_client.write_gatt_char.reset_mock()
         read_started = asyncio.Event()
         release_read = asyncio.Event()
@@ -720,6 +799,52 @@ class TestLinakCorpusProfiles:
         assert diagnostics["timer_supported"] is True
         assert coordinator.controller.supports_alarm is True
 
+    async def test_timer_notification_retries_after_cold_session_auth_window(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ) -> None:
+        """A cold authenticated timer channel must still promote alarm support."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        controller = coordinator.controller
+        controller._timer_candidate = True
+        controller._session_ready = False
+        controller._protocol_notification_uuids.clear()
+        controller._deferred_protocol_notifications.clear()
+        mock_bleak_client.start_notify.reset_mock()
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        timer_attempts = 0
+        auth_error = BleakError(
+            "Bluetooth GATT Error address=CB:3D:68:A7:7B:D0 handle=14 "
+            "error=5 description=Insufficient authentication"
+        )
+
+        async def start_notify(uuid: str, _handler: object) -> None:
+            nonlocal timer_attempts
+            if uuid == LINAK_TIMER_CHAR_UUID:
+                timer_attempts += 1
+                if timer_attempts == 1:
+                    raise auth_error
+
+        with patch.object(
+            controller,
+            "_read_protocol_characteristic",
+            new=AsyncMock(),
+        ):
+            mock_bleak_client.start_notify.side_effect = start_notify
+            await controller.start_notify(None)
+
+        assert timer_attempts == 2
+        assert LINAK_TIMER_CHAR_UUID in controller._protocol_notification_uuids
+        assert not controller._deferred_protocol_notifications
+        assert controller.supports_alarm is True
+        assert controller.protocol_diagnostics["model_variant"] == "advanced_with_alarm"
+        assert _written_commands(mock_bleak_client) == [LinakCommands.MOVE_STOP]
+
     async def test_performance_profile_uses_300ms_holds_and_one_byte_release(
         self,
         hass: HomeAssistant,
@@ -785,6 +910,9 @@ class TestLinakCorpusProfiles:
         notify_call.args[1](LINAK_ERROR_CHAR_UUID, bytearray.fromhex("01 00 0D AA"))
 
         assert coordinator.controller_state == state_before
+        assert "linak_protocol_error" not in {
+            spec.key for spec in coordinator.controller.controller_state_sensor_specs
+        }
 
 
 class TestLinakMovement:

@@ -269,11 +269,14 @@ class PairedBedCoordinator:
         cancel_running: bool = True,
         skip_disconnect: bool = False,
         resource: str | None = None,
+        resources: Collection[str] | None = None,
     ) -> None:
         """Run ``command_fn`` on the targeted side(s) with the both-failure contract."""
+        if resource is not None and resources is not None:
+            raise ValueError("Pass resource or resources, not both")
 
         async def op(child: AdjustableBedCoordinator) -> None:
-            if resource is None:
+            if resource is None and resources is None:
                 await child.async_execute_controller_command(
                     command_fn,
                     cancel_running=cancel_running,
@@ -285,6 +288,7 @@ class PairedBedCoordinator:
                     cancel_running=cancel_running,
                     skip_disconnect=skip_disconnect,
                     resource=resource,
+                    resources=resources,
                 )
 
         await self._run(
@@ -293,6 +297,7 @@ class PairedBedCoordinator:
             op,
             cancel_running=cancel_running,
             resource=resource,
+            resources=resources,
         )
 
     async def async_seek_position(

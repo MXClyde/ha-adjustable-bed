@@ -211,11 +211,23 @@ not implement WiFi provisioning, cloud control or module firmware updates.
 
 ## Position seeking
 
-Linak uses a 0.75° seek tolerance for ordinary targets. Live testing found one
-lower physical endpoint where the back actuator stopped at a reported 1.0° to
-1.1° when 0° was requested. A back seek to exactly 0° therefore completes after
-two consecutive stalled checks at or below 1.1°, with at most one retry after the
-first confirmed stall. Mid-range stalls continue to retry normally.
+Linak uses a 0.3° seek tolerance for ordinary targets. During a seek, fresh
+per-axis reference notifications drive the feedback loop directly; an explicit
+GATT read remains the fallback when that notification stream is stale. This
+avoids slow whole-bed reads between short movement pulses while retaining safe
+behavior on variants with missing feedback.
+
+Live testing found one lower physical endpoint where the back actuator stopped
+at a reported 1.0° to 1.1° when 0° was requested. A back seek to exactly 0°
+therefore completes after two consecutive stalled checks at or below 1.1°, with
+at most one retry after the first confirmed stall. Mid-range stalls continue to
+retry normally.
+
+On the tested two-motor Advanced model, notification-driven feedback reduced a
+roughly 10° back seek from about 20 seconds to 8.5 seconds and reduced settled
+error from 0.5° to 0.1° in the upward direction. The reverse back seek settled
+within 0.2°, and legs seeks in both directions settled within 0.1°, without a
+reversal or oscillation.
 
 Upper endpoints retain the normal tolerance. No upper-endpoint exception is
 enabled without supporting evidence.

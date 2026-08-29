@@ -84,6 +84,13 @@ def test_timer_builders_match_frozen_vectors() -> None:
         70000,
         (LinakAlarmStep(LinakAlarmAction.MASSAGE_TOGGLE),),
     ) == bytes.fromhex("01 70 11 01 91 00 01 00")
+    assert build_timer_event(
+        3600,
+        (
+            LinakAlarmStep(LinakAlarmAction.MEMORY_1),
+            LinakAlarmStep(LinakAlarmAction.LIGHT_TOGGLE, lifetime=2, pause=3),
+        ),
+    ) == bytes.fromhex("00 10 0E 01 0E 00 01 00 94 00 02 03")
     assert build_timer_recurrence(31, 1440) == bytes.fromhex("10 A0 FD")
 
 

@@ -132,6 +132,21 @@ class PositionSeekPolicy:
         return self._controller.position_seek_check_interval
 
     @property
+    def prefers_cached_position_feedback(self) -> bool:
+        """Return True when fresh notifications should replace active GATT reads.
+
+        The default remains conservative for controllers whose notifications
+        are missing or incomplete. Protocol policies may opt in when their
+        position characteristic is proven to notify throughout movement.
+        """
+        return False
+
+    @property
+    def cached_position_feedback_max_age(self) -> float:
+        """Return the maximum age of notification feedback used by a seek."""
+        return 0.0
+
+    @property
     def stall_count(self) -> int:
         """Return how many stagnant reads confirm a stall."""
         return self._controller.position_seek_stall_count

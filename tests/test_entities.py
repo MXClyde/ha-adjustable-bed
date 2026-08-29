@@ -2886,6 +2886,49 @@ class TestSensorEntities:
                 registry.async_get_entity_id("sensor", DOMAIN, f"AA:BB:CC:DD:EE:FF_{key}") is None
             )
 
+    async def test_linak_removes_position_numbers_missing_from_capability_mask(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        enable_custom_integrations,
+    ) -> None:
+        """A changed Advanced mask must not leave unsupported sliders orphaned."""
+        _configure_linak_advanced(mock_bleak_client, actuator_mask=0x80)
+        mock_config_entry_data[CONF_DISABLE_ANGLE_SENSING] = False
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Test Bed",
+            data=mock_config_entry_data,
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id="linak_mask_entry_id",
+        )
+        entry.add_to_hass(hass)
+
+        from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(hass)
+        for key in ("back_position", "legs_position", "head_position", "feet_position"):
+            registry.async_get_or_create(
+                "number",
+                DOMAIN,
+                f"AA:BB:CC:DD:EE:FF_{key}",
+                config_entry=entry,
+            )
+
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        assert (
+            registry.async_get_entity_id("number", DOMAIN, "AA:BB:CC:DD:EE:FF_back_position")
+            is not None
+        )
+        for key in ("legs_position", "head_position", "feet_position"):
+            assert (
+                registry.async_get_entity_id("number", DOMAIN, f"AA:BB:CC:DD:EE:FF_{key}") is None
+            )
+
     async def test_non_feedback_bed_creates_no_angle_sensors_when_enabled(
         self,
         hass: HomeAssistant,

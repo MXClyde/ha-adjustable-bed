@@ -71,10 +71,11 @@ LINAK_INITIAL_POSITION_RETRY_ATTEMPTS = 3
 LINAK_INITIAL_POSITION_RETRY_DELAY_S = 0.75
 LINAK_PASSIVE_POSITION_RECONCILIATION_INTERVAL_S = 120.0
 LINAK_POSITION_SEEK_PULSE_DELAY_MS = 100
-LINAK_POSITION_SEEK_TOLERANCE = 0.75
+LINAK_POSITION_SEEK_TOLERANCE = 0.3
 LINAK_POSITION_SEEK_STALL_COUNT = 1
 LINAK_POSITION_SEEK_CHECK_INTERVAL_S = 0.2
 LINAK_POSITION_SEEK_STALL_THRESHOLD = 0.2
+LINAK_POSITION_SEEK_CACHED_FEEDBACK_MAX_AGE_S = 0.5
 LINAK_LOWER_ENDPOINT_MAX_ANGLE_DEGREES = 1.1
 LINAK_LOWER_ENDPOINT_STALL_CONFIRMATIONS = 2
 LINAK_COARSE_SEEK_DISTANCE_DEGREES = 20.0
@@ -109,6 +110,16 @@ class LinakPositionSeekPolicy(PositionSeekPolicy):
         super().__init__(controller)
         self._last_lower_endpoint_stall: float | None = None
         self._lower_endpoint_stall_confirmations = 0
+
+    @property
+    def prefers_cached_position_feedback(self) -> bool:
+        """Use the reference-output notifications already emitted during motion."""
+        return True
+
+    @property
+    def cached_position_feedback_max_age(self) -> float:
+        """Fall back to an explicit read if notifications stop arriving."""
+        return LINAK_POSITION_SEEK_CACHED_FEEDBACK_MAX_AGE_S
 
     @staticmethod
     def _is_observed_lower_endpoint(sample: SeekSample) -> bool:
@@ -245,6 +256,7 @@ class LinakController(BedController):
         self._session_ready = False
         self._session_started_monotonic = monotonic()
         self._protocol_notification_uuids: set[str] = set()
+        self._deferred_protocol_notifications: set[str] = set()
         self._timer_candidate = False
         self._performance_wave_active = False
         self._publish_capability_state()
@@ -575,15 +587,20 @@ class LinakController(BedController):
     @property
     def controller_state_sensor_specs(self) -> tuple[ControllerStateSensorSpec, ...]:
         """Expose parsed speed, errors, and timer state."""
-        specs: list[ControllerStateSensorSpec] = [
-            ControllerStateSensorSpec(
-                key="linak_protocol_error",
-                translation_key="linak_protocol_error",
-                state_key="linak_protocol_error",
-                icon="mdi:alert-circle-outline",
-                attribute_keys=("linak_protocol_error_code", "linak_protocol_error_payload"),
-            ),
-        ]
+        specs: list[ControllerStateSensorSpec] = []
+        if self._profile is LinakProfile.BED_CONTROL:
+            specs.append(
+                ControllerStateSensorSpec(
+                    key="linak_protocol_error",
+                    translation_key="linak_protocol_error",
+                    state_key="linak_protocol_error",
+                    icon="mdi:alert-circle-outline",
+                    attribute_keys=(
+                        "linak_protocol_error_code",
+                        "linak_protocol_error_payload",
+                    ),
+                )
+            )
         for axis in self._capabilities.position_axes:
             specs.append(
                 ControllerStateSensorSpec(
@@ -820,9 +837,19 @@ class LinakController(BedController):
             async with self._ble_lock:
                 await self.client.start_notify(uuid, handler)
         except BleakError as err:
+            if self._is_authentication_window_error(err):
+                self._deferred_protocol_notifications.add(uuid)
+                _LOGGER.debug(
+                    "Deferring Linak characteristic %s until control is ready: %s",
+                    uuid,
+                    err,
+                )
+                return False
+            self._deferred_protocol_notifications.discard(uuid)
             _LOGGER.debug("Could not subscribe to Linak characteristic %s: %s", uuid, err)
             return False
         self._protocol_notification_uuids.add(uuid)
+        self._deferred_protocol_notifications.discard(uuid)
         return True
 
     async def _read_protocol_characteristic(
@@ -1165,6 +1192,8 @@ class LinakController(BedController):
             self._session_ready = True
             if self._deferred_position_notifications:
                 await self._ensure_position_notifications_started()
+            if self._deferred_protocol_notifications:
+                await self._start_protocol_notifications()
             _LOGGER.debug(
                 "Linak control ready for %s after %.2fs (%d probe attempts)",
                 self._coordinator.address,
@@ -1210,6 +1239,11 @@ class LinakController(BedController):
             return
 
         await self._start_protocol_notifications()
+        if self._deferred_protocol_notifications:
+            # Error/config/timer channels are capability-bearing, so resolve
+            # the known post-connect auth window before entity setup snapshots
+            # this controller. Position channels may remain lazily deferred.
+            await self._await_control_ready()
 
         if callback is None or not self.supports_position_feedback:
             return
@@ -1402,6 +1436,7 @@ class LinakController(BedController):
         self._active_position_notifications.clear()
         self._deferred_position_notifications.clear()
         self._protocol_notification_uuids.clear()
+        self._deferred_protocol_notifications.clear()
         uuids = [
             LINAK_ERROR_CHAR_UUID,
             LINAK_CONFIG_CHAR_UUID,

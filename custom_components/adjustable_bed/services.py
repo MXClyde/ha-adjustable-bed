@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Collection, Coroutine
 from typing import TYPE_CHECKING, Any, cast
 
 import voluptuous as vol
@@ -366,6 +366,7 @@ async def _execute_sided(
     *,
     cancel_running: bool = True,
     resource: str | None = None,
+    resources: Collection[str] | None = None,
 ) -> None:
     """Run a command on the targeted side(s).
 
@@ -378,12 +379,14 @@ async def _execute_sided(
             side=side,
             cancel_running=cancel_running,
             resource=resource,
+            resources=resources,
         )
     else:
         await coordinator.async_execute_controller_command(
             command_fn,
             cancel_running=cancel_running,
             resource=resource,
+            resources=resources,
         )
 
 
@@ -1115,9 +1118,9 @@ async def handle_linak_move_simultaneously(call: ServiceCall) -> None:
         )
 
     try:
-        resource = f"motor:{first_motor}+{second_motor}"
+        resources = (f"motor:{first_motor}", f"motor:{second_motor}")
         for coordinator, side in targets:
-            await _execute_sided(coordinator, side, move, resource=resource)
+            await _execute_sided(coordinator, side, move, resources=resources)
     except Exception:
         await _release_preflighted(preflighted)
         raise

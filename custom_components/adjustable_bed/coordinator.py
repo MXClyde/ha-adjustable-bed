@@ -428,6 +428,7 @@ class AdjustableBedCoordinator:
         # Position data from notifications
         self._position_data: dict[str, float] = {}
         self._position_data_generation: dict[str, int] = {}
+        self._position_data_updated_monotonic: dict[str, float] = {}
         self._position_connection_generation = 0
         self._position_callbacks: set[Callable[[dict[str, float]], None]] = set()
         self._controller_state: dict[str, Any] = {}
@@ -4910,6 +4911,7 @@ class AdjustableBedCoordinator:
         _LOGGER.debug("Position update: %s = %.1f°", position, angle)
         self._position_data[position] = angle
         self._position_data_generation[position] = self._position_connection_generation
+        self._position_data_updated_monotonic[position] = time.monotonic()
         # Track notification timing for diagnostics (issue #168)
         self._last_notify_received = datetime.now(UTC)
         # Copy to safely iterate while callbacks might unregister themselves
@@ -5437,6 +5439,15 @@ class AdjustableBedCoordinator:
                         await move_down_fn(controller)
 
                 async def read_position() -> float | None:
+                    if policy.prefers_cached_position_feedback:
+                        updated_at = self._position_data_updated_monotonic.get(position_key)
+                        if (
+                            updated_at is not None
+                            and self._position_is_current(position_key)
+                            and time.monotonic() - updated_at
+                            <= policy.cached_position_feedback_max_age
+                        ):
+                            return self._position_data.get(position_key)
                     await self._async_read_positions()
                     return self._position_data.get(position_key)
 

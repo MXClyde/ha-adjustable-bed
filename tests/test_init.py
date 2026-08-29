@@ -1320,10 +1320,19 @@ class TestServices:
             0
         ].id
         mock_bleak_client.write_gatt_char.reset_mock()
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+        execute = AsyncMock(wraps=coordinator.async_execute_controller_command)
 
-        with patch(
-            "custom_components.adjustable_bed.beds.base.asyncio.sleep",
-            new=AsyncMock(),
+        with (
+            patch(
+                "custom_components.adjustable_bed.beds.base.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                coordinator,
+                "async_execute_controller_command",
+                new=execute,
+            ),
         ):
             await hass.services.async_call(
                 DOMAIN,
@@ -1339,6 +1348,8 @@ class TestServices:
                 blocking=True,
             )
 
+        assert execute.await_args.kwargs["resources"] == ("motor:back", "motor:legs")
+        assert execute.await_args.kwargs["resource"] is None
         assert mock_bleak_client.write_gatt_char.await_args_list == [
             # Scheduler-level cancellation releases any prior movement first.
             call(LINAK_CONTROL_CHAR_UUID, bytes.fromhex("FF 00"), response=True),

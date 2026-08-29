@@ -295,6 +295,8 @@ def build_timer_event(seconds: int, actions: Sequence[LinakAlarmStep]) -> bytes:
         raise ValueError("Linak alarm seconds must be between 0 and 131071")
     if not 1 <= len(actions) <= 4:
         raise ValueError("Linak alarms require between 1 and 4 actions")
+    # The app writes a fixed event marker of 1 here even when it appends two to
+    # four action records. It is not an action-count field.
     payload = bytearray((1 if seconds > 0xFFFF else 0, seconds & 0xFF, (seconds >> 8) & 0xFF, 1))
     for step in actions:
         if not 0 <= step.lifetime <= 0xFF or not 0 <= step.pause <= 0xFF:
