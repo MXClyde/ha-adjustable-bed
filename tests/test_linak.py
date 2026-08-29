@@ -66,7 +66,7 @@ def mock_advanced_linak_gatt(
 ) -> None:
     """Model the default test bed as Advanced with back and legs references."""
     position_service = SimpleNamespace(
-        uuid="99fa0020-338a-1024-8a49-009c0215f78a",
+        uuid=LINAK_POSITION_SERVICE_UUID,
         characteristics=[],
     )
     mock_bleak_client.services.__iter__ = lambda self: iter([position_service])
@@ -682,6 +682,34 @@ class TestLinakController:
             LinakCommands.MOVE_STOP,
             LinakCommands.MOVE_HEAD_UP,
         ]
+
+    async def test_protocol_initial_read_timeout_is_best_effort(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ) -> None:
+        """A stalled optional state read must not block integration setup."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+
+        async def stalled_read(_uuid: str) -> bytes:
+            await asyncio.Event().wait()
+            return b""
+
+        mock_bleak_client.read_gatt_char.side_effect = stalled_read
+        handler = MagicMock()
+        with patch(
+            "custom_components.adjustable_bed.beds.linak.LINAK_PROTOCOL_READ_TIMEOUT_S",
+            0.001,
+        ):
+            await coordinator.controller._read_protocol_characteristic(
+                LINAK_ERROR_CHAR_UUID,
+                handler,
+            )
+
+        handler.assert_not_called()
 
     async def test_start_notify_subscribes_exact_capability_mask_axes(
         self,

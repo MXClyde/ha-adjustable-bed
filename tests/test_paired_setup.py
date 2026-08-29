@@ -2493,6 +2493,60 @@ class TestOfflineSideEntities:
         assert f"{LEFT_ADDR}_linak_automatic_drive" in uids
         assert f"{LEFT_ADDR}_under_bed_lights" not in uids
 
+    async def test_pair_cleanup_removes_memory_buttons_after_capacity_shrinks(
+        self,
+        hass: HomeAssistant,
+    ) -> None:
+        """Pair-level buttons must follow both sides' current memory capacity."""
+        from custom_components.adjustable_bed.button import async_setup_entry
+
+        data = _paired_entry_data()
+        standard_snapshot = {
+            "profile": "bed_control",
+            "model_variant": "standard",
+            "actuator_mask": None,
+            "timer_supported": False,
+            "discovery_complete": True,
+        }
+        for child in data[CONF_PAIR_CHILDREN]:
+            child["capabilities"]["linak"] = standard_snapshot
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Standard Pair",
+            data=data,
+            unique_id=PAIR_ID,
+            entry_id="paired_standard_cleanup_entry",
+            version=4,
+        )
+        entry.add_to_hass(hass)
+        children = _build_paired_children(hass, entry)
+        for child in children.values():
+            await child.async_prime_offline_controller()
+        coordinator = PairedBedCoordinator(hass, entry, children)
+        hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
+        registry = er.async_get(hass)
+        stale_unique_ids = {
+            f"{PAIR_ID}_preset_memory_1_both",
+            f"{PAIR_ID}_program_memory_1_both",
+        }
+        for unique_id in stale_unique_ids:
+            registry.async_get_or_create(
+                "button",
+                DOMAIN,
+                unique_id,
+                config_entry=entry,
+            )
+
+        entities: list[Any] = []
+        await async_setup_entry(hass, entry, entities.extend)
+
+        assert all(
+            registry.async_get_entity_id("button", DOMAIN, unique_id) is None
+            for unique_id in stale_unique_ids
+        )
+        assert f"{PAIR_ID}_stop_both" in {entity.unique_id for entity in entities}
+
     async def test_capability_controller_precedence_and_default(self, hass: HomeAssistant):
         from unittest.mock import MagicMock
 

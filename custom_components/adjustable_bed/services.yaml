@@ -303,7 +303,7 @@ linak_move_simultaneously:
 
 linak_rename:
   name: Rename Linak Controller
-  description: Write a 1 to 17 byte BLE name, then reconnect so advertising can refresh.
+  description: Write a 1 to 17 byte BLE name, then disconnect so the controller can advertise the new name.
   fields:
     device_id:
       name: Device

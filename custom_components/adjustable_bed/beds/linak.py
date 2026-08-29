@@ -67,6 +67,7 @@ _LOGGER = logging.getLogger(__name__)
 
 LINAK_CONTROL_READY_TIMEOUT_S = 6.0
 LINAK_CONTROL_READY_RETRY_DELAY_S = 0.75
+LINAK_PROTOCOL_READ_TIMEOUT_S = 0.75
 LINAK_INITIAL_POSITION_RETRY_ATTEMPTS = 3
 LINAK_INITIAL_POSITION_RETRY_DELAY_S = 0.75
 LINAK_PASSIVE_POSITION_RECONCILIATION_INTERVAL_S = 120.0
@@ -214,15 +215,21 @@ class LinakCommands:
     MASSAGE_ZONE_1_OFF = bytes([0x8A, 0x00])
     MASSAGE_ZONE_2_ON = bytes([0x8B, 0x00])
     MASSAGE_ZONE_2_OFF = bytes([0x8C, 0x00])
+    # Legacy Performance profile massage start/toggle frame.
+    MASSAGE_PERFORMANCE_START = bytes([0x91, 0x00])
     IMPULSE_TOGGLE = bytes([0x4D, 0x00])
     RESET_DEFAULTS = bytes([0x4E, 0x00])
     FACTORY_RESET = bytes([0x7F, 0x3E, 0x80])
     WAKE = bytes([0xFE, 0x00])
+    # Bed Control alarm transaction terminator.
+    TIMER_COMMIT = bytes([0x20])
 
     # Motor movement commands
     # Note: 0x00 is INITIALIZE_DOWN, not stop. 0xFF is the correct stop command.
     # Using 0x00 can cause a brief reverse movement.
     MOVE_STOP = bytes([0xFF, 0x00])
+    # Legacy Performance uses the same release opcode as a one-byte frame.
+    PERFORMANCE_RELEASE = bytes([0xFF])
     MOVE_ALL_DOWN = bytes([0x00, 0x00])
     MOVE_ALL_UP = bytes([0x01, 0x00])
     MOVE_BASE_DOWN = bytes([0x06, 0x00])
@@ -497,7 +504,7 @@ class LinakController(BedController):
     def _stop_command(self) -> bytes:
         """Return the profile-specific release frame."""
         if self._profile is LinakProfile.PERFORMANCE:
-            return bytes((0xFF,))
+            return LinakCommands.PERFORMANCE_RELEASE
         return LinakCommands.MOVE_STOP
 
     def motor_pulse_settings(self) -> tuple[int, int]:
@@ -911,9 +918,10 @@ class LinakController(BedController):
         if self.client is None or not self.client.is_connected:
             return
         try:
-            async with self._ble_lock:
-                data = await self.client.read_gatt_char(uuid)
-        except BleakError as err:
+            async with asyncio.timeout(LINAK_PROTOCOL_READ_TIMEOUT_S):
+                async with self._ble_lock:
+                    data = await self.client.read_gatt_char(uuid)
+        except (BleakError, TimeoutError) as err:
             _LOGGER.debug("Could not read Linak characteristic %s: %s", uuid, err)
             return
         if data:
@@ -1798,7 +1806,7 @@ class LinakController(BedController):
             if self._performance_wave_active:
                 await self.write_command(LinakCommands.MASSAGE_MODE_STEP)
                 self._performance_wave_active = False
-            await self.write_command(bytes((0x91, 0x00)))
+            await self.write_command(LinakCommands.MASSAGE_PERFORMANCE_START)
             return
         await self._write_massage_zone_sequence(
             LinakCommands.MASSAGE_ZONE_1_ON,
@@ -1943,7 +1951,7 @@ class LinakController(BedController):
         for packet in (
             build_timer_event(seconds, alarm_steps),
             build_timer_recurrence(recurrence_count, recurrence_minutes),
-            bytes((0x20,)),
+            LinakCommands.TIMER_COMMIT,
         ):
             await self._write_protected_characteristic(LINAK_TIMER_CHAR_UUID, packet)
 

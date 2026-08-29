@@ -1511,6 +1511,52 @@ class TestServices:
                 blocking=True,
             )
 
+    async def test_linak_set_position_accepts_mask_axis_beyond_motor_count(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        enable_custom_integrations,
+    ) -> None:
+        """The live actuator mask supersedes the legacy motor-count setting."""
+        _configure_linak_advanced(mock_bleak_client, actuator_mask=0xA0)
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={
+                **mock_config_entry.data,
+                CONF_DISABLE_ANGLE_SENSING: False,
+            },
+        )
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        device_id = dr.async_entries_for_config_entry(
+            dr.async_get(hass), mock_config_entry.entry_id
+        )[0].id
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+        coordinator.async_seek_position = AsyncMock()
+
+        async def run_group(operations, **_kwargs):
+            for operation in operations:
+                await operation()
+
+        coordinator.async_execute_command_group = AsyncMock(side_effect=run_group)
+
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_SET_POSITION,
+            {
+                "device_id": [device_id],
+                "motor": "head",
+                "position": 20,
+            },
+            blocking=True,
+        )
+
+        coordinator.async_seek_position.assert_awaited_once()
+        assert coordinator.async_seek_position.await_args.kwargs["position_key"] == "head"
+
     async def test_linak_alarm_service_writes_configuration_event_recurrence_and_commit(
         self,
         hass: HomeAssistant,

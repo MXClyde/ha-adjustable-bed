@@ -731,15 +731,17 @@ async def _set_position_plan(
                     "min_motors": 4,
                 },
             }
-            # Filter to valid motors based on motor_count
-            valid_motors = {
-                m for m, cfg in motor_configs.items() if motor_count >= cfg.get("min_motors", 2)
-            }
             if bed_type == BED_TYPE_LINAK:
-                resolved_axes = {
+                valid_motors = {
                     spec.position_key for spec in controller.position_number_specs
                 }
-                valid_motors &= resolved_axes
+            else:
+                # Filter standard beds to motors enabled by their configured count.
+                valid_motors = {
+                    motor
+                    for motor, config in motor_configs.items()
+                    if motor_count >= config.get("min_motors", 2)
+                }
 
         # Validate motor is valid for this bed
         if motor not in valid_motors:

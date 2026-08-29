@@ -678,6 +678,7 @@ async def async_setup_entry(
         # Combined buttons read both children's live capabilities, so pass the
         # raw children (the button itself dispatches via the parent, side=both).
         entities.extend(_combined_button_entities_for(coordinator, children))
+        _async_remove_stale_combined_button_entities(hass, coordinator, children, entities)
         async_add_entities(entities)
         return
 
@@ -904,6 +905,31 @@ def _async_remove_stale_button_entities(
         )
         if entity_id is not None:
             registry.async_remove(entity_id)
+
+
+def _async_remove_stale_combined_button_entities(
+    hass: HomeAssistant,
+    coordinator: PairedBedCoordinator,
+    children: list[AdjustableBedCoordinator],
+    entities: list[ButtonEntity],
+) -> None:
+    """Remove pair-level controls no longer supported by both known sides."""
+    if any(child.capability_controller is None for child in children):
+        return
+
+    desired_unique_ids = {
+        unique_id
+        for entity in entities
+        if (unique_id := entity.unique_id) is not None and unique_id.endswith("_both")
+    }
+    registry = er.async_get(hass)
+    for row in list(er.async_entries_for_config_entry(registry, coordinator.entry.entry_id)):
+        if (
+            row.domain == "button"
+            and row.unique_id.endswith("_both")
+            and row.unique_id not in desired_unique_ids
+        ):
+            registry.async_remove(row.entity_id)
 
 
 def _discovered_memory_slot_name(
