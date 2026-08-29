@@ -141,6 +141,21 @@ class TestLeggettOkinController:
 
         assert controller.supports_massage_off_control is False
 
+    async def test_massage_wave_mode_is_advertised_and_sends_release(self):
+        """Expose the proven wave keycode through the shared mode-step entity."""
+        controller = LeggettOkinController(MagicMock())
+        controller.write_command = AsyncMock()
+
+        assert controller.supports_massage_mode_step_control is True
+
+        await controller.massage_mode_step()
+
+        wave, release = controller.write_command.await_args_list
+        assert wave.args == (bytes.fromhex("040210000000"),)
+        assert release.args == (bytes.fromhex("040200000000"),)
+        assert release.kwargs["repeat_count"] == 4
+        assert release.kwargs["cancel_event"].is_set() is False
+
     async def test_write_stream_is_unconfirmed_and_wall_clock_paced(self):
         """CU170 streams must not add a confirmed-write RTT to every gap."""
         controller = LeggettOkinController(MagicMock())
