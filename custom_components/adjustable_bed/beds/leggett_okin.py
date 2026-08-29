@@ -7,7 +7,7 @@ This controller handles Leggett & Platt beds using the Okin binary protocol.
 Protocol details:
     Service UUID: 62741523-52f9-8864-b1ab-3b3a8d65950b (shared with Okimat/Nectar)
     Write characteristic: 62741525-52f9-8864-b1ab-3b3a8d65950b
-    Command format: 6-byte binary [0x04, 0x02, <4-byte-command-big-endian>]
+    Command format: runtime-selected 6-byte R1 or checksummed 8-byte R0 frame
     Motor timing: held keycodes stream every 100ms, released with four zero frames
     Position feedback: Not supported
     Pairing: Required before first use; handled by coordinator
@@ -23,12 +23,21 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Callable
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from bleak.exc import BleakError
 
-from ..const import LEGGETT_OKIN_CHAR_UUID, LEGGETT_OKIN_PULSE_DEFAULTS
+from ..const import (
+    LEGGETT_OKIN_CHAR_UUID,
+    LEGGETT_OKIN_NOTIFY_CHAR_UUID,
+    LEGGETT_OKIN_PULSE_DEFAULTS,
+    LEGGETT_OKIN_REVISION_SELECTOR_CHAR_UUID,
+    LEGGETT_OKIN_SERVICE_UUID,
+    OKIN_SMART_REMOTE_CSS_NOTIFY_CHAR_UUID,
+    OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID,
+)
 from .base import BedController, MotorControlSpec
 from .okin_protocol import build_okin_command
 
@@ -51,7 +60,6 @@ class LeggettOkinCommands:
     # Presets. FLAT is a held button rather than a one-shot recall; the memory
     # slots and SNORE are one-shot recalls the control box completes on its own.
     PRESET_FLAT = 0x8000000
-    PRESET_ZERO_G = 0x1000  # Deliberate alias of memory 1
     PRESET_MEMORY_1 = 0x1000
     PRESET_MEMORY_2 = 0x2000
     PRESET_MEMORY_3 = 0x4000  # Ships pre-assigned as the snore position
@@ -82,6 +90,10 @@ class LeggettOkinCommands:
     # Lights
     TOGGLE_LIGHTS = 0x20000
 
+    # Persistent handset-control mode settings
+    CONTROL_MODE_PRESS_AND_HOLD = 0x08010000
+    CONTROL_MODE_PRESS_AND_RELEASE = 0x01800000
+
 
 # The app streams a held keycode until release, then emits exactly four
 # keycode-0 frames (OutputThread.runNormal, MaxZeroCount = 3). There is no
@@ -109,6 +121,61 @@ MEMORY_PROGRAM_FRAME_DELAY_MS = 100
 # usability choice, not a protocol constant.
 FLAT_HOLD_S = 30.0
 
+# The settings dialog schedules 55 attempts at the normal cadence and then one
+# explicit zero frame. This is a distinct lifecycle from an ordinary held key,
+# whose release is four zero frames.
+CONTROL_MODE_FRAME_COUNT = 55
+CONTROL_MODE_FRAME_DELAY_MS = 100
+
+
+def _build_revision_0_command(command_value: int) -> bytes:
+    """Build the APK's revision-0 E5 FE 16 command frame."""
+    keycode = build_okin_command(command_value)[2:]
+    frame = b"\xe5\xfe\x16" + keycode
+    return frame + bytes(((~sum(frame)) & 0xFF,))
+
+
+def parse_leggett_okin_feedback(data: bytes) -> tuple[int, int] | None:
+    """Reconstruct the Prodigy CE LED/status pair from a notification."""
+    if len(data) < 4:
+        return None
+
+    size = data[0] & 0x0F
+    if len(data) < size + 3:
+        return None
+
+    led_mask = 0
+    for index in range(min(max(size - 2, 0), 4)):
+        led_mask = (led_mask << 8) | data[index + 2]
+
+    status = data[6] if size > 5 else -1
+    if status >= 0x80:
+        status -= 0x100
+
+    def read_unsigned(offset: int, count: int) -> int:
+        value = 0
+        for index in range(count):
+            value = (value << 8) | data[offset + index]
+        return value
+
+    opcode = data[2]
+    if opcode == 6:
+        led_mask |= read_unsigned(3, size)
+    elif opcode in (7, 9):
+        led_mask &= ~read_unsigned(3, size)
+    elif opcode == 8 and size != 6:
+        led_mask ^= read_unsigned(3, size)
+    elif opcode == 11:
+        half = size >> 1
+        offset = 3 + (size & 1)
+        led_mask = (
+            read_unsigned(offset + half, half)
+            & read_unsigned(offset, half)
+            & ~0x200
+        ) | (led_mask & 0x200)
+
+    return led_mask & 0xFFFFFFFF, status
+
 
 class MotorDirection(Enum):
     """Direction for motor movement."""
@@ -134,7 +201,15 @@ class LeggettOkinController(BedController):
         """Initialize the Leggett & Platt Okin controller."""
         super().__init__(coordinator)
         self._motor_state: dict[str, MotorDirection] = {}
-        _LOGGER.debug("LeggettOkinController initialized")
+        self._protocol_revision = self._detect_protocol_revision()
+        self._notification_led_mask: int | None = None
+        self._notification_status: int | None = None
+        self._notify_started: set[str] = set()
+        self._settings_initialized = False
+        _LOGGER.debug(
+            "LeggettOkinController initialized (protocol revision: %s)",
+            self._protocol_revision if self._protocol_revision is not None else "unknown",
+        )
 
     @property
     def control_characteristic_uuid(self) -> str:
@@ -142,10 +217,6 @@ class LeggettOkinController(BedController):
         return LEGGETT_OKIN_CHAR_UUID
 
     # Capability properties
-    @property
-    def supports_preset_zero_g(self) -> bool:
-        return True
-
     @property
     def supports_preset_anti_snore(self) -> bool:
         """Return True - 0x4000 is bound to the app's dedicated snore button."""
@@ -175,6 +246,37 @@ class LeggettOkinController(BedController):
     def supports_memory_programming(self) -> bool:
         """Return True - slots are programmed by the two-stage store hold."""
         return True
+
+    @property
+    def memory_slot_names(self) -> tuple[str | None, ...]:
+        """Return the three editable favorites and fixed Snore entry."""
+        return ("Favorite 1", "Favorite 2", "Snore", "Favorite 3")
+
+    def is_memory_slot_programmable(self, memory_num: int) -> bool:
+        """Return False for the APK's fixed Snore entry in slot 3."""
+        return memory_num in (1, 2, 4)
+
+    @property
+    def requires_notification_channel(self) -> bool:
+        """Subscribe to the app's status channels even without position sensing."""
+        return True
+
+    @property
+    def protocol_diagnostics(self) -> dict[str, Any]:
+        """Report resolved framing and the APK-parsed opaque status mask."""
+        led_mask = self._notification_led_mask
+        return {
+            "protocol_revision": self._protocol_revision,
+            "revision_selector_present": (
+                self._protocol_revision == 1 if self._protocol_revision is not None else None
+            ),
+            "notification_led_mask": f"0x{led_mask:08x}" if led_mask is not None else None,
+            "notification_status": self._notification_status,
+            "alarm_armed": bool(led_mask & 0x4000) if led_mask is not None else None,
+            "sleep_timer_armed": bool(led_mask & 0x8000) if led_mask is not None else None,
+            "notification_characteristics": sorted(self._notify_started),
+            "settings_initialized": self._settings_initialized,
+        }
 
     @property
     def has_pillow_support(self) -> bool:
@@ -225,15 +327,58 @@ class LeggettOkinController(BedController):
         """Remove duplicate aliases and the former tilt label."""
         return frozenset({"back", "legs", "tilt"})
 
+    def _available_characteristic_uuids(self) -> frozenset[str] | None:
+        """Return discovered characteristic UUIDs, or None before discovery."""
+        client = self.client
+        services = getattr(client, "services", None) if client is not None else None
+        if services is None:
+            return None
+
+        try:
+            return frozenset(
+                str(characteristic.uuid).lower()
+                for service in services
+                for characteristic in getattr(service, "characteristics", ())
+            )
+        except TypeError:
+            return None
+
+    def _detect_protocol_revision(self) -> int | None:
+        """Select R1 only when the APK's selector characteristic is present."""
+        client = self.client
+        services = getattr(client, "services", None) if client is not None else None
+        if services is None:
+            return None
+
+        try:
+            service = next(
+                (
+                    service
+                    for service in services
+                    if str(getattr(service, "uuid", "")).lower()
+                    == LEGGETT_OKIN_SERVICE_UUID.lower()
+                ),
+                None,
+            )
+        except TypeError:
+            return None
+        if service is None:
+            return None
+
+        characteristic_uuids = {
+            str(characteristic.uuid).lower()
+            for characteristic in getattr(service, "characteristics", ())
+        }
+        if LEGGETT_OKIN_CHAR_UUID.lower() not in characteristic_uuids:
+            return None
+        return int(LEGGETT_OKIN_REVISION_SELECTOR_CHAR_UUID.lower() in characteristic_uuids)
+
     def _build_command(self, command_value: int) -> bytes:
-        """Build Okin binary command by delegating to build_okin_command.
-
-        Args:
-            command_value: 32-bit command value (0 to 0xFFFFFFFF)
-
-        Returns:
-            6-byte command: [0x04, 0x02, <4-byte-command-big-endian>]
-        """
+        """Build the runtime-selected revision-0 or revision-1 command."""
+        if self._protocol_revision is None:
+            self._protocol_revision = self._detect_protocol_revision()
+        if self._protocol_revision == 0:
+            return _build_revision_0_command(command_value)
         return build_okin_command(command_value)
 
     async def write_command(
@@ -253,6 +398,91 @@ class LeggettOkinController(BedController):
             response=False,
             wall_clock_pacing=True,
         )
+
+    async def start_notify(
+        self, callback: Callable[[str, float], None] | None = None
+    ) -> None:
+        """Subscribe to the status channels recovered from Prodigy CE."""
+        self._notify_callback = callback
+        client = self.client
+        if client is None or not client.is_connected:
+            _LOGGER.warning("Cannot start Leggett Okin notifications: not connected")
+            return
+
+        characteristic_uuids = self._available_characteristic_uuids() or frozenset()
+        candidates = (
+            LEGGETT_OKIN_NOTIFY_CHAR_UUID,
+            OKIN_SMART_REMOTE_CSS_NOTIFY_CHAR_UUID,
+        )
+        settings_started_now = False
+        for characteristic_uuid in candidates:
+            normalized_uuid = characteristic_uuid.lower()
+            if (
+                normalized_uuid not in characteristic_uuids
+                or normalized_uuid in self._notify_started
+            ):
+                continue
+            try:
+                async with self._ble_lock:
+                    await client.start_notify(characteristic_uuid, self._handle_notification)
+                self._notify_started.add(normalized_uuid)
+                settings_started_now |= (
+                    normalized_uuid == OKIN_SMART_REMOTE_CSS_NOTIFY_CHAR_UUID.lower()
+                )
+            except BleakError as err:
+                _LOGGER.debug(
+                    "Could not start Leggett Okin notifications on %s: %s",
+                    characteristic_uuid,
+                    err,
+                )
+
+        if (
+            (settings_started_now or OKIN_SMART_REMOTE_CSS_NOTIFY_CHAR_UUID.lower() in self._notify_started)
+            and not self._settings_initialized
+            and OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID.lower() in characteristic_uuids
+        ):
+            try:
+                await self._write_gatt_with_retry(
+                    OKIN_SMART_REMOTE_CSS_WRITE_CHAR_UUID,
+                    b"\x01\x02",
+                    response=True,
+                    log_errors=False,
+                )
+                self._settings_initialized = True
+            except (BleakError, ConnectionError) as err:
+                _LOGGER.debug("Could not initialize Leggett Okin settings: %s", err)
+
+    def _handle_notification(self, sender: object, data: bytearray) -> None:
+        """Forward raw data and retain the APK's opaque LED/status result."""
+        characteristic_uuid = str(getattr(sender, "uuid", sender)).lower()
+        payload = bytes(data)
+        self.forward_raw_notification(characteristic_uuid, payload)
+        parsed = parse_leggett_okin_feedback(payload)
+        if parsed is None:
+            return
+        self._notification_led_mask, self._notification_status = parsed
+
+    async def stop_notify(self) -> None:
+        """Stop every active Prodigy CE status subscription."""
+        self._notify_callback = None
+        client = self.client
+        if client is None or not client.is_connected:
+            self._notify_started.clear()
+            self._settings_initialized = False
+            return
+
+        for characteristic_uuid in tuple(self._notify_started):
+            try:
+                async with self._ble_lock:
+                    await client.stop_notify(characteristic_uuid)
+            except BleakError as err:
+                _LOGGER.debug(
+                    "Could not stop Leggett Okin notifications on %s: %s",
+                    characteristic_uuid,
+                    err,
+                )
+        self._notify_started.clear()
+        self._settings_initialized = False
 
     def motor_pulse_settings(self) -> tuple[int, int]:
         """Keep movement streams at the proven CU170 cadence."""
@@ -307,12 +537,18 @@ class LeggettOkinController(BedController):
             # mask the original error.
             await self._send_release_frames("motor movement", raise_on_error=completed)
 
-    async def _send_release_frames(self, context: str, *, raise_on_error: bool = False) -> None:
+    async def _send_release_frames(
+        self,
+        context: str,
+        *,
+        raise_on_error: bool = False,
+        repeat_count: int = RELEASE_FRAME_COUNT,
+    ) -> None:
         """Send the release burst that ends a held keycode.
 
-        The app emits exactly four keycode-0 frames when a button is released,
-        so mirror that rather than a single frame. The burst gets a fresh cancel
-        event so a stop request cannot suppress the release itself.
+        Ordinary button release emits exactly four keycode-0 frames. Callers
+        with a protocol-specific lifecycle can select another proven count. The
+        release gets a fresh cancel event so a stop request cannot suppress it.
 
         ``raise_on_error`` is for callers where the burst *is* the operation, so
         a failure must reach the user. Cleanup callers leave it False: they are
@@ -321,7 +557,7 @@ class LeggettOkinController(BedController):
         release = asyncio.ensure_future(
             self.write_command(
                 self._build_command(0),
-                repeat_count=RELEASE_FRAME_COUNT,
+                repeat_count=repeat_count,
                 repeat_delay_ms=RELEASE_FRAME_DELAY_MS,
                 cancel_event=asyncio.Event(),
             )
@@ -472,6 +708,10 @@ class LeggettOkinController(BedController):
         ~2s. Both stages are ordinary held keycodes, so each ends with the
         normal release burst.
         """
+        if not self.is_memory_slot_programmable(memory_num):
+            _LOGGER.warning("Memory slot %d is fixed and cannot be programmed", memory_num)
+            return
+
         command = self._MEMORY_SLOTS.get(memory_num)
         if command is None:
             _LOGGER.warning("Invalid memory slot for programming: %d", memory_num)
@@ -503,13 +743,40 @@ class LeggettOkinController(BedController):
             repeat_delay_ms=MEMORY_PROGRAM_FRAME_DELAY_MS,
         )
 
-    async def preset_zero_g(self) -> None:
-        """Go to zero gravity position (memory slot 1 on this protocol)."""
-        await self._recall(LeggettOkinCommands.PRESET_ZERO_G)
-
     async def preset_anti_snore(self) -> None:
         """Go to anti-snore position (memory slot 3 on this protocol)."""
         await self._recall(LeggettOkinCommands.PRESET_ANTI_SNORE)
+
+    async def _set_control_mode(self, command: int, context: str) -> None:
+        """Send one of the APK's persistent handset-control mode commands."""
+        completed = False
+        try:
+            await self.write_command(
+                self._build_command(command),
+                repeat_count=CONTROL_MODE_FRAME_COUNT,
+                repeat_delay_ms=CONTROL_MODE_FRAME_DELAY_MS,
+            )
+            completed = True
+        finally:
+            await self._send_release_frames(
+                context,
+                raise_on_error=completed,
+                repeat_count=1,
+            )
+
+    async def set_control_mode_press_and_hold(self) -> None:
+        """Require a control to remain held while its action runs."""
+        await self._set_control_mode(
+            LeggettOkinCommands.CONTROL_MODE_PRESS_AND_HOLD,
+            "press-and-hold control mode",
+        )
+
+    async def set_control_mode_press_and_release(self) -> None:
+        """Allow an action to continue after its control is released."""
+        await self._set_control_mode(
+            LeggettOkinCommands.CONTROL_MODE_PRESS_AND_RELEASE,
+            "press-and-release control mode",
+        )
 
     async def _tap_keycode(self, command: int, context: str) -> None:
         """Send a keycode as a short press, then release it.

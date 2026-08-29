@@ -31,9 +31,10 @@ The app picks its framing once per connection, purely on whether characteristic
 The revision-0 checksum is `~sum(bytes[0..6])` truncated to 8 bits, giving the
 invariant that all eight bytes sum to `0xFF`.
 
-**The integration currently only emits the 6-byte revision-1 frame.** A
-revision-0 control box would silently ignore every command. This is a known gap,
-not a proven-absent case.
+The integration applies this same characteristic check after service discovery
+and records the selected revision in protocol diagnostics. If service discovery
+is unavailable it preserves the established revision-1 default rather than
+guessing that a connected device is revision 0.
 
 ## Keycodes
 
@@ -60,15 +61,17 @@ buttons, so multiple simultaneous actions are one frame with several bits set.
 
 | Action | Keycode | Kind |
 |---|---|---|
-| Memory 1 / Zero-G | `0x00001000` | recall |
-| Memory 2 | `0x00002000` | recall |
-| Memory 3 / Anti-snore | `0x00004000` | recall |
-| Memory 4 | `0x00008000` | recall |
+| Favorite 1 | `0x00001000` | editable recall |
+| Favorite 2 | `0x00002000` | editable recall |
+| Snore | `0x00004000` | fixed recall |
+| Favorite 3 | `0x00008000` | editable recall |
 | Flat | `0x08000000` | **held button**, not a recall |
 | Memory store (arm) | `0x00010000` | **not a recall** |
 
-Zero-G and anti-snore are genuine aliases: the vendor apps ship those positions
-pre-assigned to slots 1 and 3, and send the same keycode.
+Prodigy CE initializes Favorite 1, Favorite 2 and Favorite 3 as editable entries.
+It initializes the third wire slot as the fixed Snore entry. The integration
+therefore exposes no separate Zero-G action, and never offers or accepts a save
+operation for the Snore slot.
 
 `0x00010000` arms the box to overwrite a slot. It must never appear in the
 recall ladder. Earlier releases of this integration used a ladder shifted one
@@ -146,6 +149,26 @@ captures do not include a paired light-off/light-on notification. The exact
 mask and polarity therefore still require that capture. Until then the
 integration keeps the light as a blind toggle rather than guessing.
 
+The integration subscribes to the main status characteristic and, when present,
+the optional Smart Remote CSS status characteristic. It runs the app's exact
+operations 6/7/8/9/11 parser and records the resulting opaque LED mask, signed
+status byte, and the two app-labelled alarm/sleep bits in protocol diagnostics.
+It does not promote an unlabeled bit to a Home Assistant entity.
+
+## Control mode
+
+Prodigy CE exposes two persistent control-box settings:
+
+| Mode | Keycode | Lifecycle |
+|---|---|---|
+| Press-and-hold | `0x08010000` | 55 attempts at 100 ms, then one zero frame |
+| Press-and-release | `0x01800000` | 55 attempts at 100 ms, then one zero frame |
+
+Home Assistant exposes these as configuration buttons rather than a select,
+because neither notification channel reports the currently active mode. On
+boxes with the optional Smart Remote CSS service, notification setup also sends
+the app's raw `01 02` initialization write.
+
 ## Provenance
 
 Command values, framing, timing, notification parsing and release semantics
@@ -157,5 +180,6 @@ an unresolved APK-analysis path.
 
 Unverified against hardware, and worth a capture if you have the equipment:
 which frame revision real units use, whether preset recall truly ends without a
-terminator, and whether the `0x08010000` chord resets memory to factory
-defaults as the vendor guide states.
+terminator, whether changing control mode also resets editable favorites on all
+firmware, and which opaque notification-mask bit and polarity represent the
+under-bed light.
