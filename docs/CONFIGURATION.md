@@ -145,7 +145,8 @@ These settings control how motor movement commands are sent. Adjusting them can 
 | Jiecang | 10 | 100ms |
 | Comfort Motion | 10 | 100ms |
 | Limoss | 12 | 80ms |
-| Linak | 10 | 100ms |
+| Linak Bed Control | 10 | 100ms |
+| Linak Performance Series | 4 | 300ms |
 | Sleepy's BOX15 | 10 | 100ms |
 | Sleepy's BOX24 | 10 | 100ms |
 | SleepSpa S9000AI / SLEEPSTAR | 10 | 100ms |

@@ -38,6 +38,8 @@ class AdjustableBedSwitchEntityDescription(SwitchEntityDescription):
     # True if the switch has separate on/off commands (enables state tracking)
     # When False, the switch is treated as toggle-only (no state tracking)
     has_discrete_control: bool = False
+    # Optional controller-state key for readback/assumed-state publication.
+    state_key: str | None = None
 
 
 SWITCH_DESCRIPTIONS: tuple[AdjustableBedSwitchEntityDescription, ...] = (
@@ -48,6 +50,17 @@ SWITCH_DESCRIPTIONS: tuple[AdjustableBedSwitchEntityDescription, ...] = (
         turn_on_fn=lambda ctrl: ctrl.lights_on(),
         turn_off_fn=lambda ctrl: ctrl.lights_off(),
         required_capability="supports_discrete_light_control",
+    ),
+    AdjustableBedSwitchEntityDescription(
+        key="linak_automatic_drive",
+        translation_key="linak_automatic_drive",
+        icon="mdi:car-shift-pattern",
+        turn_on_fn=lambda ctrl: ctrl.set_automatic_drive(True),
+        turn_off_fn=lambda ctrl: ctrl.set_automatic_drive(False),
+        required_capability="supports_automatic_drive",
+        entity_registry_enabled_default=False,
+        has_discrete_control=True,
+        state_key="linak_automatic_drive",
     ),
     AdjustableBedSwitchEntityDescription(
         key="synchro_mode",
@@ -159,7 +172,16 @@ class AdjustableBedSwitch(AdjustableBedEntity, SwitchEntity):
         self.entity_description = description
         self._set_sided_translation_key(description.translation_key, description.key)
         self._attr_unique_id = coordinator.entity_unique_id(description.key)
-        self._attr_is_on = False  # We don't have state feedback
+        if description.state_key is None:
+            self._attr_is_on = False
+        else:
+            initial_state = coordinator.controller_state.get(description.state_key)
+            self._attr_is_on = initial_state if isinstance(initial_state, bool) else None
+            # Linak publishes the state after our own write, but the app does
+            # not decode configuration notifications into authoritative
+            # automatic-drive state. Start unknown after a reload and mark the
+            # commanded value as assumed instead of reporting a false readback.
+            self._attr_assumed_state = True
         # Cache discrete control capability at init. Use capability_controller so
         # a switch created for an offline paired side still caches the correct
         # capability (from the client-free controller) instead of defaulting to
@@ -175,7 +197,10 @@ class AdjustableBedSwitch(AdjustableBedEntity, SwitchEntity):
     async def async_added_to_hass(self) -> None:
         """Register for controller-state updates when available."""
         await super().async_added_to_hass()
-        if self.entity_description.key != "under_bed_lights":
+        if (
+            self.entity_description.key != "under_bed_lights"
+            and self.entity_description.state_key is None
+        ):
             return
         self._state_unregister_callback = self._coordinator.register_controller_state_callback(
             self._handle_controller_state_update
@@ -184,9 +209,13 @@ class AdjustableBedSwitch(AdjustableBedEntity, SwitchEntity):
     @callback
     def _handle_controller_state_update(self, state: dict[str, Any]) -> None:
         """Update the switch when the controller publishes light state."""
-        if "under_bed_lights_on" not in state:
+        state_key = self.entity_description.state_key or "under_bed_lights_on"
+        if state_key not in state:
             return
-        self._attr_is_on = bool(state["under_bed_lights_on"])
+        self._attr_is_on = bool(state[state_key])
+        if self.entity_description.key != "under_bed_lights":
+            self.async_write_ha_state()
+            return
         if self._attr_is_on:
             self._schedule_auto_off_timer()
         else:

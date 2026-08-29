@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Collection, Coroutine
 from typing import TYPE_CHECKING, Any, cast
 
 import voluptuous as vol
@@ -24,10 +24,12 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 
+from .beds.linak_protocol import LinakAlarmAction, LinakAlarmStep
 from .const import (
     BED_TYPE_ERGOMOTION,
     BED_TYPE_KAIDI,
     BED_TYPE_KEESON,
+    BED_TYPE_LINAK,
     BED_TYPE_SLEEPYS_BOX25,
     CONF_BED_TYPE,
     CONF_MOTOR_COUNT,
@@ -63,6 +65,9 @@ SERVICE_SET_POSITION = "set_position"
 SERVICE_SET_POSITIONS = "set_positions"
 SERVICE_STOP_ALL = "stop_all"
 SERVICE_TIMED_MOVE = "timed_move"
+SERVICE_LINAK_MOVE_SIMULTANEOUS = "linak_move_simultaneously"
+SERVICE_LINAK_RENAME = "linak_rename"
+SERVICE_LINAK_SET_ALARM = "linak_set_alarm"
 
 # Service call attributes
 ATTR_PRESET = "preset"
@@ -75,6 +80,28 @@ ATTR_INCLUDE_LOGS = "include_logs"
 ATTR_DIRECTION = "direction"
 ATTR_DURATION_MS = "duration_ms"
 ATTR_SIDE = "side"
+ATTR_FIRST_MOTOR = "first_motor"
+ATTR_FIRST_DIRECTION = "first_direction"
+ATTR_SECOND_MOTOR = "second_motor"
+ATTR_SECOND_DIRECTION = "second_direction"
+ATTR_NAME = "name"
+ATTR_SECONDS = "seconds"
+ATTR_ACTIONS = "actions"
+ATTR_ACTION = "action"
+ATTR_LIFETIME = "lifetime"
+ATTR_PAUSE = "pause"
+ATTR_RECURRENCE_COUNT = "recurrence_count"
+ATTR_RECURRENCE_MINUTES = "recurrence_minutes"
+
+LINAK_MOTOR_OPTIONS = ("base", "feet", "head", "legs", "back")
+LINAK_DIRECTION_OPTIONS = ("up", "down")
+LINAK_ALARM_ACTION_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_ACTION): vol.In(tuple(action.value for action in LinakAlarmAction)),
+        vol.Optional(ATTR_LIFETIME, default=1): vol.All(vol.Coerce(int), vol.Range(min=0, max=255)),
+        vol.Optional(ATTR_PAUSE, default=0): vol.All(vol.Coerce(int), vol.Range(min=0, max=255)),
+    }
+)
 
 TIMED_MOVE_MOTOR_OPTIONS = (
     "tv_lift",
@@ -340,6 +367,7 @@ async def _execute_sided(
     *,
     cancel_running: bool = True,
     resource: str | None = None,
+    resources: Collection[str] | None = None,
 ) -> None:
     """Run a command on the targeted side(s).
 
@@ -352,12 +380,14 @@ async def _execute_sided(
             side=side,
             cancel_running=cancel_running,
             resource=resource,
+            resources=resources,
         )
     else:
         await coordinator.async_execute_controller_command(
             command_fn,
             cancel_running=cancel_running,
             resource=resource,
+            resources=resources,
         )
 
 
@@ -701,10 +731,17 @@ async def _set_position_plan(
                     "min_motors": 4,
                 },
             }
-            # Filter to valid motors based on motor_count
-            valid_motors = {
-                m for m, cfg in motor_configs.items() if motor_count >= cfg.get("min_motors", 2)
-            }
+            if bed_type == BED_TYPE_LINAK:
+                valid_motors = {
+                    spec.position_key for spec in controller.position_number_specs
+                }
+            else:
+                # Filter standard beds to motors enabled by their configured count.
+                valid_motors = {
+                    motor
+                    for motor, config in motor_configs.items()
+                    if motor_count >= config.get("min_motors", 2)
+                }
 
         # Validate motor is valid for this bed
         if motor not in valid_motors:
@@ -770,8 +807,7 @@ async def handle_set_positions(call: ServiceCall) -> None:
     device_ids = call.data.get(CONF_DEVICE_ID, [])
     explicit_side = call.data.get(ATTR_SIDE)
     requests = [
-        (str(item[ATTR_MOTOR]), float(item[ATTR_POSITION]))
-        for item in call.data[ATTR_POSITIONS]
+        (str(item[ATTR_MOTOR]), float(item[ATTR_POSITION])) for item in call.data[ATTR_POSITIONS]
     ]
     motors = [motor for motor, _ in requests]
     if len(motors) != len(set(motors)):
@@ -810,9 +846,7 @@ async def _execute_position_requests(
         await _release_preflighted(preflighted)
         raise
 
-    async def seek(
-        target: AdjustableBedCoordinator, motor: str, position: float
-    ) -> None:
+    async def seek(target: AdjustableBedCoordinator, motor: str, position: float) -> None:
         config = plans[(_plan_key(target), motor)]
         await target.async_seek_position(
             position_key=cast(str, config["position_key"]),
@@ -1013,6 +1047,182 @@ async def handle_timed_move(call: ServiceCall) -> None:
         raise
 
 
+async def _preflight_capability(
+    targets: list[tuple[BedTarget, str]],
+    capability: str,
+    label: str,
+) -> PreflightedSides:
+    """Validate a capability on every physical target before any write."""
+    preflighted: PreflightedSides = []
+    try:
+        for coordinator, side in targets:
+            for target in _command_targets(coordinator, side):
+                controller = await _validation_controller(
+                    coordinator,
+                    target,
+                    preflighted,
+                )
+                if not getattr(controller, capability, False):
+                    raise ServiceValidationError(
+                        f"Device '{target.name}' does not support {label}",
+                    )
+    except ServiceValidationError:
+        await _release_preflighted(preflighted)
+        raise
+    return preflighted
+
+
+async def handle_linak_move_simultaneously(call: ServiceCall) -> None:
+    """Drive two Linak sections with the app's combined opcode table."""
+    hass = call.hass
+    first_motor = call.data[ATTR_FIRST_MOTOR]
+    second_motor = call.data[ATTR_SECOND_MOTOR]
+    first_up = call.data[ATTR_FIRST_DIRECTION] == "up"
+    second_up = call.data[ATTR_SECOND_DIRECTION] == "up"
+    duration_ms = call.data[ATTR_DURATION_MS]
+    explicit_side = call.data.get(ATTR_SIDE)
+    if first_motor == second_motor:
+        raise ServiceValidationError("Select two different Linak motors")
+
+    targets, missing = _resolve_sided_targets(
+        hass,
+        call.data.get(CONF_DEVICE_ID, []),
+        explicit_side,
+    )
+    if missing:
+        raise _missing_device_error(missing[0])
+    preflighted = await _preflight_capability(
+        targets,
+        "supports_simultaneous_movement",
+        "Linak simultaneous movement",
+    )
+    try:
+        for coordinator, side in targets:
+            for target in _command_targets(coordinator, side):
+                controller = await _validation_controller(
+                    coordinator,
+                    target,
+                    preflighted,
+                )
+                unavailable = {first_motor, second_motor} - set(
+                    controller.simultaneous_movement_axes
+                )
+                if unavailable:
+                    axes = ", ".join(sorted(unavailable))
+                    raise ServiceValidationError(
+                        f"Device '{target.name}' does not expose Linak axis: {axes}",
+                    )
+    except ServiceValidationError:
+        await _release_preflighted(preflighted)
+        raise
+
+    async def move(controller: BedController) -> None:
+        await controller.move_simultaneously(
+            first_motor,
+            first_up,
+            second_motor,
+            second_up,
+            duration_ms,
+        )
+
+    try:
+        resources = tuple(
+            f"motor:{'bed_height' if motor == 'base' else motor}"
+            for motor in (first_motor, second_motor)
+        )
+        for coordinator, side in targets:
+            await _execute_sided(coordinator, side, move, resources=resources)
+    except Exception:
+        await _release_preflighted(preflighted)
+        raise
+
+
+async def handle_linak_rename(call: ServiceCall) -> None:
+    """Rename one or both targeted Linak BLE controllers."""
+    hass = call.hass
+    name = call.data[ATTR_NAME]
+    if len(name.encode()) > 17:
+        raise ServiceValidationError("Linak device names must be at most 17 UTF-8 bytes")
+    explicit_side = call.data.get(ATTR_SIDE)
+    targets, missing = _resolve_sided_targets(
+        hass,
+        call.data.get(CONF_DEVICE_ID, []),
+        explicit_side,
+    )
+    if missing:
+        raise _missing_device_error(missing[0])
+    preflighted = await _preflight_capability(
+        targets,
+        "supports_device_rename",
+        "Linak device rename",
+    )
+
+    async def rename(controller: BedController) -> None:
+        await controller.rename_device(name)
+
+    try:
+        for coordinator, side in targets:
+            await _execute_sided(
+                coordinator,
+                side,
+                rename,
+                cancel_running=False,
+                resource="configuration",
+            )
+            for target in _command_targets(coordinator, side):
+                await target.async_disconnect(reason="intentional")
+    except Exception:
+        await _release_preflighted(preflighted)
+        raise
+
+
+async def handle_linak_set_alarm(call: ServiceCall) -> None:
+    """Program a Linak alarm using event, recurrence, and commit writes."""
+    hass = call.hass
+    steps = tuple(
+        LinakAlarmStep(
+            action=LinakAlarmAction(item[ATTR_ACTION]),
+            lifetime=item[ATTR_LIFETIME],
+            pause=item[ATTR_PAUSE],
+        )
+        for item in call.data[ATTR_ACTIONS]
+    )
+    explicit_side = call.data.get(ATTR_SIDE)
+    targets, missing = _resolve_sided_targets(
+        hass,
+        call.data.get(CONF_DEVICE_ID, []),
+        explicit_side,
+    )
+    if missing:
+        raise _missing_device_error(missing[0])
+    preflighted = await _preflight_capability(
+        targets,
+        "supports_alarm",
+        "Linak alarm programming",
+    )
+
+    async def program(controller: BedController) -> None:
+        await controller.program_alarm(
+            call.data[ATTR_SECONDS],
+            steps,
+            call.data[ATTR_RECURRENCE_COUNT],
+            call.data[ATTR_RECURRENCE_MINUTES],
+        )
+
+    try:
+        for coordinator, side in targets:
+            await _execute_sided(
+                coordinator,
+                side,
+                program,
+                cancel_running=False,
+                resource="configuration",
+            )
+    except Exception:
+        await _release_preflighted(preflighted)
+        raise
+
+
 async def handle_generate_support_bundle(call: ServiceCall) -> None:
     """Handle generate_support_bundle service call."""
     hass = call.hass
@@ -1091,9 +1301,7 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
     # bundle without logs is missing the evidence that matters most for
     # connection problems, so warn while the user can still fix it and re-run
     # rather than only telling them afterwards (issue #385).
-    log_notification_id = (
-        f"adjustable_bed_support_bundle_logs_{address.replace(':', '_').lower()}"
-    )
+    log_notification_id = f"adjustable_bed_support_bundle_logs_{address.replace(':', '_').lower()}"
     # Only retract a notice this invocation still owns. The id is
     # address-stable on purpose, so a later run can clear a stale warning left
     # by an earlier one; per-invocation ids would lose that. The cost is that
@@ -1114,9 +1322,7 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
             # runs before the capture's own timeout, so bound it here or the
             # service could hang without ever starting or reporting. The
             # executor thread stays blocked either way, but the service does not.
-            log_check = await asyncio.wait_for(
-                async_check_log_file(hass), _LOG_PROBE_TIMEOUT
-            )
+            log_check = await asyncio.wait_for(async_check_log_file(hass), _LOG_PROBE_TIMEOUT)
         except TimeoutError:
             # Inconclusive, not proof of a wedged path: Home Assistant's shared
             # executor can be saturated enough that the job never started. Say
@@ -1148,9 +1354,7 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
                 )
                 async_create(
                     hass,
-                    build_missing_log_notice(
-                        log_check["reason"], log_check["error"], future=True
-                    )
+                    build_missing_log_notice(log_check["reason"], log_check["error"], future=True)
                     + "\n\nThe capture is running anyway, so you will still get a "
                     "bundle with Bluetooth diagnostics.",
                     title="Adjustable Bed: this bundle will have no logs",
@@ -1201,8 +1405,7 @@ async def handle_generate_support_bundle(call: ServiceCall) -> None:
         # "unavailable" but which is still unusable.
         log_status = evidence.get("log_capture_status")
         logs_missing = include_logs and (
-            log_status == "unavailable"
-            or (log_status == "empty" and probe_reason == "empty_file")
+            log_status == "unavailable" or (log_status == "empty" and probe_reason == "empty_file")
         )
         logging_notice = ""
         if logs_missing:
@@ -1334,9 +1537,7 @@ async def async_register_services(hass: HomeAssistant) -> None:
                 vol.Required(ATTR_POSITIONS): vol.All(
                     [
                         {
-                            vol.Required(ATTR_MOTOR): vol.In(
-                                ["back", "legs", "head", "feet"]
-                            ),
+                            vol.Required(ATTR_MOTOR): vol.In(["back", "legs", "head", "feet"]),
                             vol.Required(ATTR_POSITION): vol.All(
                                 vol.Coerce(float), vol.Range(min=0)
                             ),
@@ -1360,6 +1561,67 @@ async def async_register_services(hass: HomeAssistant) -> None:
                 vol.Required(ATTR_DURATION_MS): vol.All(
                     vol.Coerce(int),
                     vol.Range(min=MIN_TIMED_MOVE_DURATION_MS, max=MAX_TIMED_MOVE_DURATION_MS),
+                ),
+                **SIDE_FIELD,
+            }
+        ),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_LINAK_MOVE_SIMULTANEOUS,
+        handle_linak_move_simultaneously,
+        schema=vol.Schema(
+            {
+                vol.Required(CONF_DEVICE_ID): cv.ensure_list,
+                vol.Required(ATTR_FIRST_MOTOR): vol.In(LINAK_MOTOR_OPTIONS),
+                vol.Required(ATTR_FIRST_DIRECTION): vol.In(LINAK_DIRECTION_OPTIONS),
+                vol.Required(ATTR_SECOND_MOTOR): vol.In(LINAK_MOTOR_OPTIONS),
+                vol.Required(ATTR_SECOND_DIRECTION): vol.In(LINAK_DIRECTION_OPTIONS),
+                vol.Required(ATTR_DURATION_MS): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(
+                        min=MIN_TIMED_MOVE_DURATION_MS,
+                        max=MAX_TIMED_MOVE_DURATION_MS,
+                    ),
+                ),
+                **SIDE_FIELD,
+            }
+        ),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_LINAK_RENAME,
+        handle_linak_rename,
+        schema=vol.Schema(
+            {
+                vol.Required(CONF_DEVICE_ID): cv.ensure_list,
+                vol.Required(ATTR_NAME): vol.All(cv.string, vol.Length(min=1, max=17)),
+                **SIDE_FIELD,
+            }
+        ),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_LINAK_SET_ALARM,
+        handle_linak_set_alarm,
+        schema=vol.Schema(
+            {
+                vol.Required(CONF_DEVICE_ID): cv.ensure_list,
+                vol.Required(ATTR_SECONDS): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(min=0, max=0x1FFFF),
+                ),
+                vol.Required(ATTR_ACTIONS): vol.All(
+                    [LINAK_ALARM_ACTION_SCHEMA],
+                    vol.Length(min=1, max=4),
+                ),
+                vol.Optional(ATTR_RECURRENCE_COUNT, default=0): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(min=0, max=31),
+                ),
+                vol.Optional(ATTR_RECURRENCE_MINUTES, default=0): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(min=0, max=2047),
                 ),
                 **SIDE_FIELD,
             }

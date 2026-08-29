@@ -119,6 +119,18 @@ class TestCoordinatorInit:
         assert device_info["name"] == TEST_NAME
         assert device_info["manufacturer"] == "Linak"
         assert "2 motors" in device_info["model"]
+        assert device_info["model_id"] is None
+
+    async def test_linak_model_variant_is_device_metadata(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+    ) -> None:
+        """Expose the discovered Linak variant as the device's model ID."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        coordinator.handle_controller_state_update("linak_model_variant", "advanced")
+
+        assert coordinator.device_info["model_id"] == "Advanced"
 
 
 class TestCoordinatorConnection:
@@ -812,9 +824,7 @@ class TestCoordinatorConnection:
         # unauthenticated probe must not have torn the link down either.
         # Assert the probe actually ran: a regression that skipped it would
         # otherwise still satisfy every assertion below.
-        mock_bleak_client.read_gatt_char.assert_awaited_with(
-            DEVICE_INFO_CHARS["model_number"]
-        )
+        mock_bleak_client.read_gatt_char.assert_awaited_with(DEVICE_INFO_CHARS["model_number"])
         assert entry.data.get(CONF_BLE_BOND_ESTABLISHED) is not True
         assert coordinator._client is not None
         assert coordinator._last_disconnect_reason != "authentication_failed"
@@ -918,9 +928,7 @@ class TestCoordinatorConnection:
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         coordinator._disable_angle_sensing = False
         coordinator._client = MagicMock(is_connected=True)
-        controller = MagicMock(
-            position_number_specs=(SimpleNamespace(position_key="back"),)
-        )
+        controller = MagicMock(position_number_specs=(SimpleNamespace(position_key="back"),))
         controller.prepare_for_position_read = AsyncMock()
         coordinator._controller = controller
 
@@ -994,9 +1002,7 @@ class TestCoordinatorConnection:
             new_callable=AsyncMock,
         ) as ensure_connected:
             try:
-                hydration = asyncio.create_task(
-                    coordinator.async_read_initial_positions()
-                )
+                hydration = asyncio.create_task(coordinator.async_read_initial_positions())
                 await asyncio.sleep(0)
                 coordinator._client.is_connected = False
             finally:
@@ -1014,16 +1020,13 @@ class TestCoordinatorConnection:
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         coordinator._disable_angle_sensing = False
         coordinator._client = MagicMock(is_connected=True)
-        controller = MagicMock(
-            position_number_specs=(SimpleNamespace(position_key="back"),)
-        )
+        controller = MagicMock(position_number_specs=(SimpleNamespace(position_key="back"),))
         controller.prepare_for_position_read = AsyncMock()
         coordinator._controller = controller
 
         with (
             patch(
-                "custom_components.adjustable_bed.coordinator."
-                "_INITIAL_POSITION_READ_TOTAL_TIMEOUT",
+                "custom_components.adjustable_bed.coordinator._INITIAL_POSITION_READ_TOTAL_TIMEOUT",
                 0.01,
             ),
             patch.object(
@@ -1233,6 +1236,7 @@ class TestCoordinatorConnection:
         )
 
         assert coordinator._expected_initial_position_axes() == {"back", "legs"}
+
     async def test_passive_position_reconciliation_reads_positions_when_idle(
         self,
         hass: HomeAssistant,
@@ -2243,6 +2247,7 @@ class TestCoordinatorControllerStateCallbacks:
             }
         )
         coordinator._controller = controller
+        coordinator._controller_state.clear()
 
         callback = MagicMock()
         coordinator.register_controller_state_callback(callback)
@@ -2270,6 +2275,7 @@ class TestCoordinatorControllerStateCallbacks:
         controller.supports_light_level_control = True
         controller.supports_light_timer = True
         coordinator._controller = controller
+        coordinator._controller_state.clear()
 
         callback = MagicMock()
         light_state = {
@@ -2316,6 +2322,7 @@ class TestCoordinatorControllerStateCallbacks:
         controller.supports_light_level_control = True
         controller.supports_light_timer = False
         coordinator._controller = controller
+        coordinator._controller_state.clear()
 
         callback = MagicMock()
 
@@ -2350,6 +2357,7 @@ class TestCoordinatorControllerStateCallbacks:
         controller.supports_light_level_control = False
         controller.supports_light_timer = False
         coordinator._controller = controller
+        coordinator._controller_state.clear()
 
         callback = MagicMock()
 
@@ -2796,16 +2804,12 @@ class TestBondMarkerReliability:
         after it has to latch; otherwise every retry believes the same stale
         report and the bed never actually pairs.
         """
-        coordinator = self._make_bonded_coordinator(
-            hass, **{CONF_BLE_BOND_ESTABLISHED: False}
-        )
+        coordinator = self._make_bonded_coordinator(hass, **{CONF_BLE_BOND_ESTABLISHED: False})
         device = MagicMock()
         device.details = {}
         pairing_details: dict[str, Any] = {}
 
-        with patch.object(
-            coordinator, "_device_reports_existing_bond", return_value=True
-        ):
+        with patch.object(coordinator, "_device_reports_existing_bond", return_value=True):
             _, use_pairing, _ = coordinator._prepare_pairing_attempt(device, pairing_details)
 
         assert use_pairing is False
@@ -2823,9 +2827,7 @@ class TestBondMarkerReliability:
         assert coordinator._ble_bond_marker_unreliable is True
 
         # The stale OS report can no longer suppress pairing on the retry.
-        with patch.object(
-            coordinator, "_device_reports_existing_bond", return_value=True
-        ):
+        with patch.object(coordinator, "_device_reports_existing_bond", return_value=True):
             _, use_pairing, _ = coordinator._prepare_pairing_attempt(device, {})
         assert use_pairing is True
 
@@ -2914,9 +2916,7 @@ class TestDisconnectCommandSerialization:
         )
         await command_running.wait()
 
-        disconnect = asyncio.create_task(
-            coordinator.async_disconnect(serialize_with_commands=True)
-        )
+        disconnect = asyncio.create_task(coordinator.async_disconnect(serialize_with_commands=True))
         # Give the disconnect a chance to run if it were going to ignore the lock.
         await asyncio.sleep(0)
         assert not disconnect.done()
@@ -2958,9 +2958,7 @@ class TestDisconnectCommandSerialization:
             nonlocal teardown_race_ran
             teardown_race_ran = True
 
-        active_task = asyncio.create_task(
-            coordinator.async_execute_controller_command(active)
-        )
+        active_task = asyncio.create_task(coordinator.async_execute_controller_command(active))
         await active_started.wait()
         queued_task = asyncio.create_task(
             coordinator.async_execute_controller_command(
@@ -3877,7 +3875,12 @@ class TestCoordinatorNotifications:
         mock_bleak_client: MagicMock,
     ):
         """Test start_notify is skipped when angle sensing is disabled."""
-        # Default config has disable_angle_sensing=True
+        # Use a protocol with no mandatory notification channel. Linak must
+        # subscribe to its error/config surfaces even without angle sensing.
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={**mock_config_entry.data, CONF_BED_TYPE: BED_TYPE_OKIN_CST},
+        )
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         await coordinator.async_connect()
 
@@ -5645,9 +5648,7 @@ class TestStopAfterCancel:
         await cleanup_started.wait()
 
         next_command = asyncio.create_task(
-            coordinator.async_execute_controller_command(
-                lambda _controller: asyncio.sleep(0)
-            )
+            coordinator.async_execute_controller_command(lambda _controller: asyncio.sleep(0))
         )
         await asyncio.sleep(0)
         assert not cleanup_task.done()
@@ -5887,9 +5888,7 @@ class TestStopAfterCancel:
         coordinator = AdjustableBedCoordinator(hass, entry)
         coordinator._client = MagicMock()
         coordinator._client.is_connected = True
-        coordinator._controller = make_controller_mock(
-            allow_position_polling_during_commands=False
-        )
+        coordinator._controller = make_controller_mock(allow_position_polling_during_commands=False)
         events: list[str] = []
 
         async def _command(_controller) -> None:
@@ -6230,9 +6229,7 @@ class TestBondProvenanceAndTransportGate:
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         coordinator._last_bond_evidence = BondEvidence(
             status=BondVerificationStatus.VERIFIED,
-            owner=BondOwner(
-                transport=TransportClass.LOCAL, source="old-adapter", adapter="hci9"
-            ),
+            owner=BondOwner(transport=TransportClass.LOCAL, source="old-adapter", adapter="hci9"),
             operation="runtime_authenticated_read",
             observed_at="2026-07-01T00:00:00+00:00",
         )
@@ -6283,6 +6280,37 @@ class TestBondProvenanceAndTransportGate:
 
         await coordinator.async_shutdown()
 
+    async def test_non_pairing_protocol_discards_obsolete_bond_state(
+        self, hass: HomeAssistant, mock_config_entry
+    ) -> None:
+        """A Linak upgrade should remove stale bond flags and its false repair."""
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={
+                **mock_config_entry.data,
+                CONF_BLE_BOND_ESTABLISHED: False,
+                CONF_BLE_BOND_MARKER_UNRELIABLE: True,
+                CONF_BLE_BOND_CONTEXT: {"version": 1, "transport": "proxy"},
+            },
+        )
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+
+        with patch(
+            "custom_components.adjustable_bed.coordinator.delete_pairing_required_issue",
+            new_callable=AsyncMock,
+        ) as delete_issue:
+            await coordinator.async_clear_obsolete_pairing_state()
+            await hass.async_block_till_done()
+
+        assert coordinator._ble_bond_established is False
+        assert coordinator._ble_bond_marker_unreliable is False
+        assert CONF_BLE_BOND_ESTABLISHED not in mock_config_entry.data
+        assert CONF_BLE_BOND_MARKER_UNRELIABLE not in mock_config_entry.data
+        assert CONF_BLE_BOND_CONTEXT not in mock_config_entry.data
+        delete_issue.assert_awaited_once_with(hass, mock_config_entry.data[CONF_ADDRESS])
+
+        await coordinator.async_shutdown()
+
     async def test_an_unknown_transport_records_no_provenance(
         self, hass: HomeAssistant, mock_config_entry
     ) -> None:
@@ -6318,9 +6346,7 @@ class TestUnverifiedBondMarkerScope:
     ends as an authentication failure and a repair (issue #459).
     """
 
-    def _coordinator(
-        self, hass: HomeAssistant, **extra_data: object
-    ) -> AdjustableBedCoordinator:
+    def _coordinator(self, hass: HomeAssistant, **extra_data: object) -> AdjustableBedCoordinator:
         entry = MockConfigEntry(
             domain=DOMAIN,
             title=TEST_NAME,
@@ -6347,13 +6373,9 @@ class TestUnverifiedBondMarkerScope:
         device.details = {}
         return device
 
-    async def test_the_route_that_paired_still_skips_pairing(
-        self, hass: HomeAssistant
-    ) -> None:
+    async def test_the_route_that_paired_still_skips_pairing(self, hass: HomeAssistant) -> None:
         """The auth-error-82 protection has to survive the scoping."""
-        coordinator = self._coordinator(
-            hass, ble_bond_attempted_source="11:22:33:44:55:66"
-        )
+        coordinator = self._coordinator(hass, ble_bond_attempted_source="11:22:33:44:55:66")
         details: dict[str, Any] = {}
 
         _, use_pairing, _ = coordinator._prepare_pairing_attempt(
@@ -6368,9 +6390,7 @@ class TestUnverifiedBondMarkerScope:
         self, hass: HomeAssistant
     ) -> None:
         """Re-ranked onto a transport that was never bonded, so pair there."""
-        coordinator = self._coordinator(
-            hass, ble_bond_attempted_source="11:22:33:44:55:66"
-        )
+        coordinator = self._coordinator(hass, ble_bond_attempted_source="11:22:33:44:55:66")
         details: dict[str, Any] = {}
 
         _, use_pairing, _ = coordinator._prepare_pairing_attempt(
@@ -6385,9 +6405,7 @@ class TestUnverifiedBondMarkerScope:
         self, hass: HomeAssistant
     ) -> None:
         """Cannot show it is the same route, so it is not treated as one."""
-        coordinator = self._coordinator(
-            hass, ble_bond_attempted_source="11:22:33:44:55:66"
-        )
+        coordinator = self._coordinator(hass, ble_bond_attempted_source="11:22:33:44:55:66")
         details: dict[str, Any] = {}
 
         _, use_pairing, _ = coordinator._prepare_pairing_attempt(
@@ -6397,9 +6415,7 @@ class TestUnverifiedBondMarkerScope:
         assert use_pairing is True
         assert details["bond_marker_out_of_scope"] is True
 
-    async def test_an_entry_without_a_scope_is_unchanged(
-        self, hass: HomeAssistant
-    ) -> None:
+    async def test_an_entry_without_a_scope_is_unchanged(self, hass: HomeAssistant) -> None:
         """A proven bond, or one written before scoping existed, is global."""
         coordinator = self._coordinator(hass)
         details: dict[str, Any] = {}
@@ -6412,13 +6428,9 @@ class TestUnverifiedBondMarkerScope:
         assert details["decision"] == "bond_marker_present"
         assert details["bond_marker_out_of_scope"] is False
 
-    async def test_proving_the_bond_drops_the_route_scope(
-        self, hass: HomeAssistant
-    ) -> None:
+    async def test_proving_the_bond_drops_the_route_scope(self, hass: HomeAssistant) -> None:
         """Provenance names its own owner, so the unproven scope is spent."""
-        coordinator = self._coordinator(
-            hass, ble_bond_attempted_source="11:22:33:44:55:66"
-        )
+        coordinator = self._coordinator(hass, ble_bond_attempted_source="11:22:33:44:55:66")
 
         coordinator._persist_bond_flags(
             established=True,

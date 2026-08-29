@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, call, patch
 
 import pytest
@@ -47,10 +48,36 @@ from custom_components.adjustable_bed.const import (
     DOMAIN,
     KAIDI_VARIANT_SEAT_1,
     LEGGETT_GEN2_WRITE_CHAR_UUID,
+    LINAK_POSITION_MASK_UUID,
+    LINAK_POSITION_SERVICE_UUID,
+    LINAK_VARIANT_PERFORMANCE,
     MALOUF_LAYOUT_HILO,
     OCTO_VARIANT_STANDARD,
     SLEEP_NUMBER_VARIANT_LEFT,
 )
+
+
+def _configure_linak_advanced(client: MagicMock, *, actuator_mask: int = 0xC0) -> None:
+    """Model a modern Advanced Linak with mask-selected reference outputs."""
+    position_service = SimpleNamespace(
+        uuid=LINAK_POSITION_SERVICE_UUID,
+        characteristics=[],
+    )
+    client.services.__iter__ = lambda self: iter((position_service,))
+    client.services.__len__ = lambda self: 1
+    client.services.get_service = MagicMock(
+        side_effect=lambda uuid: (
+            position_service if str(uuid).lower() == LINAK_POSITION_SERVICE_UUID else None
+        )
+    )
+    original_read = client.read_gatt_char.side_effect
+
+    async def read_gatt_char(target: object) -> bytes:
+        if str(target).lower() == LINAK_POSITION_MASK_UUID:
+            return bytes((actuator_mask,))
+        return await original_read(target)
+
+    client.read_gatt_char.side_effect = read_gatt_char
 
 
 class TestCoverEntities:
@@ -1414,10 +1441,11 @@ class TestButtonEntities:
             state for state in hass.states.async_all() if state.entity_id.startswith("button.")
         ]
 
-        # Linak has memory_slot_count=6 and supports_memory_programming=True, but supports_preset_flat=False
-        # Should have: memory presets (6) + program_memory (6) + stop_all (1) + connect (1) + disconnect (1) = 15
-        # Massage buttons are excluded because has_massage=False
-        assert len(button_states) == 15
+        # The mock has no reference-output service, so it represents the
+        # app's Standard model: flat, both-up, stop, connection controls,
+        # wake, defaults reset, and the app's single light-toggle action. The
+        # distinct destructive factory reset is registered but disabled.
+        assert len(button_states) == 8
 
     async def test_button_entities_with_massage(
         self,
@@ -1447,10 +1475,10 @@ class TestButtonEntities:
             state for state in hass.states.async_all() if state.entity_id.startswith("button.")
         ]
 
-        # Should have: base (15) + massage buttons (11) = 26
-        # Base: memory presets (6) + program_memory (6) + stop_all (1) + connect (1) + disconnect (1) = 15
-        # (Linak has memory_slot_count=6, supports_memory_programming=True, supports_preset_flat=False)
-        assert len(button_states) == 26
+        # Eight enabled Standard-model base actions plus the modern app's eleven
+        # massage actions. Memory controls are absent without the reference
+        # service, exactly as they are in Bed Control.
+        assert len(button_states) == 19
 
     async def test_keeson_base_exposes_direct_massage_buttons(
         self,
@@ -1540,12 +1568,12 @@ class TestButtonEntities:
         assert registry.async_get_entity_id(
             "button", DOMAIN, f"{address}_massage_intensity_level_2"
         ) == str(established_level_2.entity_id)
-        assert registry.async_get_entity_id(
-            "button", DOMAIN, f"{address}_massage_intensity_1"
-        ) is None
-        assert registry.async_get_entity_id(
-            "button", DOMAIN, f"{address}_massage_intensity_2"
-        ) is None
+        assert (
+            registry.async_get_entity_id("button", DOMAIN, f"{address}_massage_intensity_1") is None
+        )
+        assert (
+            registry.async_get_entity_id("button", DOMAIN, f"{address}_massage_intensity_2") is None
+        )
         assert registry.async_get(str(old_level_2.entity_id)) is None
 
     async def test_intensity_id_migration_removes_unsupported_stale_button(
@@ -1589,12 +1617,13 @@ class TestButtonEntities:
         await hass.async_block_till_done()
 
         assert registry.async_get(str(stale.entity_id)) is None
-        assert registry.async_get_entity_id(
-            "button", DOMAIN, f"{address}_massage_intensity_1"
-        ) is None
-        assert registry.async_get_entity_id(
-            "button", DOMAIN, f"{address}_massage_intensity_level_1"
-        ) is None
+        assert (
+            registry.async_get_entity_id("button", DOMAIN, f"{address}_massage_intensity_1") is None
+        )
+        assert (
+            registry.async_get_entity_id("button", DOMAIN, f"{address}_massage_intensity_level_1")
+            is None
+        )
 
     async def test_kaidi_entities_expose_book_leisure_direct_position_and_filtered_massage(
         self,
@@ -1694,6 +1723,10 @@ class TestButtonEntities:
     ):
         """Test pressing a preset button sends command."""
         del mock_coordinator_connected, enable_custom_integrations
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={**mock_config_entry.data, CONF_BED_TYPE: BED_TYPE_OKIN_CST},
+        )
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
 
@@ -1725,6 +1758,10 @@ class TestButtonEntities:
     ):
         """Preset button presses should surface transport failures to HA callers."""
         del mock_coordinator_connected, enable_custom_integrations
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={**mock_config_entry.data, CONF_BED_TYPE: BED_TYPE_OKIN_CST},
+        )
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
 
@@ -1789,6 +1826,10 @@ class TestSwitchEntities:
         enable_custom_integrations,
     ):
         """Test switch entities are created."""
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={**mock_config_entry.data, CONF_BED_TYPE: BED_TYPE_OKIN_CST},
+        )
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
 
@@ -1808,6 +1849,10 @@ class TestSwitchEntities:
     ):
         """A failed turn-off should not drop the hardware auto-off fallback timer."""
         del mock_coordinator_connected, enable_custom_integrations
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={**mock_config_entry.data, CONF_BED_TYPE: BED_TYPE_OKIN_CST},
+        )
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
 
@@ -1923,14 +1968,8 @@ class TestLightEntities:
 
         coordinator = hass.data[DOMAIN][entry.entry_id]
         assert coordinator.controller.profile.profile_id == "power_bob_eight"
-        assert (
-            registry.async_get_entity_id("light", DOMAIN, f"{address}_under_bed_lights")
-            is None
-        )
-        assert (
-            registry.async_get_entity_id("button", DOMAIN, f"{address}_toggle_light")
-            is not None
-        )
+        assert registry.async_get_entity_id("light", DOMAIN, f"{address}_under_bed_lights") is None
+        assert registry.async_get_entity_id("button", DOMAIN, f"{address}_toggle_light") is not None
 
     async def test_richmat_qrrm_light_entity_created_and_toggle_button_removed(
         self,
@@ -2733,6 +2772,10 @@ class TestLightEntities:
         enable_custom_integrations,
     ):
         """Test turning switch on and off."""
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={**mock_config_entry.data, CONF_BED_TYPE: BED_TYPE_OKIN_CST},
+        )
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
 
@@ -2788,17 +2831,19 @@ class TestSensorEntities:
 
         assert len(sensor_states) == 0
 
-    async def test_sensor_entities_created_when_enabled(
+    async def test_linak_uses_position_numbers_without_duplicate_sensors(
         self,
         hass: HomeAssistant,
         mock_config_entry_data: dict,
         mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
         enable_custom_integrations,
     ):
-        """Test sensor entities are created when angle sensing is enabled."""
+        """Linak position numbers replace duplicate angle and model sensors."""
         from pytest_homeassistant_custom_component.common import MockConfigEntry
 
         # Create entry with angle sensing enabled
+        _configure_linak_advanced(mock_bleak_client)
         mock_config_entry_data["disable_angle_sensing"] = False
         entry = MockConfigEntry(
             domain=DOMAIN,
@@ -2809,6 +2854,23 @@ class TestSensorEntities:
         )
         entry.add_to_hass(hass)
 
+        from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(hass)
+        for key in (
+            "back_angle",
+            "legs_angle",
+            "head_angle",
+            "feet_angle",
+            "linak_model_variant",
+        ):
+            registry.async_get_or_create(
+                "sensor",
+                DOMAIN,
+                f"AA:BB:CC:DD:EE:FF_{key}",
+                config_entry=entry,
+            )
+
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
@@ -2818,8 +2880,173 @@ class TestSensorEntities:
             if state.entity_id.startswith("sensor.") and "angle" in state.entity_id
         ]
 
-        # With 2 motors, should have back_angle and legs_angle sensors
-        assert len(sensor_states) == 2
+        position_states = [
+            state
+            for state in hass.states.async_all()
+            if state.entity_id.startswith("number.") and "position" in state.entity_id
+        ]
+
+        assert sensor_states == []
+        assert len(position_states) == 2
+        for key in (
+            "back_angle",
+            "legs_angle",
+            "head_angle",
+            "feet_angle",
+            "linak_model_variant",
+        ):
+            assert (
+                registry.async_get_entity_id("sensor", DOMAIN, f"AA:BB:CC:DD:EE:FF_{key}") is None
+            )
+
+    async def test_linak_removes_position_numbers_missing_from_capability_mask(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        enable_custom_integrations,
+    ) -> None:
+        """A changed Advanced mask must not leave unsupported sliders orphaned."""
+        _configure_linak_advanced(mock_bleak_client, actuator_mask=0x80)
+        mock_config_entry_data[CONF_DISABLE_ANGLE_SENSING] = False
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Test Bed",
+            data=mock_config_entry_data,
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id="linak_mask_entry_id",
+        )
+        entry.add_to_hass(hass)
+
+        from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(hass)
+        for key in ("back_position", "legs_position", "head_position", "feet_position"):
+            registry.async_get_or_create(
+                "number",
+                DOMAIN,
+                f"AA:BB:CC:DD:EE:FF_{key}",
+                config_entry=entry,
+            )
+        for key in (
+            "linak_back_reported_speed",
+            "linak_legs_reported_speed",
+            "linak_alarm_status",
+        ):
+            registry.async_get_or_create(
+                "sensor",
+                DOMAIN,
+                f"AA:BB:CC:DD:EE:FF_{key}",
+                config_entry=entry,
+            )
+        for key in ("back", "legs", "head", "feet", "bed_height"):
+            registry.async_get_or_create(
+                "cover",
+                DOMAIN,
+                f"AA:BB:CC:DD:EE:FF_{key}",
+                config_entry=entry,
+            )
+
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        assert (
+            registry.async_get_entity_id("number", DOMAIN, "AA:BB:CC:DD:EE:FF_back_position")
+            is not None
+        )
+        for key in ("legs_position", "head_position", "feet_position"):
+            assert (
+                registry.async_get_entity_id("number", DOMAIN, f"AA:BB:CC:DD:EE:FF_{key}") is None
+            )
+        assert (
+            registry.async_get_entity_id(
+                "sensor", DOMAIN, "AA:BB:CC:DD:EE:FF_linak_back_reported_speed"
+            )
+            is not None
+        )
+        for key in ("linak_legs_reported_speed", "linak_alarm_status"):
+            assert (
+                registry.async_get_entity_id(
+                    "sensor", DOMAIN, f"AA:BB:CC:DD:EE:FF_{key}"
+                )
+                is None
+            )
+        assert (
+            registry.async_get_entity_id("cover", DOMAIN, "AA:BB:CC:DD:EE:FF_back")
+            is not None
+        )
+        for key in ("legs", "head", "feet", "bed_height"):
+            assert (
+                registry.async_get_entity_id(
+                    "cover", DOMAIN, f"AA:BB:CC:DD:EE:FF_{key}"
+                )
+                is None
+            )
+
+    async def test_linak_performance_removes_inapplicable_diagnostics(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry_data: dict,
+        mock_coordinator_connected,
+        enable_custom_integrations,
+    ) -> None:
+        """A profile change must remove diagnostics that Performance cannot parse."""
+        mock_config_entry_data[CONF_PROTOCOL_VARIANT] = LINAK_VARIANT_PERFORMANCE
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Performance Bed",
+            data=mock_config_entry_data,
+            unique_id="AA:BB:CC:DD:EE:FF",
+            entry_id="linak_performance_cleanup_entry_id",
+        )
+        entry.add_to_hass(hass)
+
+        from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(hass)
+        for key in (
+            "back_angle",
+            "linak_protocol_error",
+            "linak_back_reported_speed",
+            "linak_alarm_status",
+        ):
+            registry.async_get_or_create(
+                "sensor",
+                DOMAIN,
+                f"AA:BB:CC:DD:EE:FF_{key}",
+                config_entry=entry,
+            )
+        registry.async_get_or_create(
+            "binary_sensor",
+            DOMAIN,
+            "AA:BB:CC:DD:EE:FF_linak_position_feedback_fault",
+            config_entry=entry,
+        )
+
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        for key in (
+            "back_angle",
+            "linak_protocol_error",
+            "linak_back_reported_speed",
+            "linak_alarm_status",
+        ):
+            assert (
+                registry.async_get_entity_id(
+                    "sensor", DOMAIN, f"AA:BB:CC:DD:EE:FF_{key}"
+                )
+                is None
+            )
+        assert (
+            registry.async_get_entity_id(
+                "binary_sensor",
+                DOMAIN,
+                "AA:BB:CC:DD:EE:FF_linak_position_feedback_fault",
+            )
+            is None
+        )
 
     async def test_non_feedback_bed_creates_no_angle_sensors_when_enabled(
         self,
@@ -2853,9 +3080,7 @@ class TestSensorEntities:
         registry = er.async_get(hass)
         for axis in ("back", "legs"):
             assert (
-                registry.async_get_entity_id(
-                    "sensor", DOMAIN, f"AA:BB:CC:DD:EE:28_{axis}_angle"
-                )
+                registry.async_get_entity_id("sensor", DOMAIN, f"AA:BB:CC:DD:EE:28_{axis}_angle")
                 is None
             )
 

@@ -3,19 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 # Import enable_custom_integrations fixture
 from custom_components.adjustable_bed import (
     SERVICE_GENERATE_SUPPORT_BUNDLE,
     SERVICE_GOTO_PRESET,
+    SERVICE_LINAK_MOVE_SIMULTANEOUS,
+    SERVICE_LINAK_RENAME,
+    SERVICE_LINAK_SET_ALARM,
     SERVICE_SAVE_PRESET,
     SERVICE_SET_POSITION,
     SERVICE_SET_POSITIONS,
@@ -58,10 +65,52 @@ from custom_components.adjustable_bed.const import (
     KAIDI_VARIANT_SEAT_1,
     KEESON_KSBT_CHAR_UUID,
     KEESON_VARIANT_KSBT,
+    LINAK_CONFIG_CHAR_UUID,
+    LINAK_CONTROL_CHAR_UUID,
+    LINAK_DEVICE_NAME_UUID,
+    LINAK_POSITION_MASK_UUID,
+    LINAK_POSITION_SERVICE_UUID,
+    LINAK_TIMER_CHAR_UUID,
+    LINAK_TIMER_SERVICE_UUID,
     MALOUF_LAYOUT_HILO,
     OCTO_VARIANT_STANDARD,
 )
 from custom_components.adjustable_bed.pairing import is_paired
+
+
+def _configure_linak_advanced(
+    client: MagicMock,
+    *,
+    actuator_mask: int = 0xC0,
+    with_timer: bool = False,
+) -> None:
+    """Expose the services and mask of a modern Advanced Linak controller."""
+    position_service = SimpleNamespace(
+        uuid=LINAK_POSITION_SERVICE_UUID,
+        characteristics=[],
+    )
+    services = {LINAK_POSITION_SERVICE_UUID: position_service}
+    if with_timer:
+        services[LINAK_TIMER_SERVICE_UUID] = SimpleNamespace(
+            uuid=LINAK_TIMER_SERVICE_UUID,
+            characteristics=[],
+        )
+    client.services.__iter__ = lambda self: iter(services.values())
+    client.services.__len__ = lambda self: len(services)
+    client.services.get_service = MagicMock(
+        side_effect=lambda uuid: services.get(str(uuid).lower())
+    )
+    original_read = client.read_gatt_char.side_effect
+
+    async def read_gatt_char(target: object) -> bytes:
+        if str(target).lower() == LINAK_POSITION_MASK_UUID:
+            return bytes((actuator_mask,))
+        if callable(original_read):
+            read = cast(Callable[[object], Awaitable[bytes]], original_read)
+            return await read(target)
+        return b""
+
+    client.read_gatt_char.side_effect = read_gatt_char
 
 
 class TestIntegrationSetup:
@@ -98,6 +147,9 @@ class TestIntegrationSetup:
         assert hass.services.has_service(DOMAIN, SERVICE_STOP_ALL)
         assert hass.services.has_service(DOMAIN, SERVICE_GENERATE_SUPPORT_BUNDLE)
         assert hass.services.has_service(DOMAIN, SERVICE_SET_POSITIONS)
+        assert hass.services.has_service(DOMAIN, SERVICE_LINAK_MOVE_SIMULTANEOUS)
+        assert hass.services.has_service(DOMAIN, SERVICE_LINAK_RENAME)
+        assert hass.services.has_service(DOMAIN, SERVICE_LINAK_SET_ALARM)
 
     async def test_setup_entry_connection_timeout(
         self,
@@ -301,9 +353,7 @@ class TestIntegrationSetup:
 
         assert entry.state == ConfigEntryState.SETUP_RETRY
         issue_registry = ir.async_get(hass)
-        assert (
-            issue_registry.async_get_issue(DOMAIN, "pairing_required_08_3a_f2_1e_4b_7f") is None
-        )
+        assert issue_registry.async_get_issue(DOMAIN, "pairing_required_08_3a_f2_1e_4b_7f") is None
 
     async def test_setup_gen2_failure_after_bond_skips_pairing_repair(
         self,
@@ -356,9 +406,7 @@ class TestIntegrationSetup:
         assert entry.state == ConfigEntryState.SETUP_RETRY
         assert entry.data[CONF_BLE_BOND_ESTABLISHED] is True
         issue_registry = ir.async_get(hass)
-        assert (
-            issue_registry.async_get_issue(DOMAIN, "pairing_required_08_3a_f2_1e_4b_80") is None
-        )
+        assert issue_registry.async_get_issue(DOMAIN, "pairing_required_08_3a_f2_1e_4b_80") is None
 
     async def test_setup_non_gated_pairing_bed_connect_failure_skips_repair(
         self,
@@ -396,9 +444,7 @@ class TestIntegrationSetup:
 
         assert entry.state == ConfigEntryState.SETUP_RETRY
         issue_registry = ir.async_get(hass)
-        assert (
-            issue_registry.async_get_issue(DOMAIN, "pairing_required_aa_bb_cc_dd_ee_20") is None
-        )
+        assert issue_registry.async_get_issue(DOMAIN, "pairing_required_aa_bb_cc_dd_ee_20") is None
 
     async def test_setup_entry_loads_diagnostic_device_without_connection(
         self,
@@ -473,9 +519,7 @@ class TestIntegrationSetup:
         service_info.name = "QRRM157738"
         service_info.address = "57:4C:54:30:76:51"
         service_info.service_uuids = [BEDTECH_SERVICE_UUID]
-        service_info.manufacturer_data = {
-            BEDTECH_MANUFACTURER_ID: bytes.fromhex("54307651")
-        }
+        service_info.manufacturer_data = {BEDTECH_MANUFACTURER_ID: bytes.fromhex("54307651")}
 
         mock_async_ble_device_from_address.return_value.name = "QRRM157738"
 
@@ -633,9 +677,7 @@ class TestIntegrationSetup:
         service_info.name = "QRRM157738"
         service_info.address = "57:4C:54:30:76:51"
         service_info.service_uuids = [BEDTECH_SERVICE_UUID]
-        service_info.manufacturer_data = {
-            BEDTECH_MANUFACTURER_ID: bytes.fromhex("54307651")
-        }
+        service_info.manufacturer_data = {BEDTECH_MANUFACTURER_ID: bytes.fromhex("54307651")}
 
         mock_async_ble_device_from_address.return_value.name = "QRRM157738"
 
@@ -1108,6 +1150,10 @@ class TestServices:
         enable_custom_integrations,
     ):
         """Test goto_preset service calls controller."""
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={**mock_config_entry.data, CONF_BED_TYPE: BED_TYPE_OKIN_CST},
+        )
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
 
@@ -1140,6 +1186,10 @@ class TestServices:
         enable_custom_integrations,
     ):
         """Test goto_preset reconnects when controller is temporarily unavailable."""
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={**mock_config_entry.data, CONF_BED_TYPE: BED_TYPE_OKIN_CST},
+        )
         await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
 
@@ -1207,8 +1257,14 @@ class TestServices:
 
         # Patch the controller to support presets but only 3 slots
         with (
-            patch.object(type(controller), "supports_memory_presets", new_callable=lambda: property(lambda self: True)),
-            patch.object(type(controller), "memory_slot_count", new_callable=lambda: property(lambda self: 3)),
+            patch.object(
+                type(controller),
+                "supports_memory_presets",
+                new_callable=lambda: property(lambda self: True),
+            ),
+            patch.object(
+                type(controller), "memory_slot_count", new_callable=lambda: property(lambda self: 3)
+            ),
             pytest.raises(ServiceValidationError, match="only supports memory presets 1-3"),
         ):
             await hass.services.async_call(
@@ -1245,6 +1301,305 @@ class TestServices:
 
         # Verify command was sent
         mock_bleak_client.write_gatt_char.assert_called()
+
+    async def test_linak_simultaneous_move_service_uses_combined_opcode_and_release(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        enable_custom_integrations,
+    ):
+        """The service reaches the app's combined table and always releases."""
+        _configure_linak_advanced(mock_bleak_client)
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        device_registry = dr.async_get(hass)
+        device_id = dr.async_entries_for_config_entry(device_registry, mock_config_entry.entry_id)[
+            0
+        ].id
+        mock_bleak_client.write_gatt_char.reset_mock()
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+        execute = AsyncMock(wraps=coordinator.async_execute_controller_command)
+
+        with (
+            patch(
+                "custom_components.adjustable_bed.beds.base.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                coordinator,
+                "async_execute_controller_command",
+                new=execute,
+            ),
+        ):
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_LINAK_MOVE_SIMULTANEOUS,
+                {
+                    "device_id": [device_id],
+                    "first_motor": "back",
+                    "first_direction": "down",
+                    "second_motor": "legs",
+                    "second_direction": "up",
+                    "duration_ms": 100,
+                },
+                blocking=True,
+            )
+
+        assert execute.await_args.kwargs["resources"] == ("motor:back", "motor:legs")
+        assert execute.await_args.kwargs["resource"] is None
+        assert mock_bleak_client.write_gatt_char.await_args_list == [
+            # Scheduler-level cancellation releases any prior movement first.
+            call(LINAK_CONTROL_CHAR_UUID, bytes.fromhex("FF 00"), response=True),
+            call(LINAK_CONTROL_CHAR_UUID, bytes.fromhex("36 00"), response=True),
+            call(LINAK_CONTROL_CHAR_UUID, bytes.fromhex("36 00"), response=True),
+            call(LINAK_CONTROL_CHAR_UUID, bytes.fromhex("FF 00"), response=True),
+        ]
+
+    async def test_linak_rename_service_writes_utf8_name_then_disconnects(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        enable_custom_integrations,
+    ):
+        """Rename writes raw UTF-8 bytes and releases the BLE connection."""
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        device_registry = dr.async_get(hass)
+        device_id = dr.async_entries_for_config_entry(device_registry, mock_config_entry.entry_id)[
+            0
+        ].id
+        mock_bleak_client.write_gatt_char.reset_mock()
+        mock_bleak_client.disconnect.reset_mock()
+
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_LINAK_RENAME,
+            {"device_id": [device_id], "name": "Seng Å"},
+            blocking=True,
+        )
+
+        assert mock_bleak_client.write_gatt_char.await_args_list == [
+            call(LINAK_CONTROL_CHAR_UUID, bytes.fromhex("FF 00"), response=True),
+            call(LINAK_DEVICE_NAME_UUID, "Seng Å".encode(), response=True),
+        ]
+        mock_bleak_client.disconnect.assert_awaited_once()
+
+    async def test_linak_simultaneous_move_rejects_axis_missing_from_model(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        enable_custom_integrations,
+    ):
+        """Preflight rejects an actuator absent from the discovered mask."""
+        from homeassistant.exceptions import ServiceValidationError
+
+        _configure_linak_advanced(mock_bleak_client, actuator_mask=0xC0)
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        device_registry = dr.async_get(hass)
+        device_id = dr.async_entries_for_config_entry(device_registry, mock_config_entry.entry_id)[
+            0
+        ].id
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        with pytest.raises(ServiceValidationError, match="does not expose Linak axis: base"):
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_LINAK_MOVE_SIMULTANEOUS,
+                {
+                    "device_id": [device_id],
+                    "first_motor": "base",
+                    "first_direction": "down",
+                    "second_motor": "back",
+                    "second_direction": "up",
+                    "duration_ms": 100,
+                },
+                blocking=True,
+            )
+
+        mock_bleak_client.write_gatt_char.assert_not_called()
+
+    async def test_linak_simultaneous_move_maps_base_to_bed_height_resource(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        enable_custom_integrations,
+    ) -> None:
+        """BASE must overlap the bed-height cover's scheduler reservation."""
+        _configure_linak_advanced(mock_bleak_client, actuator_mask=0x88)
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        device_registry = dr.async_get(hass)
+        device_id = dr.async_entries_for_config_entry(
+            device_registry, mock_config_entry.entry_id
+        )[0].id
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+        execute = AsyncMock()
+
+        with patch.object(
+            coordinator,
+            "async_execute_controller_command",
+            new=execute,
+        ):
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_LINAK_MOVE_SIMULTANEOUS,
+                {
+                    "device_id": [device_id],
+                    "first_motor": "base",
+                    "first_direction": "down",
+                    "second_motor": "back",
+                    "second_direction": "up",
+                    "duration_ms": 100,
+                },
+                blocking=True,
+            )
+
+        assert execute.await_args.kwargs["resources"] == (
+            "motor:bed_height",
+            "motor:back",
+        )
+
+    async def test_linak_set_position_rejects_axis_missing_from_model(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        enable_custom_integrations,
+    ) -> None:
+        """Position services must follow the resolved Advanced actuator mask."""
+        from homeassistant.exceptions import ServiceValidationError
+
+        _configure_linak_advanced(mock_bleak_client, actuator_mask=0x80)
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={
+                **mock_config_entry.data,
+                CONF_DISABLE_ANGLE_SENSING: False,
+            },
+        )
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        device_registry = dr.async_get(hass)
+        device_id = dr.async_entries_for_config_entry(
+            device_registry, mock_config_entry.entry_id
+        )[0].id
+
+        with pytest.raises(ServiceValidationError, match="Valid motors: back"):
+            await hass.services.async_call(
+                DOMAIN,
+                SERVICE_SET_POSITION,
+                {
+                    "device_id": [device_id],
+                    "motor": "legs",
+                    "position": 20,
+                },
+                blocking=True,
+            )
+
+    async def test_linak_set_position_accepts_mask_axis_beyond_motor_count(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        enable_custom_integrations,
+    ) -> None:
+        """The live actuator mask supersedes the legacy motor-count setting."""
+        _configure_linak_advanced(mock_bleak_client, actuator_mask=0xA0)
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={
+                **mock_config_entry.data,
+                CONF_DISABLE_ANGLE_SENSING: False,
+            },
+        )
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        device_id = dr.async_entries_for_config_entry(
+            dr.async_get(hass), mock_config_entry.entry_id
+        )[0].id
+        coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+        coordinator.async_seek_position = AsyncMock()
+
+        async def run_group(operations, **_kwargs):
+            for operation in operations:
+                await operation()
+
+        coordinator.async_execute_command_group = AsyncMock(side_effect=run_group)
+
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_SET_POSITION,
+            {
+                "device_id": [device_id],
+                "motor": "head",
+                "position": 20,
+            },
+            blocking=True,
+        )
+
+        coordinator.async_seek_position.assert_awaited_once()
+        assert coordinator.async_seek_position.await_args.kwargs["position_key"] == "head"
+
+    async def test_linak_alarm_service_writes_configuration_event_recurrence_and_commit(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+        enable_custom_integrations,
+    ):
+        """Alarm programming follows the full four-write Bed Control sequence."""
+        _configure_linak_advanced(mock_bleak_client, with_timer=True)
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        device_registry = dr.async_get(hass)
+        device_id = dr.async_entries_for_config_entry(device_registry, mock_config_entry.entry_id)[
+            0
+        ].id
+        mock_bleak_client.write_gatt_char.reset_mock()
+
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_LINAK_SET_ALARM,
+            {
+                "device_id": [device_id],
+                "seconds": 3600,
+                "actions": [{"action": "memory_1"}],
+                "recurrence_count": 31,
+                "recurrence_minutes": 1440,
+            },
+            blocking=True,
+        )
+
+        assert mock_bleak_client.write_gatt_char.await_args_list == [
+            call(LINAK_CONTROL_CHAR_UUID, bytes.fromhex("FF 00"), response=True),
+            call(LINAK_CONFIG_CHAR_UUID, bytes.fromhex("89 3B 80 00 01"), response=True),
+            call(
+                LINAK_TIMER_CHAR_UUID,
+                bytes.fromhex("00 10 0E 01 0E 00 01 00"),
+                response=True,
+            ),
+            call(LINAK_TIMER_CHAR_UUID, bytes.fromhex("10 A0 FD"), response=True),
+            call(LINAK_TIMER_CHAR_UUID, bytes.fromhex("20"), response=True),
+        ]
 
     async def test_timed_move_service_accepts_malouf_bed_height(
         self,
@@ -1352,17 +1707,19 @@ class TestServices:
             blocking=True,
         )
 
-        assert mock_bleak_client.write_gatt_char.await_args_list == [
-            call(
-                KEESON_KSBT_CHAR_UUID,
-                bytes.fromhex("040200000001"),
-                response=True,
-            )
-        ] * 4
+        assert (
+            mock_bleak_client.write_gatt_char.await_args_list
+            == [
+                call(
+                    KEESON_KSBT_CHAR_UUID,
+                    bytes.fromhex("040200000001"),
+                    response=True,
+                )
+            ]
+            * 4
+        )
         coordinator = hass.data[DOMAIN][entry.entry_id]
-        assert {tuple(item["resources"]) for item in coordinator.command_trace} == {
-            ("motor:back",)
-        }
+        assert {tuple(item["resources"]) for item in coordinator.command_trace} == {("motor:back",)}
         timed_move_record = coordinator._command_scheduler.recent_records[-1]
         assert timed_move_record.kind.value == "command"
         assert timed_move_record.resources == ("motor:back",)
@@ -1843,6 +2200,11 @@ class TestServices:
         coordinator = MagicMock()
         coordinator.entry = entry
         coordinator.controller = MagicMock()
+        coordinator.controller.position_number_specs = (
+            SimpleNamespace(position_key="back"),
+            SimpleNamespace(position_key="legs"),
+        )
+        coordinator.capability_controller = coordinator.controller
         coordinator.name = entry.title
         coordinator.entry = entry
         coordinator.disable_angle_sensing = False
@@ -1947,6 +2309,11 @@ class TestServices:
         coordinator = MagicMock()
         coordinator.entry = entry
         coordinator.controller = MagicMock()
+        coordinator.controller.position_number_specs = (
+            SimpleNamespace(position_key="back"),
+            SimpleNamespace(position_key="legs"),
+        )
+        coordinator.capability_controller = coordinator.controller
         coordinator.name = entry.title
         coordinator.entry = entry
         coordinator.disable_angle_sensing = False

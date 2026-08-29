@@ -110,6 +110,10 @@ class _FactoryCoordinator(SimpleNamespace):
         """Return the integration's default calibration for a position axis."""
         return 45.0 if position_key in {"legs", "feet"} else 68.0
 
+    def handle_controller_state_updates(self, updates: dict[str, Any]) -> None:
+        """Accept controller-published diagnostic state during construction."""
+        del updates
+
 
 def _protocol_variant_for_bed_type(bed_type: str) -> str | None:
     """Return a deterministic protocol variant for factory-completeness tests."""
@@ -257,10 +261,7 @@ async def test_percentage_position_contract_matches_bed_type_metadata(
     controller = await _create_controller_for_bed_type(bed_type)
     assert controller.reports_percentage_position is (
         bed_type in const.BEDS_WITH_PERCENTAGE_POSITIONS
-    ), (
-        f"{bed_type} reports_percentage_position disagrees with "
-        "BEDS_WITH_PERCENTAGE_POSITIONS"
-    )
+    ), f"{bed_type} reports_percentage_position disagrees with BEDS_WITH_PERCENTAGE_POSITIONS"
 
 
 @pytest.mark.parametrize("bed_type", SUPPORTED_BED_TYPES)
@@ -271,9 +272,7 @@ async def test_position_slider_units_match_reported_position_units(bed_type: str
         return
 
     expected_unit = (
-        POSITION_UNIT_PERCENT
-        if controller.reports_percentage_position
-        else POSITION_UNIT_DEGREES
+        POSITION_UNIT_PERCENT if controller.reports_percentage_position else POSITION_UNIT_DEGREES
     )
     specs = controller.position_number_specs
 
@@ -322,9 +321,7 @@ def test_registry_and_explicit_branches_are_disjoint() -> None:
     registry = {
         name
         for name, value in vars(const).items()
-        if name.startswith("BED_TYPE_")
-        and isinstance(value, str)
-        and value in _SIMPLE_CONTROLLERS
+        if name.startswith("BED_TYPE_") and isinstance(value, str) and value in _SIMPLE_CONTROLLERS
     }
     assert not (explicit & registry), (
         f"Bed types are both branched on and registered: {sorted(explicit & registry)}"
@@ -526,9 +523,7 @@ async def test_betterliving_preset_commands() -> None:
     )
 
     coordinator = _FactoryCoordinator()
-    controller = KeesonController(
-        coordinator, variant="sino", betterliving_presets=True
-    )
+    controller = KeesonController(coordinator, variant="sino", betterliving_presets=True)
 
     # Verify flat preset builds the right command value
     cmd = controller._build_command(BetterLivingCommands.PRESET_FLAT)
@@ -552,9 +547,7 @@ async def test_cb1322_preset_commands() -> None:
     )
 
     coordinator = _FactoryCoordinator()
-    controller = KeesonController(
-        coordinator, variant="okin", cb1322_presets=True
-    )
+    controller = KeesonController(coordinator, variant="okin", cb1322_presets=True)
 
     # Verify memory 1 builds with OKIN prefix and little-endian
     cmd = controller._build_command(CB1322Commands.PRESET_MEMORY_1)
@@ -719,11 +712,7 @@ async def test_base_wall_clock_pacing_absorbs_write_latency() -> None:
 
 
 async def test_overridden_stop_helpers_keep_finally_cleanup() -> None:
-    """Controllers overriding stop helpers should preserve finally-based cleanup.
-
-    Linak is excluded from _move_with_stop finally enforcement because it
-    explicitly auto-stops when commands cease.
-    """
+    """Controllers overriding stop helpers should preserve finally-based cleanup."""
     instantiated: dict[type[BedController], BedController] = {}
 
     for bed_type in SUPPORTED_BED_TYPES:
@@ -742,6 +731,6 @@ async def test_overridden_stop_helpers_keep_finally_cleanup() -> None:
 
         if controller_cls._preset_with_stop is not BedController._preset_with_stop:
             source = inspect.getsource(controller_cls._preset_with_stop)
-            assert (
-                "finally" in source
-            ), f"{controller_cls.__name__}._preset_with_stop missing finally"
+            assert "finally" in source, (
+                f"{controller_cls.__name__}._preset_with_stop missing finally"
+            )

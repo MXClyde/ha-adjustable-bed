@@ -115,8 +115,9 @@ class RecordingChild:
         cancel_running=True,
         skip_disconnect=False,
         resource=None,
+        resources=None,
     ) -> None:
-        del command_fn, cancel_running, skip_disconnect, resource
+        del command_fn, cancel_running, skip_disconnect, resource, resources
         self.log.append((self.side, "command"))
         if self._block:
             await self._gate.wait()

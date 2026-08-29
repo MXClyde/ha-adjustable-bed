@@ -186,9 +186,7 @@ class TestBleDiagnosticsRunner:
                 return await operation_task
             return await query_fn(coordinator.controller)
 
-        coordinator.async_execute_controller_query = AsyncMock(
-            side_effect=_execute_query
-        )
+        coordinator.async_execute_controller_query = AsyncMock(side_effect=_execute_query)
         runner = BLEDiagnosticRunner(
             hass,
             "AA:BB:CC:DD:EE:FF",
@@ -218,9 +216,7 @@ class TestBleDiagnosticsRunner:
             operation_task.cancel()
             return await operation_task
 
-        coordinator.async_execute_controller_query = AsyncMock(
-            side_effect=_preempt_query
-        )
+        coordinator.async_execute_controller_query = AsyncMock(side_effect=_preempt_query)
         runner = BLEDiagnosticRunner(
             hass,
             "AA:BB:CC:DD:EE:FF",
@@ -239,10 +235,7 @@ class TestBleDiagnosticsRunner:
             coordinator.async_execute_controller_query.await_count
             == MAX_DIAGNOSTIC_QUERY_PREEMPTIONS
         )
-        assert (
-            coordinator.pause_disconnect_timer.call_count
-            == MAX_DIAGNOSTIC_QUERY_PREEMPTIONS
-        )
+        assert coordinator.pause_disconnect_timer.call_count == MAX_DIAGNOSTIC_QUERY_PREEMPTIONS
 
     async def test_run_diagnostics_resumes_hydration_when_pause_raises(
         self,
@@ -403,8 +396,13 @@ class TestBleDiagnosticsRunner:
         assert report.gatt_services[0]["handle"] == 32
         assert report.gatt_services[0]["characteristics"][0]["handle"] == 33
         assert report.gatt_services[0]["characteristics"][0]["descriptors"][0]["handle"] == 34
-        assert report.gatt_services[0]["characteristics"][0]["read_result"]["ascii_preview"] == "AT+INFO"
-        assert report.gatt_services[0]["characteristics"][0]["notify_subscription"]["success"] is True
+        assert (
+            report.gatt_services[0]["characteristics"][0]["read_result"]["ascii_preview"]
+            == "AT+INFO"
+        )
+        assert (
+            report.gatt_services[0]["characteristics"][0]["notify_subscription"]["success"] is True
+        )
         assert report.notifications[0]["data_hex"] == "4f4b"
         assert report.notification_summary["by_characteristic"][characteristic.uuid]["count"] == 1
         assert report.notification_summary["by_characteristic"][characteristic.uuid][
@@ -911,12 +909,8 @@ class TestBleDiagnosticsRunner:
             del kwargs
             return await query_fn(coordinator.controller)
 
-        coordinator.async_execute_controller_query = AsyncMock(
-            side_effect=_execute_query
-        )
-        coordinator.async_execute_controller_command = AsyncMock(
-            side_effect=_execute_query
-        )
+        coordinator.async_execute_controller_query = AsyncMock(side_effect=_execute_query)
+        coordinator.async_execute_controller_command = AsyncMock(side_effect=_execute_query)
 
         async def _read_gatt_char_1(target):
             target_uuid = getattr(target, "uuid", target)
@@ -1019,12 +1013,8 @@ class TestBleDiagnosticsRunner:
             del kwargs
             return await query_fn(coordinator.controller)
 
-        coordinator.async_execute_controller_query = AsyncMock(
-            side_effect=_execute_query
-        )
-        coordinator.async_execute_controller_command = AsyncMock(
-            side_effect=_execute_query
-        )
+        coordinator.async_execute_controller_query = AsyncMock(side_effect=_execute_query)
+        coordinator.async_execute_controller_command = AsyncMock(side_effect=_execute_query)
 
         async def _connect_through_coordinator(*, reset_timer):
             assert reset_timer is False
@@ -1034,9 +1024,7 @@ class TestBleDiagnosticsRunner:
             coordinator.connection_rssi = -58
             return True
 
-        coordinator.async_ensure_connected = AsyncMock(
-            side_effect=_connect_through_coordinator
-        )
+        coordinator.async_ensure_connected = AsyncMock(side_effect=_connect_through_coordinator)
 
         with (
             patch(
@@ -1146,16 +1134,12 @@ class TestBleDiagnosticsRunner:
         assert len(report.connection_attempt_details) == 2
         configured_attempt, fallback_attempt = report.connection_attempt_details
         assert configured_attempt["error_category"] == "PAIRING FAILED"
-        assert (
-            configured_attempt["diagnostic_connection_path"]
-            == "configured_coordinator"
-        )
+        assert configured_attempt["diagnostic_connection_path"] == "configured_coordinator"
         assert fallback_attempt["result"] == "connected"
         coordinator.async_pause_position_hydration.assert_awaited_once_with()
         coordinator.resume_position_hydration.assert_called_once_with()
         assert (
-            fallback_attempt["diagnostic_connection_path"]
-            == "standalone_after_coordinator_failure"
+            fallback_attempt["diagnostic_connection_path"] == "standalone_after_coordinator_failure"
         )
 
 
@@ -1170,9 +1154,7 @@ class TestSupportBundle:
     ) -> None:
         """Bundle timing and trace should come from one diagnostic snapshot."""
         del enable_custom_integrations
-        captured_timing = {
-            "scheduler": {"recent_records": [{"intent_id": "captured"}]}
-        }
+        captured_timing = {"scheduler": {"recent_records": [{"intent_id": "captured"}]}}
         diagnostic_report = DiagnosticReport(
             metadata={"version": "2.0"},
             device={"address": mock_config_entry.data[CONF_ADDRESS]},
@@ -1363,7 +1345,10 @@ class TestSupportBundle:
                 "visible_sources": ["proxy_1"],
                 "non_connectable_fallback_used": False,
             },
-            advertisement={"address": mock_config_entry.data["address"], "selected_for_connection": True},
+            advertisement={
+                "address": mock_config_entry.data["address"],
+                "selected_for_connection": True,
+            },
             advertisements_by_source=[{"source": "proxy_1"}],
             detection={"bed_type": "linak", "supported_match": True},
             gatt_services=[{"uuid": LINAK_CONTROL_SERVICE_UUID}],
@@ -1673,7 +1658,8 @@ class TestSupportBundle:
             coordinator=None,
         )
         assert raw_auth_failure["required"] is False
-        assert raw_auth_failure["status"] == "authentication_failed"
+        assert raw_auth_failure["status"] == "not_required"
+        assert raw_auth_failure["auth_gated_probe"]["authentication_errors"]
 
     async def test_coordinator_records_command_trace(
         self,
@@ -1751,9 +1737,7 @@ class TestSupportBundleLoggingWarning:
 
     def test_evidence_warning_tells_the_user_how_to_enable_logging(self):
         """A missing log file is the case `logger:` actually fixes."""
-        evidence = self._evidence_for_log_failure(
-            "missing", "[Errno 2] No such file or directory"
-        )
+        evidence = self._evidence_for_log_failure("missing", "[Errno 2] No such file or directory")
 
         assert evidence["log_capture_status"] == "unavailable"
         assert evidence["log_capture_reason"] == "missing"
@@ -2156,7 +2140,6 @@ class TestSupportBundleLogProbeSafety:
 
         assert "adjustable_bed_support_bundle_logs_aa_bb_cc_dd_ee_ff" in dismissed
 
-
     async def test_failed_capture_dismisses_the_warning(self, hass):
         """No bundle means the "capture is running anyway" notice must go."""
         from unittest.mock import AsyncMock, MagicMock, patch
@@ -2209,7 +2192,6 @@ class TestSupportBundleLogProbeSafety:
 
         assert "adjustable_bed_support_bundle_logs_aa_bb_cc_dd_ee_ff" in dismissed
 
-
     async def test_a_slow_probe_does_not_block_the_capture(self, hass):
         """A stalled mount must not hang the service before it even starts."""
         import asyncio as _asyncio
@@ -2238,9 +2220,7 @@ class TestSupportBundleLogProbeSafety:
             {"target_address": "AA:BB:CC:DD:EE:FF", "capture_duration": 5},
         )
         with (
-            patch(
-                "custom_components.adjustable_bed.services._LOG_PROBE_TIMEOUT", 0.01
-            ),
+            patch("custom_components.adjustable_bed.services._LOG_PROBE_TIMEOUT", 0.01),
             patch(
                 "custom_components.adjustable_bed.support_report.async_check_log_file",
                 _never_returns,
@@ -2270,9 +2250,7 @@ class TestSupportBundleLogProbeSafety:
 
         assert captured is True
 
-    async def test_completed_logless_bundle_retracts_the_pre_capture_notice(
-        self, hass
-    ):
+    async def test_completed_logless_bundle_retracts_the_pre_capture_notice(self, hass):
         """The Ready notification repeats the guidance, so the old one must go."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2335,7 +2313,6 @@ class TestSupportBundleLogProbeSafety:
 
         assert "adjustable_bed_support_bundle_logs_aa_bb_cc_dd_ee_ff" in dismissed
 
-
     async def test_cancelled_capture_retracts_the_notice(self, hass):
         """CancelledError is a BaseException, so except Exception cannot catch it."""
         import asyncio as _asyncio
@@ -2388,7 +2365,6 @@ class TestSupportBundleLogProbeSafety:
             await handle_generate_support_bundle(call)
 
         assert "adjustable_bed_support_bundle_logs_aa_bb_cc_dd_ee_ff" in dismissed
-
 
     async def test_a_call_without_logs_requested_leaves_the_notice_alone(self, hass):
         """An include_logs: false call must not clear another capture's warning."""
@@ -2498,7 +2474,6 @@ class TestSupportBundleLogProbeSafety:
         ready = messages[-1]
         assert "contains no logs" in ready
         assert "Enable debug logging" in ready
-
 
     async def test_logs_appearing_during_capture_are_not_called_missing(self, hass):
         """The capture is the authority once it has actually read the file."""
@@ -2630,7 +2605,6 @@ class TestSupportBundleLogProbeSafety:
         # The longer capture still owns it, so nothing was retracted.
         assert dismissed == []
         assert other in hass.data[_LOG_NOTICE_OWNERS][notice_id]
-
 
     async def test_timed_out_probe_still_lets_the_capture_read_logs(self, hass):
         """A timeout is inconclusive, so it must not disable logs for the capture.

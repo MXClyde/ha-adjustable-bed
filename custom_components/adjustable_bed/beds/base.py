@@ -11,7 +11,7 @@ import asyncio
 import inspect
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
@@ -127,6 +127,32 @@ class PositionNumberSpec:
     open_fn: MotorCommandCallable
     close_fn: MotorCommandCallable
     stop_fn: MotorCommandCallable
+
+
+@dataclass(frozen=True, slots=True)
+class ControllerStateSensorSpec:
+    """Describe a diagnostic sensor backed by coordinator controller state."""
+
+    key: str
+    translation_key: str
+    state_key: str
+    icon: str
+    native_unit_of_measurement: str | None = None
+    attribute_keys: tuple[str, ...] = ()
+    entity_registry_enabled_default: bool = True
+    suggested_display_precision: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ControllerStateBinarySensorSpec:
+    """Describe a binary diagnostic backed by coordinator controller state."""
+
+    key: str
+    translation_key: str
+    state_key: str
+    icon: str
+    attribute_keys: tuple[str, ...] = ()
+    entity_registry_enabled_default: bool = True
 
 
 # Movement commands for the four standard position axes, so controllers can
@@ -314,9 +340,8 @@ class BedController(ABC):
     def auto_stops_on_idle(self) -> bool:
         """Return True if motors auto-stop when commands stop arriving.
 
-        Controllers that auto-stop (like Linak) should override this to return True.
-        This allows the coordinator to skip explicit STOP commands which can cause
-        brief reverse movements on some bed types.
+        Controllers whose protocol defines no STOP/release frame can override
+        this to skip an invented cleanup write.
         """
         return False
 
@@ -665,6 +690,13 @@ class BedController(ABC):
         """
         self._notify_callback = callback
 
+    async def async_discover_capabilities(self) -> None:  # noqa: B027
+        """Resolve connect-time capabilities before entity platforms are loaded."""
+
+    def capability_snapshot(self) -> dict[str, Any] | None:
+        """Return discovered capabilities safe to persist across connections."""
+        return None
+
     async def stop_notify(self) -> None:
         """Stop listening for position notifications.
 
@@ -717,7 +749,7 @@ class BedController(ABC):
         finally:
             try:
                 await self._send_stop()
-            except (BleakError, ConnectionError):
+            except BleakError, ConnectionError:
                 _LOGGER.debug("Failed to send STOP during cleanup", exc_info=True)
 
     async def _preset_with_stop(
@@ -740,7 +772,7 @@ class BedController(ABC):
         finally:
             try:
                 await self._send_stop()
-            except (BleakError, ConnectionError):
+            except BleakError, ConnectionError:
                 _LOGGER.debug("Failed to send STOP during preset cleanup", exc_info=True)
 
     async def read_non_notifying_positions(self) -> None:  # noqa: B027
@@ -1130,6 +1162,82 @@ class BedController(ABC):
         report whether one is configured, not its value.
         """
         return {}
+
+    @property
+    def controller_state_sensor_specs(self) -> tuple[ControllerStateSensorSpec, ...]:
+        """Return controller-state diagnostic sensors exposed by this protocol."""
+        return ()
+
+    @property
+    def controller_state_binary_sensor_specs(
+        self,
+    ) -> tuple[ControllerStateBinarySensorSpec, ...]:
+        """Return controller-state binary diagnostics exposed by this protocol."""
+        return ()
+
+    @property
+    def stale_controller_state_sensor_entity_keys(self) -> frozenset[str]:
+        """Return controller-state sensor entity keys omitted by this snapshot."""
+        return frozenset()
+
+    @property
+    def stale_controller_state_binary_sensor_entity_keys(self) -> frozenset[str]:
+        """Return controller-state binary sensor keys omitted by this snapshot."""
+        return frozenset()
+
+    @property
+    def supports_wake_control(self) -> bool:
+        """Return True if the app exposes a user-triggered wake/preparation command."""
+        return type(self).wake is not BedController.wake
+
+    @property
+    def supports_reset_defaults(self) -> bool:
+        """Return True if the controller can reset app-controlled defaults."""
+        return type(self).reset_defaults is not BedController.reset_defaults
+
+    @property
+    def supports_factory_reset(self) -> bool:
+        """Return True if the controller exposes a distinct factory reset."""
+        return type(self).factory_reset is not BedController.factory_reset
+
+    @property
+    def supports_impulse_control(self) -> bool:
+        """Return True if the controller exposes impulse massage control."""
+        return type(self).impulse_toggle is not BedController.impulse_toggle
+
+    @property
+    def supports_massage_wave_frequency_control(self) -> bool:
+        """Return True if wave frequency can be stepped up and down."""
+        return (
+            type(self).massage_wave_frequency_up is not BedController.massage_wave_frequency_up
+            and type(self).massage_wave_frequency_down
+            is not BedController.massage_wave_frequency_down
+        )
+
+    @property
+    def supports_automatic_drive(self) -> bool:
+        """Return True if automatic drive can be enabled through configuration GATT."""
+        return type(self).set_automatic_drive is not BedController.set_automatic_drive
+
+    @property
+    def supports_device_rename(self) -> bool:
+        """Return True if the BLE device name can be written."""
+        return False
+
+    @property
+    def supports_alarm(self) -> bool:
+        """Return True if the controller exposes the BLE timer/alarm service."""
+        return False
+
+    @property
+    def supports_simultaneous_movement(self) -> bool:
+        """Return True if two sections can be driven by one protocol command."""
+        return False
+
+    @property
+    def simultaneous_movement_axes(self) -> tuple[str, ...]:
+        """Return the exact axes accepted by simultaneous movement commands."""
+        return ()
 
     @property
     def allow_position_polling_during_commands(self) -> bool:
@@ -1732,6 +1840,51 @@ class BedController(ABC):
 
     # Feature methods (may not be available on all beds)
 
+    async def wake(self) -> None:
+        """Send a user-triggered protocol wake/preparation command."""
+        raise NotImplementedError("Wake control not supported on this bed")
+
+    async def reset_defaults(self) -> None:
+        """Reset controller defaults."""
+        raise NotImplementedError("Reset defaults not supported on this bed")
+
+    async def factory_reset(self) -> None:
+        """Perform a distinct protocol-level factory reset."""
+        raise NotImplementedError("Factory reset not supported on this bed")
+
+    async def impulse_toggle(self) -> None:
+        """Toggle impulse massage mode."""
+        raise NotImplementedError("Impulse control not supported on this bed")
+
+    async def set_automatic_drive(self, enabled: bool) -> None:
+        """Enable or disable automatic drive."""
+        raise NotImplementedError("Automatic drive not supported on this bed")
+
+    async def rename_device(self, name: str) -> None:
+        """Write a protocol-supported BLE device name."""
+        raise NotImplementedError("Device rename not supported on this bed")
+
+    async def program_alarm(
+        self,
+        seconds: int,
+        actions: Sequence[Any],
+        recurrence_count: int,
+        recurrence_minutes: int,
+    ) -> None:
+        """Program a protocol-supported wake alarm."""
+        raise NotImplementedError("Alarm programming not supported on this bed")
+
+    async def move_simultaneously(
+        self,
+        first_axis: str,
+        first_up: bool,
+        second_axis: str,
+        second_up: bool,
+        duration_ms: int | None = None,
+    ) -> None:
+        """Move two protocol-defined sections with one command."""
+        raise NotImplementedError("Simultaneous movement not supported on this bed")
+
     async def sound_toggle(self) -> None:
         """Toggle the sound therapy feature.
 
@@ -1923,6 +2076,14 @@ class BedController(ABC):
     async def massage_wave_previous(self) -> None:
         """Select the previous massage wave pattern."""
         raise NotImplementedError("Massage wave direction not supported on this bed")
+
+    async def massage_wave_frequency_up(self) -> None:
+        """Increase massage wave frequency."""
+        raise NotImplementedError("Massage wave frequency not supported on this bed")
+
+    async def massage_wave_frequency_down(self) -> None:
+        """Decrease massage wave frequency."""
+        raise NotImplementedError("Massage wave frequency not supported on this bed")
 
     async def set_massage_intensity_preset(self, level: int) -> None:
         """Select a discrete massage intensity preset."""

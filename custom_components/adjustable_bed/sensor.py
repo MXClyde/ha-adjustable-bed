@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.sensor import (
     SensorEntity,
@@ -20,6 +21,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import (
     BED_TYPE_ERGOMOTION,
     BED_TYPE_KEESON,
+    BED_TYPE_LINAK,
     BEDS_WITH_ANGLE_SENSING,
     CONF_BED_TYPE,
     CONF_HAS_MASSAGE,
@@ -32,6 +34,9 @@ from .const import (
 from .coordinator import AdjustableBedCoordinator
 from .entity import AdjustableBedEntity
 from .paired_coordinator import PairedBedCoordinator
+
+if TYPE_CHECKING:
+    from .beds.base import ControllerStateSensorSpec
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -153,21 +158,50 @@ def _sensor_entities_for(
     # capability_controller: an offline paired side still gets its sensors built
     # from a client-free controller minted from config (see coordinator).
     controller = coordinator.capability_controller
+    position_number_keys = (
+        {spec.position_key for spec in controller.position_number_specs}
+        if controller is not None
+        else set()
+    )
 
     entities: list[SensorEntity] = []
 
     # Only protocols in the explicit angle-sensing capability set may expose degree
     # sensors. Clean up entities created by older permissive logic so unsupported
     # beds cannot leave dead "unknown" angles in Home Assistant or the card.
-    if bed_type not in BEDS_WITH_ANGLE_SENSING:
+    if bed_type == BED_TYPE_LINAK:
+        # Linak position numbers already expose the app's exact reference values.
+        # Remove every legacy angle entity, including axes omitted by a new mask.
         _async_remove_stale_angle_entities(hass, coordinator)
+    elif bed_type not in BEDS_WITH_ANGLE_SENSING:
+        _async_remove_stale_angle_entities(hass, coordinator)
+    elif position_number_keys:
+        # A position number already exposes the same live value while also
+        # allowing a target to be set. Keep one entity per axis and remove the
+        # duplicate read-only angle sensor left by earlier releases.
+        _async_remove_stale_angle_entities(
+            hass,
+            coordinator,
+            position_keys=position_number_keys,
+        )
+
+    if bed_type == BED_TYPE_LINAK:
+        _async_remove_stale_sensor_entities(
+            hass,
+            coordinator,
+            keys=("linak_model_variant",),
+        )
 
     # Set up angle sensors only when both the protocol and configuration support it.
     if not coordinator.disable_angle_sensing:
-        if bed_type not in BEDS_WITH_ANGLE_SENSING:
+        if bed_type == BED_TYPE_LINAK:
+            _LOGGER.debug("Skipping duplicate Linak angle sensors")
+        elif bed_type not in BEDS_WITH_ANGLE_SENSING:
             _LOGGER.debug("Skipping angle sensors for %s - no angle feedback", bed_type)
         else:
             for description in SENSOR_DESCRIPTIONS:
+                if description.position_key in position_number_keys:
+                    continue
                 if motor_count >= description.min_motors:
                     entities.append(AdjustableBedAngleSensor(coordinator, description))
     else:
@@ -177,9 +211,8 @@ def _sensor_entities_for(
     # Keeson/Ergomotion beds have state feedback via BLE notifications
     if has_massage and controller is not None:
         protocol_variant = entry.data.get(CONF_PROTOCOL_VARIANT)
-        has_massage_feedback = (
-            bed_type == BED_TYPE_ERGOMOTION
-            or (bed_type == BED_TYPE_KEESON and protocol_variant == KEESON_VARIANT_ERGOMOTION)
+        has_massage_feedback = bed_type == BED_TYPE_ERGOMOTION or (
+            bed_type == BED_TYPE_KEESON and protocol_variant == KEESON_VARIANT_ERGOMOTION
         )
 
         if has_massage_feedback:
@@ -191,18 +224,49 @@ def _sensor_entities_for(
             for massage_desc in MASSAGE_SENSOR_DESCRIPTIONS:
                 entities.append(AdjustableBedMassageSensor(coordinator, massage_desc))
 
+    if controller is not None:
+        _async_remove_stale_sensor_entities(
+            hass,
+            coordinator,
+            keys=tuple(controller.stale_controller_state_sensor_entity_keys),
+        )
+        entities.extend(
+            AdjustableBedControllerStateSensor(coordinator, spec)
+            for spec in controller.controller_state_sensor_specs
+        )
+
     return entities
 
 
 def _async_remove_stale_angle_entities(
     hass: HomeAssistant,
     coordinator: AdjustableBedCoordinator,
+    *,
+    position_keys: set[str] | None = None,
 ) -> None:
     """Remove stale angle entities for protocols without degree feedback."""
     registry = er.async_get(hass)
     for description in SENSOR_DESCRIPTIONS:
+        if position_keys is not None and description.position_key not in position_keys:
+            continue
         entity_id = registry.async_get_entity_id(
             "sensor", DOMAIN, coordinator.entity_unique_id(description.key)
+        )
+        if entity_id is not None:
+            registry.async_remove(entity_id)
+
+
+def _async_remove_stale_sensor_entities(
+    hass: HomeAssistant,
+    coordinator: AdjustableBedCoordinator,
+    *,
+    keys: tuple[str, ...],
+) -> None:
+    """Remove sensor entities retired in favor of device metadata."""
+    registry = er.async_get(hass)
+    for key in keys:
+        entity_id = registry.async_get_entity_id(
+            "sensor", DOMAIN, coordinator.entity_unique_id(key)
         )
         if entity_id is not None:
             registry.async_remove(entity_id)
@@ -319,6 +383,61 @@ class AdjustableBedMassageSensor(AdjustableBedEntity, SensorEntity):
             return str_value
         try:
             return int(value)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             _LOGGER.debug("Non-numeric massage state value: %s", value)
             return None
+
+
+class AdjustableBedControllerStateSensor(AdjustableBedEntity, SensorEntity):
+    """Diagnostic sensor backed by typed controller-published state."""
+
+    def __init__(
+        self,
+        coordinator: AdjustableBedCoordinator,
+        spec: ControllerStateSensorSpec,
+    ) -> None:
+        """Initialize a controller-state sensor."""
+        super().__init__(coordinator)
+        self._spec = spec
+        self._attr_unique_id = coordinator.entity_unique_id(spec.key)
+        self._attr_translation_key = spec.translation_key
+        self._attr_icon = spec.icon
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._attr_entity_registry_enabled_default = spec.entity_registry_enabled_default
+        self._attr_native_unit_of_measurement = spec.native_unit_of_measurement
+        self._attr_suggested_display_precision = spec.suggested_display_precision
+        if spec.native_unit_of_measurement is not None:
+            self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._unregister_callback: Callable[[], None] | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to controller-state changes."""
+        await super().async_added_to_hass()
+        self._unregister_callback = self._coordinator.register_controller_state_callback(
+            self._handle_controller_state_update
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Unsubscribe from controller-state changes."""
+        if self._unregister_callback is not None:
+            self._unregister_callback()
+        await super().async_will_remove_from_hass()
+
+    @callback
+    def _handle_controller_state_update(self, state: dict[str, Any]) -> None:
+        """Refresh when this sensor or one of its attributes changed."""
+        watched = {self._spec.state_key, *self._spec.attribute_keys}
+        if watched.intersection(state):
+            self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> str | int | float | None:
+        """Return the latest controller-published value."""
+        value = self._coordinator.controller_state.get(self._spec.state_key)
+        return value if isinstance(value, (str, int, float)) else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the parser metadata selected by the controller spec."""
+        state = self._coordinator.controller_state
+        return {key: state[key] for key in self._spec.attribute_keys if key in state}

@@ -83,14 +83,26 @@ from .repairs import (
     async_track_combine_beds_issue,
 )
 from .services import (
+    ATTR_ACTION,
+    ATTR_ACTIONS,
     ATTR_CAPTURE_DURATION,
     ATTR_DIRECTION,
     ATTR_DURATION_MS,
+    ATTR_FIRST_DIRECTION,
+    ATTR_FIRST_MOTOR,
     ATTR_INCLUDE_LOGS,
+    ATTR_LIFETIME,
     ATTR_MOTOR,
+    ATTR_NAME,
+    ATTR_PAUSE,
     ATTR_POSITION,
     ATTR_POSITIONS,
     ATTR_PRESET,
+    ATTR_RECURRENCE_COUNT,
+    ATTR_RECURRENCE_MINUTES,
+    ATTR_SECOND_DIRECTION,
+    ATTR_SECOND_MOTOR,
+    ATTR_SECONDS,
     ATTR_SIDE,
     ATTR_TARGET_ADDRESS,
     DEFAULT_CAPTURE_DURATION,
@@ -100,6 +112,9 @@ from .services import (
     MIN_TIMED_MOVE_DURATION_MS,
     SERVICE_GENERATE_SUPPORT_BUNDLE,
     SERVICE_GOTO_PRESET,
+    SERVICE_LINAK_MOVE_SIMULTANEOUS,
+    SERVICE_LINAK_RENAME,
+    SERVICE_LINAK_SET_ALARM,
     SERVICE_SAVE_PRESET,
     SERVICE_SET_POSITION,
     SERVICE_SET_POSITIONS,
@@ -121,10 +136,22 @@ __all__ = [
     "ATTR_DIRECTION",
     "ATTR_DURATION_MS",
     "ATTR_INCLUDE_LOGS",
+    "ATTR_FIRST_DIRECTION",
+    "ATTR_FIRST_MOTOR",
+    "ATTR_ACTION",
+    "ATTR_ACTIONS",
+    "ATTR_LIFETIME",
     "ATTR_MOTOR",
+    "ATTR_NAME",
+    "ATTR_PAUSE",
     "ATTR_POSITION",
     "ATTR_POSITIONS",
     "ATTR_PRESET",
+    "ATTR_RECURRENCE_COUNT",
+    "ATTR_RECURRENCE_MINUTES",
+    "ATTR_SECOND_DIRECTION",
+    "ATTR_SECOND_MOTOR",
+    "ATTR_SECONDS",
     "ATTR_SIDE",
     "ATTR_TARGET_ADDRESS",
     "DEFAULT_CAPTURE_DURATION",
@@ -134,6 +161,9 @@ __all__ = [
     "MIN_TIMED_MOVE_DURATION_MS",
     "SERVICE_GENERATE_SUPPORT_BUNDLE",
     "SERVICE_GOTO_PRESET",
+    "SERVICE_LINAK_MOVE_SIMULTANEOUS",
+    "SERVICE_LINAK_RENAME",
+    "SERVICE_LINAK_SET_ALARM",
     "SERVICE_SAVE_PRESET",
     "SERVICE_SET_POSITION",
     "SERVICE_SET_POSITIONS",
@@ -310,6 +340,7 @@ def _async_ensure_device_registry_entry(
         name=device_info.get("name"),
         manufacturer=device_info.get("manufacturer"),
         model=device_info.get("model"),
+        model_id=device_info.get("model_id"),
     )
 
 
@@ -389,9 +420,7 @@ def _make_child_persist_cb(
             if current.get(key) != value and key not in option_keys
         }
         removed_runtime_keys = {
-            key
-            for key in RUNTIME_BOND_KEYS
-            if key in current and key not in new_child_data
+            key for key in RUNTIME_BOND_KEYS if key in current and key not in new_child_data
         }
         if not delta and not removed_runtime_keys:
             return
@@ -440,6 +469,7 @@ def _async_ensure_paired_device_registry(
         name=parent_info.get("name"),
         manufacturer=parent_info.get("manufacturer"),
         model=parent_info.get("model"),
+        model_id=parent_info.get("model_id"),
     )
     parent_identifier = (DOMAIN, coordinator.pair_id)
     for child in coordinator.children.values():
@@ -451,6 +481,7 @@ def _async_ensure_paired_device_registry(
                 name=child_info.get("name"),
                 manufacturer=child_info.get("manufacturer"),
                 model=child_info.get("model"),
+                model_id=child_info.get("model_id"),
                 via_device_id=parent.id,
             )
         else:
@@ -461,6 +492,7 @@ def _async_ensure_paired_device_registry(
                 name=child_info.get("name"),
                 manufacturer=child_info.get("manufacturer"),
                 model=child_info.get("model"),
+                model_id=child_info.get("model_id"),
                 via_device=parent_identifier,
             )
 
@@ -499,9 +531,7 @@ def _async_transfer_device_registry_entry(
     Assistant releases the two lookups resolve to the same shared device, so the
     removal is naturally skipped and the combined add/remove remains compatible.
     """
-    target_device = _device_for_entry_and_identifier(
-        registry, target_entry_id, identifier
-    )
+    target_device = _device_for_entry_and_identifier(registry, target_entry_id, identifier)
     if target_device is not None and target_device.id != device.id:
         registry.async_remove_device(target_device.id)
     registry.async_update_device(
@@ -718,9 +748,7 @@ async def async_unpair_entry(hass: HomeAssistant, entry: ConfigEntry) -> list[Co
         paired_options = dict(entry.options)
         paired_title = entry.title
         paired_unique_id = entry.unique_id
-        preserved = set(
-            entry.data.get(KEY_SINGLE_ADDRESS_ORIGIN_ENTITY_UNIQUE_IDS, [])
-        )
+        preserved = set(entry.data.get(KEY_SINGLE_ADDRESS_ORIGIN_ENTITY_UNIQUE_IDS, []))
         unloaded = await hass.config_entries.async_unload(entry.entry_id)
         if not unloaded:
             raise HomeAssistantError("Could not unload the bed before reverting sides")
@@ -735,17 +763,13 @@ async def async_unpair_entry(hass: HomeAssistant, entry: ConfigEntry) -> list[Co
             if not await hass.config_entries.async_setup(entry.entry_id):
                 raise RuntimeError("standalone entry setup failed")
             registry = er.async_get(hass)
-            for row in list(
-                er.async_entries_for_config_entry(registry, entry.entry_id)
-            ):
+            for row in list(er.async_entries_for_config_entry(registry, entry.entry_id)):
                 if row.unique_id not in preserved and row.unique_id.endswith(
                     ("_left", "_right", "_both")
                 ):
                     registry.async_remove(row.entity_id)
         except Exception:
-            _LOGGER.exception(
-                "Failed to revert single-address paired bed %s", entry.title
-            )
+            _LOGGER.exception("Failed to revert single-address paired bed %s", entry.title)
             with contextlib.suppress(Exception):
                 await hass.config_entries.async_unload(entry.entry_id)
             hass.config_entries.async_update_entry(
@@ -1066,9 +1090,7 @@ async def _async_setup_paired_entry(hass: HomeAssistant, entry: ConfigEntry) -> 
     return True
 
 
-async def _async_setup_single_address_paired_entry(
-    hass: HomeAssistant, entry: ConfigEntry
-) -> bool:
+async def _async_setup_single_address_paired_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a left/right/both surface over one physical coordinator."""
     inner = AdjustableBedCoordinator(hass, entry)
     coordinator = SingleAddressPairedCoordinator(hass, entry, inner)
@@ -1079,6 +1101,7 @@ async def _async_setup_single_address_paired_entry(
         name=info.get("name"),
         manufacturer=info.get("manufacturer"),
         model=info.get("model"),
+        model_id=info.get("model_id"),
     )
     try:
         async with asyncio.timeout(SETUP_TIMEOUT):
@@ -1094,9 +1117,7 @@ async def _async_setup_single_address_paired_entry(
         raise ConfigEntryNotReady(f"Bed {entry.title} could not be connected")
 
     controller = inner.controller
-    if controller is not None and not getattr(
-        controller, "supports_single_address_pairing", True
-    ):
+    if controller is not None and not getattr(controller, "supports_single_address_pairing", True):
         await coordinator.async_shutdown()
         raise ConfigEntryNotReady(
             "This CBNew protocol has no side selector and cannot expose paired sides"
@@ -1150,6 +1171,7 @@ async def _maybe_create_pairing_issue_for(
     bed_type = entry_data.get(CONF_BED_TYPE)
     protocol_variant = entry_data.get(CONF_PROTOCOL_VARIANT)
     if not (bed_type and requires_pairing(bed_type, protocol_variant)):
+        await coordinator.async_clear_obsolete_pairing_state()
         return
 
     address = entry_data.get(CONF_ADDRESS, "")
@@ -1393,9 +1415,10 @@ def _async_clear_stale_octo_pin_issue(hass: HomeAssistant, entry: ConfigEntry) -
     # Star2 has no PIN mechanism at all, and OctoStar2Controller has no
     # pin_locked_without_pin, so the connect path could never clear a stale
     # issue left behind by a variant switch.
-    is_standard_octo = entry.data.get(CONF_BED_TYPE) == BED_TYPE_OCTO and entry.data.get(
-        CONF_PROTOCOL_VARIANT
-    ) != OCTO_VARIANT_STAR2
+    is_standard_octo = (
+        entry.data.get(CONF_BED_TYPE) == BED_TYPE_OCTO
+        and entry.data.get(CONF_PROTOCOL_VARIANT) != OCTO_VARIANT_STAR2
+    )
     if not is_standard_octo or entry.data.get(CONF_OCTO_PIN):
         clear_octo_pin_required_issue(hass, address)
 
@@ -1407,8 +1430,6 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
         # The coordinator recorded its own BLE bond marker. Reloading for that
         # would disconnect the bed, which is fatal for a bed that only grants
         # one connection per pairing window (issue #385).
-        _LOGGER.debug(
-            "Skipping reload for %s: internal bond-marker update", entry.entry_id
-        )
+        _LOGGER.debug("Skipping reload for %s: internal bond-marker update", entry.entry_id)
         return
     await hass.config_entries.async_reload(entry.entry_id)

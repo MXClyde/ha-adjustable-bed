@@ -37,8 +37,8 @@ test("2-motor bed with light switch and no massage/climate", () => {
   const hass = hassWith([
     entry("cover.seng_back", "back"),
     entry("cover.seng_legs", "legs"),
-    entry("sensor.seng_back_angle", "back_angle"),
-    entry("sensor.seng_legs_angle", "legs_angle"),
+    entry("number.seng_back_position", "back_position"),
+    entry("number.seng_legs_position", "legs_position"),
     entry("button.seng_flat", "preset_flat"),
     entry("button.seng_zero_g", "preset_zero_g"),
     entry("button.seng_save_1", "program_memory_1"),
@@ -52,7 +52,7 @@ test("2-motor bed with light switch and no massage/climate", () => {
 
   expect(bed.motors.map((m) => m.key)).toEqual(["back", "legs"]);
   expect(bed.motors[0].cover).toBe("cover.seng_back");
-  expect(bed.motors[0].angle).toBe("sensor.seng_back_angle");
+  expect(bed.motors[0].position).toBe("number.seng_back_position");
   expect(bed.presets).toEqual(["button.seng_flat", "button.seng_zero_g"]);
   expect(bed.stop).toBe("button.seng_stop");
   expect(bed.connect).toBe("button.seng_connect");
@@ -131,6 +131,24 @@ test("Okin utility buttons (sync / child lock) bucket into utility", () => {
   // Utility buttons must not leak into presets or massage.
   expect(bed.presets).toHaveLength(0);
   expect(bed.massage.buttons).toHaveLength(0);
+  expect(bedIsEmpty(bed)).toBe(false);
+});
+
+test("Linak configuration controls bucket into utility", () => {
+  const hass = hassWith([
+    entry("button.b_wake", "wake_controller"),
+    entry("button.b_reset", "reset_defaults"),
+    entry("button.b_factory", "factory_reset"),
+    entry("switch.b_drive", "linak_automatic_drive"),
+  ]);
+  const bed = bedEntitiesForDevice(hass, "dev1");
+
+  expect(bed.utility).toEqual([
+    "button.b_wake",
+    "button.b_reset",
+    "button.b_factory",
+    "switch.b_drive",
+  ]);
   expect(bedIsEmpty(bed)).toBe(false);
 });
 

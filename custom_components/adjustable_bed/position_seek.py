@@ -132,6 +132,21 @@ class PositionSeekPolicy:
         return self._controller.position_seek_check_interval
 
     @property
+    def prefers_cached_position_feedback(self) -> bool:
+        """Return True when fresh notifications should replace active GATT reads.
+
+        The default remains conservative for controllers whose notifications
+        are missing or incomplete. Protocol policies may opt in when their
+        position characteristic is proven to notify throughout movement.
+        """
+        return False
+
+    @property
+    def cached_position_feedback_max_age(self) -> float:
+        """Return the maximum age of notification feedback used by a seek."""
+        return 0.0
+
+    @property
     def stall_count(self) -> int:
         """Return how many stagnant reads confirm a stall."""
         return self._controller.position_seek_stall_count
@@ -170,8 +185,8 @@ class PositionSeekPolicy:
     def sends_explicit_stop(self) -> bool:
         """Return True if this protocol needs explicit STOP writes.
 
-        Auto-stopping motors (e.g. Linak) skip explicit STOP because it can
-        cause brief reverse movement.
+        Protocols proven to stop solely when held-command refresh ends can
+        opt out through ``auto_stops_on_idle``.
         """
         return not self._controller.auto_stops_on_idle
 
@@ -231,8 +246,7 @@ class PositionSeekPolicy:
         stop: Callable[[], Awaitable[None]],
     ) -> None:
         """Transition the axis before reversing direction after overshoot."""
-        # Only send explicit stop for controllers that don't auto-stop
-        # (Linak auto-stops and explicit STOP can cause reverse blips)
+        # Only send explicit stop for controllers that define a release frame.
         if self.sends_explicit_stop:
             await stop()
             await asyncio.sleep(SEEK_REVERSAL_SETTLE_DELAY)
@@ -366,8 +380,24 @@ class PositionSeekRunner:
                 # Wait and poll position
                 await asyncio.sleep(policy.check_interval)
 
+                # A STOP or replacement may arrive while the runner is waiting
+                # to poll. Do not make it wait behind another GATT read.
+                if cancel_event.is_set():
+                    _LOGGER.debug(
+                        "Position seek cancelled before feedback read for %s", position_key
+                    )
+                    return result(SeekOutcome.CANCELLED, current_angle, moving_up)
+
                 # Read current position
                 current_angle = await self._read_position()
+                # Reading feedback can itself suspend. Never issue a chained or
+                # retry step after a newer STOP or replacement landed mid-read.
+                if cancel_event.is_set():
+                    _LOGGER.debug(
+                        "Position seek cancelled during feedback read for %s", position_key
+                    )
+                    return result(SeekOutcome.CANCELLED, current_angle, moving_up)
+
                 if current_angle is None:
                     _LOGGER.warning(
                         "Lost position data for %s during seek",
@@ -486,9 +516,8 @@ class PositionSeekRunner:
 
                 last_angle = current_angle
         finally:
-            # Stop the motor unless it auto-stops on idle
-            # Some controllers (e.g., Linak) auto-stop and sending explicit
-            # STOP can cause brief reverse movement.
+            # Stop the motor unless this protocol ends motion solely by
+            # ending its held-command refresh.
             if policy.sends_explicit_stop:
                 try:
                     await self._stop()

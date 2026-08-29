@@ -153,6 +153,7 @@ from .const import (
     LEGGETT_OKIN_SUPERSEDED_PULSE_DEFAULTS,
     LEGGETT_VARIANT_GEN2,
     LEGGETT_VARIANT_OKIN,
+    LINAK_VARIANT_PERFORMANCE,
     MALOUF_LAYOUT_AUTO,
     MALOUF_MEMORY_SLOTS_AUTO,
     OCTO_VARIANT_STAR2,
@@ -297,9 +298,7 @@ class ChildEntryView:
                     self._child_data[key] = new_data[key]
                 else:
                     self._child_data.pop(key, None)
-            persisted_data = {
-                key: self._child_data[key] for key in keys if key in self._child_data
-            }
+            persisted_data = {key: self._child_data[key] for key in keys if key in self._child_data}
         self._persist_cb(persisted_data)
 
     def __getattr__(self, name: str) -> Any:
@@ -429,6 +428,7 @@ class AdjustableBedCoordinator:
         # Position data from notifications
         self._position_data: dict[str, float] = {}
         self._position_data_generation: dict[str, int] = {}
+        self._position_data_updated_monotonic: dict[str, float] = {}
         self._position_connection_generation = 0
         self._position_callbacks: set[Callable[[dict[str, float]], None]] = set()
         self._controller_state: dict[str, Any] = {}
@@ -610,17 +610,13 @@ class AdjustableBedCoordinator:
             and (self._motor_pulse_count, self._motor_pulse_delay_ms)
             == LEGGETT_OKIN_SUPERSEDED_PULSE_DEFAULTS
         )
-        if (
-            corrected_defaults is not None
-            and (
-                migrate_leggett_okin_defaults
-                or (
-                    bed_type_changed
-                    and previous_defaults is not None
-                    and not has_custom_pulse_override
-                    and (self._motor_pulse_count, self._motor_pulse_delay_ms)
-                    == previous_defaults
-                )
+        if corrected_defaults is not None and (
+            migrate_leggett_okin_defaults
+            or (
+                bed_type_changed
+                and previous_defaults is not None
+                and not has_custom_pulse_override
+                and (self._motor_pulse_count, self._motor_pulse_delay_ms) == previous_defaults
             )
         ):
             self._motor_pulse_count, self._motor_pulse_delay_ms = corrected_defaults
@@ -879,19 +875,25 @@ class AdjustableBedCoordinator:
         # connect), but a paired side that captured a capability snapshot AT
         # PAIRING can be minted offline from that snapshot.
         octo_snapshot = (
-            octo_snapshot_from_descriptor(self.entry.data)
-            if bed_type == BED_TYPE_OCTO
+            octo_snapshot_from_descriptor(self.entry.data) if bed_type == BED_TYPE_OCTO else None
+        )
+        capabilities = self.entry.data.get("capabilities")
+        linak_snapshot = (
+            capabilities.get("linak")
+            if bed_type == BED_TYPE_LINAK and isinstance(capabilities, dict)
             else None
         )
         # Octo Remote Star2 is a different protocol with FIXED capabilities and no
         # PIN/snapshot, so it IS statically offline-mintable (like Linak) — its
         # controller builds without a client.
-        is_octo_star2 = (
-            bed_type == BED_TYPE_OCTO
-            and self._protocol_variant == OCTO_VARIANT_STAR2
+        is_octo_star2 = bed_type == BED_TYPE_OCTO and self._protocol_variant == OCTO_VARIANT_STAR2
+        is_linak_performance = (
+            bed_type == BED_TYPE_LINAK and self._protocol_variant == LINAK_VARIANT_PERFORMANCE
         )
-        mintable = bed_type in OFFLINE_CAPABILITY_SAFE_BED_TYPES or (
-            bed_type == BED_TYPE_OCTO and (octo_snapshot is not None or is_octo_star2)
+        mintable = (
+            bed_type in OFFLINE_CAPABILITY_SAFE_BED_TYPES
+            or (bed_type == BED_TYPE_OCTO and (octo_snapshot is not None or is_octo_star2))
+            or (bed_type == BED_TYPE_LINAK and (linak_snapshot is not None or is_linak_performance))
         )
         if not mintable:
             # Only beds whose entity-gating capabilities are fully determined by
@@ -913,7 +915,7 @@ class AdjustableBedCoordinator:
                 richmat_remote=self._richmat_remote,
                 jensen_pin=self._jensen_pin,
                 cb24_bed_selection=self._cb24_bed_selection,
-                capability_snapshot=octo_snapshot,
+                capability_snapshot=octo_snapshot or linak_snapshot,
             )
         except ConnectionError:
             # Auto-detected variant: needs a live client to resolve. Leave the
@@ -1048,9 +1050,7 @@ class AdjustableBedCoordinator:
                     "paired": props.get("Paired", details.get("paired")),
                     "bonded": props.get("Bonded", details.get("bonded")),
                     "trusted": props.get("Trusted", details.get("trusted")),
-                    "address_type": props.get(
-                        "AddressType", details.get("address_type")
-                    ),
+                    "address_type": props.get("AddressType", details.get("address_type")),
                 }
             )
         return states
@@ -1090,15 +1090,26 @@ class AdjustableBedCoordinator:
         if capabilities.get("octo") == snapshot:
             return  # unchanged — avoid a redundant persist
         capabilities["octo"] = snapshot
-        self._async_persist_config(
-            {**self.entry.data, "capabilities": capabilities}
-        )
+        self._async_persist_config({**self.entry.data, "capabilities": capabilities})
         # The offline controller minted from the pairing-time snapshot is now stale
         # (cache_capability_controller only fills an EMPTY slot, so it never refreshes
         # it). Point it at the live controller — the same client-free capability
         # source — so a later sequential release gates per-side entities off the
         # freshly discovered capabilities, not the old snapshot, before the next
         # reload.
+        self._offline_controller = self._controller
+
+    def _backfill_linak_snapshot(self) -> None:
+        """Persist a successful Linak model/capability resolution."""
+        snapshot_fn = getattr(self._controller, "capability_snapshot", None)
+        snapshot = snapshot_fn() if callable(snapshot_fn) else None
+        if not isinstance(snapshot, Mapping) or snapshot.get("discovery_complete") is not True:
+            return
+        capabilities = dict(self.entry.data.get("capabilities") or {})
+        if capabilities.get("linak") == snapshot:
+            return
+        capabilities["linak"] = snapshot
+        self._async_persist_config({**self.entry.data, "capabilities": capabilities})
         self._offline_controller = self._controller
 
     def _persist_bond_flags(
@@ -1138,9 +1149,7 @@ class AdjustableBedCoordinator:
             # its own owner. The unproven route scope has nothing left to say.
             data.pop(CONF_BLE_BOND_ATTEMPTED_SOURCE, None)
         if data != dict(self.entry.data):
-            self._begin_internal_entry_update(
-                bool(data.get(CONF_BLE_BOND_ESTABLISHED, False))
-            )
+            self._begin_internal_entry_update(bool(data.get(CONF_BLE_BOND_ESTABLISHED, False)))
             # Routes a paired child's write to the parent's per-side descriptor
             # rather than the shared entry (issue #329).
             self._async_persist_config(data)
@@ -1264,14 +1273,16 @@ class AdjustableBedCoordinator:
 
     def apply_confirmed_bond_removal(self) -> None:
         """Clear all runtime and persisted state for a confirmed bond removal."""
+        self._discard_bond_tracking()
+
+    def _discard_bond_tracking(self) -> None:
+        """Discard runtime and persisted bond bookkeeping without unpairing."""
         self._ble_bond_established = False
         self._ble_bond_marker_unreliable = False
         self._latched_pairing_successes = 0
-        # Every transient reason to not ask for pairing was a judgement about
-        # the bond that has just been removed. Leaving the one-shot skip set
-        # would spend the first connection after the removal on a deliberately
-        # unauthenticated attempt, which on a bed that grants one connection per
-        # pairing window is the whole window.
+        # Every transient pairing decision was tied to the bookkeeping being
+        # discarded. Keeping the one-shot skip would leak that decision into a
+        # later connection after either bond removal or a protocol reclassification.
         self._skip_pair_next_attempt = False
         data = dict(self.entry.data)
         data.pop(CONF_BLE_BOND_ESTABLISHED, None)
@@ -1282,6 +1293,13 @@ class AdjustableBedCoordinator:
             return
         self._begin_internal_entry_update(False)
         self._async_persist_config(data, keys=RUNTIME_BOND_KEYS)
+
+    async def async_clear_obsolete_pairing_state(self) -> None:
+        """Remove stale pairing state when this protocol no longer requires it."""
+        if requires_pairing(self._bed_type, self._protocol_variant):
+            return
+        self._discard_bond_tracking()
+        await delete_pairing_required_issue(self.hass, self._address)
 
     def _log_bond_marker_unreliable(self) -> None:
         """Log the latch transition. The write itself is batched by the caller."""
@@ -1329,9 +1347,7 @@ class AdjustableBedCoordinator:
             self._address,
             err,
         )
-        self._record_bond_verification(
-            "authentication_failed", err, attempt_details
-        )
+        self._record_bond_verification("authentication_failed", err, attempt_details)
         # Attribute the failure to a transport. A host bond and a proxy bond are
         # separate state, so evidence carried by one says nothing about the
         # other, and recovery must never act on the wrong one. Nothing
@@ -1423,9 +1439,7 @@ class AdjustableBedCoordinator:
         client = self._client
         if client is None:
             return False
-        advisory = grants_one_connection_per_pairing_window(
-            self._bed_type, self._protocol_variant
-        )
+        advisory = grants_one_connection_per_pairing_window(self._bed_type, self._protocol_variant)
         try:
             await client.pair()
         except (NotImplementedError, TypeError) as err:
@@ -1534,9 +1548,7 @@ class AdjustableBedCoordinator:
                 return False
             return self._ble_bond_established
 
-    async def _async_verify_bonded(
-        self, attempt_details: dict[str, Any] | None = None
-    ) -> bool:
+    async def _async_verify_bonded(self, attempt_details: dict[str, Any] | None = None) -> bool:
         """Probe an auth-gated characteristic to confirm the BLE bond is live.
 
         For beds that require pairing, a connection — even one made with
@@ -1553,9 +1565,7 @@ class AdjustableBedCoordinator:
         """
         client = self._client
         if client is None or not client.is_connected:
-            self._record_bond_verification(
-                "skipped_not_connected", attempt_details=attempt_details
-            )
+            self._record_bond_verification("skipped_not_connected", attempt_details=attempt_details)
             return True
 
         if self._bond_probe_timed_out:
@@ -1571,9 +1581,7 @@ class AdjustableBedCoordinator:
 
         probe_uuid = DEVICE_INFO_CHARS["model_number"]
         try:
-            await asyncio.wait_for(
-                client.read_gatt_char(probe_uuid), DEVICE_INFO_READ_TIMEOUT
-            )
+            await asyncio.wait_for(client.read_gatt_char(probe_uuid), DEVICE_INFO_READ_TIMEOUT)
         except BleakError as err:
             if _is_ble_authentication_error(err):
                 # We run inside _async_connect_locked, which holds self._lock —
@@ -1673,10 +1681,7 @@ class AdjustableBedCoordinator:
     def cancel_command(self) -> asyncio.Event:
         """Return the cancel command event."""
         context = current_command_context()
-        if (
-            context is not None
-            and context.scheduler_token is self._command_scheduler.token
-        ):
+        if context is not None and context.scheduler_token is self._command_scheduler.token:
             return context.cancel_event
         return self._cancel_command
 
@@ -1713,9 +1718,7 @@ class AdjustableBedCoordinator:
             "connection_gated_by_bond": connection_gated_by_bond(
                 self._bed_type, self._protocol_variant
             ),
-            "persisted_bond_marker": bool(
-                self.entry.data.get(CONF_BLE_BOND_ESTABLISHED, False)
-            ),
+            "persisted_bond_marker": bool(self.entry.data.get(CONF_BLE_BOND_ESTABLISHED, False)),
             "runtime_bond_established": self._ble_bond_established,
             "bond_marker_unreliable": self._ble_bond_marker_unreliable,
             "adapter_pairing_supported": self._pairing_supported,
@@ -1738,9 +1741,7 @@ class AdjustableBedCoordinator:
             "bond_owner": bond_owner_from_entry(self.entry.data).as_dict(),
             "bond_context": self.entry.data.get(CONF_BLE_BOND_CONTEXT),
             "last_bond_evidence": (
-                self._last_bond_evidence.as_dict()
-                if self._last_bond_evidence is not None
-                else None
+                self._last_bond_evidence.as_dict() if self._last_bond_evidence is not None else None
             ),
             "stale_host_bond_suspected": bool(
                 self._last_bond_evidence is not None
@@ -1785,8 +1786,7 @@ class AdjustableBedCoordinator:
             if self._last_notify_received
             else None,
             "position_seeks": {
-                position_key: dict(record)
-                for position_key, record in self._seek_outcomes.items()
+                position_key: dict(record) for position_key, record in self._seek_outcomes.items()
             },
             "scheduler": self._command_scheduler.diagnostics,
         }
@@ -1809,6 +1809,7 @@ class AdjustableBedCoordinator:
             name=self._name,
             manufacturer=self._get_manufacturer(),
             model=self._get_model(),
+            model_id=self._get_model_id(),
         )
 
     def _get_manufacturer(self) -> str:
@@ -1856,6 +1857,24 @@ class AdjustableBedCoordinator:
         if self._is_useful_ble_value(self._ble_model):
             return self._ble_model  # type: ignore[return-value]
         return f"Adjustable Bed ({self._motor_count} motors)"
+
+    def _get_model_id(self) -> str | None:
+        """Return the resolved protocol model as device metadata when available."""
+        if self._bed_type != BED_TYPE_LINAK:
+            return None
+
+        raw_variant = self._controller_state.get("linak_model_variant")
+        if not isinstance(raw_variant, str) or raw_variant == "unknown":
+            return None
+
+        labels = {
+            "standard": "Standard",
+            "td3": "TD3",
+            "advanced": "Advanced",
+            "advanced_with_alarm": "Advanced with alarm",
+            "performance_legacy": "Performance legacy",
+        }
+        return labels.get(raw_variant, raw_variant.replace("_", " ").title())
 
     def _is_useful_ble_value(self, value: str | None) -> bool:
         """Check if a BLE value is useful (not generic/unhelpful).
@@ -1939,9 +1958,7 @@ class AdjustableBedCoordinator:
         # model-less bed re-reads cheaply (an absent characteristic errors fast,
         # only a transient timeout costs the read budget, which is what we want
         # to retry).
-        required_fields_present = (
-            not self._bed_type_needs_ble_model() or model_useful
-        )
+        required_fields_present = not self._bed_type_needs_ble_model() or model_useful
 
         read_succeeded = has_useful_value and required_fields_present
         profile_retry_exhausted = (
@@ -1990,10 +2007,7 @@ class AdjustableBedCoordinator:
     ) -> None:
         """Record an integration-issued write for support bundles."""
         context = current_command_context()
-        if (
-            context is not None
-            and context.scheduler_token is not self._command_scheduler.token
-        ):
+        if context is not None and context.scheduler_token is not self._command_scheduler.token:
             context = None
         self._command_trace.append(
             {
@@ -2118,14 +2132,8 @@ class AdjustableBedCoordinator:
         bed_requires_pairing = requires_pairing(self._bed_type, self._protocol_variant)
         bond_marker_before_attempt = self._ble_bond_established
         transient_skip_was_set = self._skip_pair_next_attempt
-        os_bond_reported = (
-            bed_requires_pairing and self._device_reports_existing_bond(device)
-        )
-        if (
-            bed_requires_pairing
-            and not self._ble_bond_established
-            and os_bond_reported
-        ):
+        os_bond_reported = bed_requires_pairing and self._device_reports_existing_bond(device)
+        if bed_requires_pairing and not self._ble_bond_established and os_bond_reported:
             _LOGGER.info(
                 "Existing BLE bond detected for %s; skipping pair=True",
                 self._address,
@@ -2162,9 +2170,7 @@ class AdjustableBedCoordinator:
         pairing_ordering = "not_requested"
         if use_pairing:
             pairing_ordering = (
-                "connect_discover_then_pair"
-                if pair_after_service_discovery
-                else "backend_default"
+                "connect_discover_then_pair" if pair_after_service_discovery else "backend_default"
             )
         if not bed_requires_pairing:
             pairing_decision = "not_required"
@@ -2243,16 +2249,16 @@ class AdjustableBedCoordinator:
             self._controller = None
             self._intentional_disconnect = False
 
-    async def _async_connect_locked(self, reset_timer: bool = True) -> bool:
+    async def _async_connect_locked(  # pyright: ignore[reportGeneralTypeIssues]
+        self, reset_timer: bool = True
+    ) -> bool:
         """Connect to the bed (must hold lock)."""
         # Clear any prior manual/idle disconnect marker before a fresh connect attempt.
         self._intentional_disconnect = False
 
         if self._client is not None and self._client.is_connected:
             if self._controller is not None:
-                _LOGGER.debug(
-                    "Already connected to %s, reusing connection", self._address
-                )
+                _LOGGER.debug("Already connected to %s, reusing connection", self._address)
                 if reset_timer:
                     self._reset_disconnect_timer()
                 return True
@@ -2573,9 +2579,7 @@ class AdjustableBedCoordinator:
                     # connect timeouts.
                     if close_stale_connections_by_address is not None:
                         try:
-                            close_result = close_stale_connections_by_address(
-                                self._address
-                            )
+                            close_result = close_stale_connections_by_address(self._address)
                             if inspect.isawaitable(close_result):
                                 await close_result
                         except (OSError, BleakError) as err:
@@ -2630,9 +2634,7 @@ class AdjustableBedCoordinator:
                                 "creating the BLE bond now",
                                 self._address,
                             )
-                            bond_created = await self._async_pair_on_live_link(
-                                pairing_details
-                            )
+                            bond_created = await self._async_pair_on_live_link(pairing_details)
                         # If we get here with pairing enabled, mark it as supported
                         if use_pairing and bond_created:
                             self._pairing_supported = True
@@ -3000,6 +3002,20 @@ class AdjustableBedCoordinator:
                         sorted(manufacturer_data),
                     )
 
+                stored_capabilities = self.entry.data.get("capabilities")
+                stored_capability_snapshot: Mapping[str, Any] | None = None
+                if isinstance(stored_capabilities, dict):
+                    namespace = (
+                        "octo"
+                        if self._bed_type == BED_TYPE_OCTO
+                        else "linak"
+                        if self._bed_type == BED_TYPE_LINAK
+                        else None
+                    )
+                    candidate = stored_capabilities.get(namespace) if namespace else None
+                    if isinstance(candidate, Mapping):
+                        stored_capability_snapshot = candidate
+
                 # Create the controller
                 _LOGGER.debug("Creating %s controller...", self._bed_type)
                 self._controller = await create_controller(
@@ -3015,7 +3031,11 @@ class AdjustableBedCoordinator:
                     ble_manufacturer=ble_manufacturer,
                     ble_model=ble_model,
                     manufacturer_data=manufacturer_data,
+                    capability_snapshot=stored_capability_snapshot,
                 )
+                discovery_result = cast(Any, self._controller).async_discover_capabilities()
+                if inspect.isawaitable(discovery_result):
+                    await discovery_result
                 self._controller_state_refresh_retry_count = 0
                 self._controller_state_refresh_completed = False
                 # Position values retained across disconnects are last-known
@@ -3056,12 +3076,18 @@ class AdjustableBedCoordinator:
                     # Reset Limoss normalization state on each connection.
                     cast(Any, self._controller).reset_max_raw_estimate()
 
-                self._refresh_passive_position_reconciliation_schedule()
-
                 # Start position notifications (no-op if angle sensing disabled).
                 # Sleep Number MCR performs its notify+init startup earlier.
                 if self._bed_type != BED_TYPE_SLEEP_NUMBER_MCR:
                     await self.async_start_notify()
+
+                # Notification startup may finish deferred capability discovery
+                # after the BLE authentication window, so schedule from the final
+                # resolved controller state.
+                self._refresh_passive_position_reconciliation_schedule()
+
+                if self._bed_type == BED_TYPE_LINAK:
+                    self._backfill_linak_snapshot()
 
                 # For Octo beds: discover features and handle PIN if needed
                 if self._bed_type == BED_TYPE_OCTO:
@@ -3160,6 +3186,8 @@ class AdjustableBedCoordinator:
                 # instead of staying "unknown" until the user moves it.
                 self._schedule_position_hydration()
 
+                await self.async_clear_obsolete_pairing_state()
+
                 return True
 
             except (BleakError, TimeoutError, OSError) as err:
@@ -3173,9 +3201,7 @@ class AdjustableBedCoordinator:
                     # and abort the remaining retries. CancelledError is a
                     # BaseException, so cancellation still propagates.
                     try:
-                        await self._async_handle_ble_authentication_error(
-                            err, holding_lock=True
-                        )
+                        await self._async_handle_ble_authentication_error(err, holding_lock=True)
                     except Exception:
                         _LOGGER.debug(
                             "Authentication recovery cleanup failed for %s",
@@ -3467,9 +3493,7 @@ class AdjustableBedCoordinator:
             return
 
         if self._position_hydration_running:
-            _LOGGER.debug(
-                "Initial position read already running for %s - skipping", self._address
-            )
+            _LOGGER.debug("Initial position read already running for %s - skipping", self._address)
             return
 
         self._position_hydration_running = True
@@ -3488,9 +3512,7 @@ class AdjustableBedCoordinator:
                 _LOGGER.debug("Reading initial positions for %s", self._address)
                 try:
                     async with asyncio.timeout(_INITIAL_POSITION_READ_TOTAL_TIMEOUT):
-                        for attempt in range(
-                            1, _INITIAL_POSITION_READ_MAX_ATTEMPTS + 1
-                        ):
+                        for attempt in range(1, _INITIAL_POSITION_READ_MAX_ATTEMPTS + 1):
                             # A command that established this connection may
                             # have refreshed every axis while hydration waited
                             # for the command lock, or deliberately released
@@ -3499,10 +3521,7 @@ class AdjustableBedCoordinator:
                             if (
                                 self._client is None
                                 or not self._client.is_connected
-                                or all(
-                                    self._position_is_current(axis)
-                                    for axis in expected_axes
-                                )
+                                or all(self._position_is_current(axis) for axis in expected_axes)
                             ):
                                 return
 
@@ -3512,8 +3531,7 @@ class AdjustableBedCoordinator:
                                     and self._client is not None
                                     and self._client.is_connected
                                     and not all(
-                                        self._position_is_current(axis)
-                                        for axis in expected_axes
+                                        self._position_is_current(axis) for axis in expected_axes
                                     )
                                 )
 
@@ -3528,9 +3546,7 @@ class AdjustableBedCoordinator:
                                 await self._async_read_positions()
 
                             try:
-                                async with asyncio.timeout(
-                                    _INITIAL_POSITION_READ_TIMEOUT
-                                ):
+                                async with asyncio.timeout(_INITIAL_POSITION_READ_TIMEOUT):
                                     await self.async_execute_controller_query(
                                         _read_initial_positions,
                                         skip_disconnect=True,
@@ -3564,18 +3580,13 @@ class AdjustableBedCoordinator:
                             # (or a notification that landed meanwhile) may
                             # already be enough.
                             received_axes = {
-                                axis
-                                for axis in expected_axes
-                                if self._position_is_current(axis)
+                                axis for axis in expected_axes if self._position_is_current(axis)
                             }
                             if received_axes >= expected_axes:
                                 _LOGGER.info(
                                     "Initial positions read for %s: %s",
                                     self._address,
-                                    {
-                                        k: f"{v}°"
-                                        for k, v in self._position_data.items()
-                                    },
+                                    {k: f"{v}°" for k, v in self._position_data.items()},
                                 )
                                 return
 
@@ -3632,9 +3643,7 @@ class AdjustableBedCoordinator:
             return
 
         expected_axes = self._expected_initial_position_axes()
-        if not expected_axes or all(
-            self._position_is_current(axis) for axis in expected_axes
-        ):
+        if not expected_axes or all(self._position_is_current(axis) for axis in expected_axes):
             return
 
         task = self._position_hydration_task
@@ -3664,10 +3673,7 @@ class AdjustableBedCoordinator:
         # establishing a BLE generation. Production connections start at one.
         if self._position_connection_generation == 0:
             return True
-        return (
-            self._position_data_generation.get(position)
-            == self._position_connection_generation
-        )
+        return self._position_data_generation.get(position) == self._position_connection_generation
 
     async def _async_cancel_position_hydration(self) -> None:
         """Cancel and await the active position hydration task."""
@@ -3833,9 +3839,7 @@ class AdjustableBedCoordinator:
             # queues on self._lock and then tears the link down in the same tick
             # that the command which triggered the reconnect issues its first
             # GATT write, so the command fails (issue #368).
-            disconnect_epoch = self._command_scheduler.request_stop(
-                ALL_COMMAND_RESOURCES
-            )
+            disconnect_epoch = self._command_scheduler.request_stop(ALL_COMMAND_RESOURCES)
             try:
                 async with self._command_lock, self._lock:
                     return await self._async_disconnect_locked(reason)
@@ -3885,9 +3889,7 @@ class AdjustableBedCoordinator:
         ):
             client = self._client
             try:
-                released = await self._async_disconnect_locked(
-                    f"transport_operation_{operation}"
-                )
+                released = await self._async_disconnect_locked(f"transport_operation_{operation}")
             except Exception:
                 # Only BleakError is handled as a failed teardown; anything else
                 # unwinds before the fallback below can run, and the caller is
@@ -3995,9 +3997,7 @@ class AdjustableBedCoordinator:
             # could create two physical links.
             if disconnect_failed and client.is_connected:
                 self._client = client
-                _LOGGER.warning(
-                    "Disconnect from %s did not release the BLE link", self._address
-                )
+                _LOGGER.warning("Disconnect from %s did not release the BLE link", self._address)
                 return False
             self._client = None
             self._controller = None
@@ -4241,9 +4241,7 @@ class AdjustableBedCoordinator:
         async def stop_operation(_context: CommandContext) -> None:
             await self._async_send_stop_command()
 
-        stop_task = self._command_scheduler.admit_stop(
-            stop_operation, ALL_COMMAND_RESOURCES
-        )
+        stop_task = self._command_scheduler.admit_stop(stop_operation, ALL_COMMAND_RESOURCES)
 
         try:
             await asyncio.shield(stop_task)
@@ -4327,6 +4325,13 @@ class AdjustableBedCoordinator:
         operation_name: str,
     ) -> None:
         """Handle disconnect timer reset or disconnect after an operation completes."""
+        if self._bed_type == BED_TYPE_LINAK and not self._command_scheduler.has_pending:
+            # A cold Linak link can defer its actuator mask and timer channel
+            # until the first command. Persist the now-resolved snapshot after
+            # that command so the entry reload reconciles its capability-gated
+            # entities without interrupting a queued operation.
+            self._backfill_linak_snapshot()
+
         if self._client is None or not self._client.is_connected:
             return
 
@@ -4434,9 +4439,7 @@ class AdjustableBedCoordinator:
             and command_context.scheduler_token is self._command_scheduler.token
         )
         legacy_exclusive = bool(
-            scheduler_managed
-            and command_context is not None
-            and "*" in command_context.resources
+            scheduler_managed and command_context is not None and "*" in command_context.resources
         )
         cancel_event = self.cancel_command
 
@@ -4516,12 +4519,8 @@ class AdjustableBedCoordinator:
                     and not self._disable_angle_sensing
                     and not cancel_event.is_set()
                 ):
-                    if (
-                        self._position_mode == POSITION_MODE_ACCURACY
-                        or (
-                            self._disconnect_after_operation_enabled()
-                            and not skip_disconnect
-                        )
+                    if self._position_mode == POSITION_MODE_ACCURACY or (
+                        self._disconnect_after_operation_enabled() and not skip_disconnect
                     ):
                         await self._async_read_positions()
                     else:
@@ -4539,9 +4538,7 @@ class AdjustableBedCoordinator:
                     # Dropping it would spend the single connection a
                     # one-connection-per-window bed grants, and the repair could
                     # not reconnect until the user power-cycled the bed.
-                    await self._async_handle_ble_authentication_error(
-                        err, retain_link=True
-                    )
+                    await self._async_handle_ble_authentication_error(err, retain_link=True)
                 raise
             except _CONTROLLER_OPERATION_RECOVERY_EXCEPTIONS:
                 if (
@@ -4612,10 +4609,7 @@ class AdjustableBedCoordinator:
     ) -> None:
         """Schedule an operation, or run inline inside this scheduler's reservation."""
         context = current_command_context()
-        if (
-            context is not None
-            and context.scheduler_token is self._command_scheduler.token
-        ):
+        if context is not None and context.scheduler_token is self._command_scheduler.token:
             previous_pulse_count = context.pulse_count
             previous_pulse_delay_ms = context.pulse_delay_ms
             if pulse_count is not None:
@@ -4747,10 +4741,7 @@ class AdjustableBedCoordinator:
                         context.defer_disconnect = previous_defer_disconnect
 
         context = current_command_context()
-        if (
-            context is not None
-            and context.scheduler_token is self._command_scheduler.token
-        ):
+        if context is not None and context.scheduler_token is self._command_scheduler.token:
             await group_operation()
             return
 
@@ -4941,6 +4932,7 @@ class AdjustableBedCoordinator:
         _LOGGER.debug("Position update: %s = %.1f°", position, angle)
         self._position_data[position] = angle
         self._position_data_generation[position] = self._position_connection_generation
+        self._position_data_updated_monotonic[position] = time.monotonic()
         # Track notification timing for diagnostics (issue #168)
         self._last_notify_received = datetime.now(UTC)
         # Copy to safely iterate while callbacks might unregister themselves
@@ -5468,6 +5460,15 @@ class AdjustableBedCoordinator:
                         await move_down_fn(controller)
 
                 async def read_position() -> float | None:
+                    if policy.prefers_cached_position_feedback:
+                        updated_at = self._position_data_updated_monotonic.get(position_key)
+                        if (
+                            updated_at is not None
+                            and self._position_is_current(position_key)
+                            and time.monotonic() - updated_at
+                            <= policy.cached_position_feedback_max_age
+                        ):
+                            return self._position_data.get(position_key)
                     await self._async_read_positions()
                     return self._position_data.get(position_key)
 
@@ -5489,6 +5490,11 @@ class AdjustableBedCoordinator:
                 self._record_seek_result(result)
 
             finally:
+                if self._bed_type == BED_TYPE_LINAK and not self._command_scheduler.has_pending:
+                    # Seeks own their lock lifecycle instead of going through
+                    # _async_finish_controller_operation(), so reconcile a
+                    # deferred Linak snapshot here as well.
+                    self._backfill_linak_snapshot()
                 if self._client is not None and self._client.is_connected:
                     if (
                         self._disconnect_after_operation_enabled()

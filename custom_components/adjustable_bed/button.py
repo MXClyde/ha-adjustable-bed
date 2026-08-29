@@ -297,7 +297,61 @@ BUTTON_DESCRIPTIONS: tuple[AdjustableBedButtonEntityDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         is_coordinator_action=True,
     ),
+    AdjustableBedButtonEntityDescription(
+        key="wake_controller",
+        translation_key="wake_controller",
+        icon="mdi:power",
+        entity_category=EntityCategory.CONFIG,
+        press_fn=lambda ctrl: ctrl.wake(),
+        required_capability="supports_wake_control",
+    ),
+    AdjustableBedButtonEntityDescription(
+        key="reset_defaults",
+        translation_key="reset_defaults",
+        icon="mdi:restore",
+        entity_category=EntityCategory.CONFIG,
+        cancel_movement=True,
+        press_fn=lambda ctrl: ctrl.reset_defaults(),
+        required_capability="supports_reset_defaults",
+    ),
+    AdjustableBedButtonEntityDescription(
+        key="factory_reset",
+        translation_key="factory_reset",
+        icon="mdi:alert-octagon-outline",
+        entity_category=EntityCategory.CONFIG,
+        entity_registry_enabled_default=False,
+        cancel_movement=True,
+        press_fn=lambda ctrl: ctrl.factory_reset(),
+        required_capability="supports_factory_reset",
+    ),
     # Massage buttons (only if has_massage)
+    AdjustableBedButtonEntityDescription(
+        key="massage_impulse_toggle",
+        translation_key="massage_impulse_toggle",
+        icon="mdi:pulse",
+        requires_massage=True,
+        cancel_movement=True,
+        press_fn=lambda ctrl: ctrl.impulse_toggle(),
+        required_capability="supports_impulse_control",
+    ),
+    AdjustableBedButtonEntityDescription(
+        key="massage_wave_frequency_up",
+        translation_key="massage_wave_frequency_up",
+        icon="mdi:waveform",
+        requires_massage=True,
+        cancel_movement=True,
+        press_fn=lambda ctrl: ctrl.massage_wave_frequency_up(),
+        required_capability="supports_massage_wave_frequency_control",
+    ),
+    AdjustableBedButtonEntityDescription(
+        key="massage_wave_frequency_down",
+        translation_key="massage_wave_frequency_down",
+        icon="mdi:waveform",
+        requires_massage=True,
+        cancel_movement=True,
+        press_fn=lambda ctrl: ctrl.massage_wave_frequency_down(),
+        required_capability="supports_massage_wave_frequency_control",
+    ),
     AdjustableBedButtonEntityDescription(
         key="massage_all_off",
         translation_key="massage_all_off",
@@ -609,9 +663,7 @@ async def async_setup_entry(
     if isinstance(coordinator, PairedBedCoordinator):
         entities: list[ButtonEntity] = []
         children = list(coordinator.children.values())
-        _async_migrate_massage_intensity_button_unique_ids(
-            hass, coordinator, key_suffix="_both"
-        )
+        _async_migrate_massage_intensity_button_unique_ids(hass, coordinator, key_suffix="_both")
         for side, child in coordinator.children.items():
             entities.extend(
                 _button_entities_for(
@@ -626,6 +678,7 @@ async def async_setup_entry(
         # Combined buttons read both children's live capabilities, so pass the
         # raw children (the button itself dispatches via the parent, side=both).
         entities.extend(_combined_button_entities_for(coordinator, children))
+        _async_remove_stale_combined_button_entities(hass, coordinator, children, entities)
         async_add_entities(entities)
         return
 
@@ -636,13 +689,11 @@ def _button_entities_for(
     hass: HomeAssistant, coordinator: AdjustableBedCoordinator
 ) -> list[ButtonEntity]:
     """Build button entities for a single (child or standalone) coordinator."""
-    has_massage = coordinator.has_massage
     # capability_controller: an offline paired side still gets its buttons built
     # from a client-free controller minted from config (see coordinator); stale
     # cleanup below runs against it too (only when non-None).
     controller = coordinator.capability_controller
-    if controller is not None and controller.auto_enable_massage:
-        has_massage = True
+    has_massage = _massage_entities_enabled(coordinator, controller)
 
     if controller is not None:
         _async_migrate_massage_intensity_button_unique_ids(hass, coordinator)
@@ -688,7 +739,11 @@ def _combined_button_entities_for(
             # {pair_id}_stop_both unique_id); don't also build a generic one.
             continue
         if not all(
-            _should_add_button(description, child.capability_controller, child.has_massage)
+            _should_add_button(
+                description,
+                child.capability_controller,
+                _massage_entities_enabled(child, child.capability_controller),
+            )
             for child in eligible
         ):
             continue
@@ -699,6 +754,14 @@ def _combined_button_entities_for(
     # "both sides" up/down motion buttons from the cover descriptors.
     entities.extend(_combined_motor_buttons_for(coordinator, eligible))
     return entities
+
+
+def _massage_entities_enabled(
+    coordinator: AdjustableBedCoordinator,
+    controller: BedController | None,
+) -> bool:
+    """Return the effective configured or protocol-declared massage capability."""
+    return coordinator.has_massage or bool(controller and controller.auto_enable_massage)
 
 
 def _combined_motor_buttons_for(
@@ -788,10 +851,7 @@ def _should_add_button(
         return False
 
     if description.key == "toggle_light" and controller is not None:
-        if (
-            controller.supports_discrete_light_control
-            or controller.supports_light_color_control
-        ):
+        if controller.supports_discrete_light_control or controller.supports_light_color_control:
             return False
 
     if description.required_capability is not None:
@@ -855,6 +915,31 @@ def _async_remove_stale_button_entities(
         )
         if entity_id is not None:
             registry.async_remove(entity_id)
+
+
+def _async_remove_stale_combined_button_entities(
+    hass: HomeAssistant,
+    coordinator: PairedBedCoordinator,
+    children: list[AdjustableBedCoordinator],
+    entities: list[ButtonEntity],
+) -> None:
+    """Remove pair-level controls no longer supported by both known sides."""
+    if any(child.capability_controller is None for child in children):
+        return
+
+    desired_unique_ids = {
+        unique_id
+        for entity in entities
+        if (unique_id := entity.unique_id) is not None and unique_id.endswith("_both")
+    }
+    registry = er.async_get(hass)
+    for row in list(er.async_entries_for_config_entry(registry, coordinator.entry.entry_id)):
+        if (
+            row.domain == "button"
+            and row.unique_id.endswith("_both")
+            and row.unique_id not in desired_unique_ids
+        ):
+            registry.async_remove(row.entity_id)
 
 
 def _discovered_memory_slot_name(
@@ -1017,19 +1102,14 @@ class PairedBedCombinedButton(ButtonEntity):
         self.entity_description = description
         base_translation_key = _button_translation_key(
             description,
-            (
-                child.capability_controller
-                for child in coordinator.children.values()
-            ),
+            (child.capability_controller for child in coordinator.children.values()),
         )
         self._attr_translation_key = (
             f"{base_translation_key}_both"
             if isinstance(coordinator, SingleAddressPairedCoordinator)
             else base_translation_key
         )
-        self._attr_unique_id = _paired_entity_unique_id(
-            coordinator, f"{description.key}_both"
-        )
+        self._attr_unique_id = _paired_entity_unique_id(coordinator, f"{description.key}_both")
         self._attr_device_info = coordinator.device_info
         if isinstance(coordinator, SingleAddressPairedCoordinator):
             self._attr_extra_state_attributes = {"bed_side": SIDE_BOTH}
@@ -1090,9 +1170,7 @@ class PairedBedCombinedMotorButton(ButtonEntity):
             if isinstance(coordinator, SingleAddressPairedCoordinator)
             else base_translation_key
         )
-        self._attr_unique_id = _paired_entity_unique_id(
-            coordinator, f"{spec.key}_{direction}_both"
-        )
+        self._attr_unique_id = _paired_entity_unique_id(coordinator, f"{spec.key}_{direction}_both")
         self._attr_device_info = coordinator.device_info
         if isinstance(coordinator, SingleAddressPairedCoordinator):
             self._attr_extra_state_attributes = {"bed_side": SIDE_BOTH}

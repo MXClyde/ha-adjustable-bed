@@ -657,6 +657,24 @@
       "control_mode_press_and_release": {
         "name": "Use Press-and-Release Controls"
       },
+      "wake_controller": {
+        "name": "Wake Controller"
+      },
+      "reset_defaults": {
+        "name": "Reset Defaults"
+      },
+      "factory_reset": {
+        "name": "Factory Reset"
+      },
+      "massage_impulse_toggle": {
+        "name": "Massage: Impulse"
+      },
+      "massage_wave_frequency_up": {
+        "name": "Massage: Wave Frequency Up"
+      },
+      "massage_wave_frequency_down": {
+        "name": "Massage: Wave Frequency Down"
+      },
       "massage_all_off": {
         "name": "Massage: Off"
       },
@@ -1218,6 +1236,60 @@
       "connect_both": {
         "name": "Both sides: Connect"
       },
+      "wake_controller_left": {
+        "name": "Left: Wake Controller"
+      },
+      "wake_controller_right": {
+        "name": "Right: Wake Controller"
+      },
+      "wake_controller_both": {
+        "name": "Both sides: Wake Controller"
+      },
+      "reset_defaults_left": {
+        "name": "Left: Reset Defaults"
+      },
+      "reset_defaults_right": {
+        "name": "Right: Reset Defaults"
+      },
+      "reset_defaults_both": {
+        "name": "Both sides: Reset Defaults"
+      },
+      "factory_reset_left": {
+        "name": "Left: Factory Reset"
+      },
+      "factory_reset_right": {
+        "name": "Right: Factory Reset"
+      },
+      "factory_reset_both": {
+        "name": "Both sides: Factory Reset"
+      },
+      "massage_impulse_toggle_left": {
+        "name": "Left: Massage: Impulse"
+      },
+      "massage_impulse_toggle_right": {
+        "name": "Right: Massage: Impulse"
+      },
+      "massage_impulse_toggle_both": {
+        "name": "Both sides: Massage: Impulse"
+      },
+      "massage_wave_frequency_up_left": {
+        "name": "Left: Massage: Wave Frequency Up"
+      },
+      "massage_wave_frequency_up_right": {
+        "name": "Right: Massage: Wave Frequency Up"
+      },
+      "massage_wave_frequency_up_both": {
+        "name": "Both sides: Massage: Wave Frequency Up"
+      },
+      "massage_wave_frequency_down_left": {
+        "name": "Left: Massage: Wave Frequency Down"
+      },
+      "massage_wave_frequency_down_right": {
+        "name": "Right: Massage: Wave Frequency Down"
+      },
+      "massage_wave_frequency_down_both": {
+        "name": "Both sides: Massage: Wave Frequency Down"
+      },
       "head_up_left": {
         "name": "Left: Head Up"
       },
@@ -1552,6 +1624,27 @@
       "massage_timer_mode": {
         "name": "Massage: Timer Mode"
       },
+      "linak_protocol_error": {
+        "name": "Protocol Error"
+      },
+      "linak_base_reported_speed": {
+        "name": "Base Reported Speed"
+      },
+      "linak_feet_reported_speed": {
+        "name": "Feet Reported Speed"
+      },
+      "linak_head_reported_speed": {
+        "name": "Head Reported Speed"
+      },
+      "linak_legs_reported_speed": {
+        "name": "Legs Reported Speed"
+      },
+      "linak_back_reported_speed": {
+        "name": "Back Reported Speed"
+      },
+      "linak_alarm_status": {
+        "name": "Alarm Status"
+      },
       "head_angle_left": {
         "name": "Left: Head Angle"
       },
@@ -1637,6 +1730,9 @@
       "synchro_mode": {
         "name": "Synchro Mode"
       },
+      "linak_automatic_drive": {
+        "name": "Automatic Drive"
+      },
       "under_bed_lights_left": {
         "name": "Left: Under Bed Lights"
       },
@@ -1654,6 +1750,15 @@
       },
       "synchro_mode_both": {
         "name": "Both sides: Synchro Mode"
+      },
+      "linak_automatic_drive_left": {
+        "name": "Left: Automatic Drive"
+      },
+      "linak_automatic_drive_right": {
+        "name": "Right: Automatic Drive"
+      },
+      "linak_automatic_drive_both": {
+        "name": "Both sides: Automatic Drive"
       }
     },
     "binary_sensor": {
@@ -1662,6 +1767,9 @@
       },
       "bed_presence": {
         "name": "Bed Presence"
+      },
+      "linak_position_feedback_fault": {
+        "name": "Position Feedback Fault"
       },
       "bed_presence_left": {
         "name": "Left Bed Presence"
