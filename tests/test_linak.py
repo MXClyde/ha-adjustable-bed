@@ -282,7 +282,7 @@ class TestLinakController:
         assert coordinator.controller.position_seek_check_interval == pytest.approx(0.2)
         assert coordinator.controller.position_seek_stall_threshold == pytest.approx(0.2)
 
-    async def test_lower_endpoint_requires_two_stalled_checks_and_skips_cleanup_stop(
+    async def test_lower_endpoint_requires_two_stalled_checks_and_releases_motor(
         self,
         hass: HomeAssistant,
         mock_config_entry,
@@ -303,7 +303,7 @@ class TestLinakController:
         assert result.outcome is SeekOutcome.ENDPOINT_REACHED
         assert result.final_angle == pytest.approx(1.1)
         assert issue_step.await_args_list == [call(False, 1.1), call(False, 1.1)]
-        stop.assert_not_awaited()
+        stop.assert_awaited_once_with()
 
     async def test_movement_to_lower_endpoint_has_one_endpoint_retry(
         self,
@@ -423,6 +423,7 @@ class TestLinakController:
         assert _written_commands(mock_bleak_client) == [
             LinakCommands.MOVE_BACK_DOWN,
             LinakCommands.MOVE_BACK_DOWN,
+            LinakCommands.MOVE_STOP,
         ]
 
     async def test_stop_during_endpoint_read_prevents_retry_before_stop(
@@ -468,6 +469,7 @@ class TestLinakController:
 
         assert _written_commands(mock_bleak_client) == [
             LinakCommands.MOVE_BACK_DOWN,
+            LinakCommands.MOVE_STOP,
             LinakCommands.MOVE_STOP,
         ]
         assert coordinator._seek_outcomes["back"]["outcome"] == "cancelled"
@@ -595,6 +597,18 @@ class TestLinakMovement:
 
         assert coordinator.controller.allow_position_polling_during_commands is False
 
+    async def test_linak_uses_explicit_stop_release(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ) -> None:
+        """Linak's proven release frame must not be treated as idle-only stop."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+
+        assert coordinator.controller.auto_stops_on_idle is False
+
     async def test_move_head_up(
         self,
         hass: HomeAssistant,
@@ -602,14 +616,17 @@ class TestLinakMovement:
         mock_coordinator_connected,
         mock_bleak_client: MagicMock,
     ):
-        """Test move head up sends repeated commands (Linak auto-stops when commands stop)."""
+        """Test move head up sends a repeated burst followed by STOP."""
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         await coordinator.async_connect()
         _mark_session_ready(coordinator)
 
         await coordinator.controller.move_head_up()
 
-        _assert_repeated_command(mock_bleak_client, LinakCommands.MOVE_HEAD_UP, 15)
+        assert _written_commands(mock_bleak_client) == [
+            *([LinakCommands.MOVE_HEAD_UP] * coordinator.motor_pulse_count),
+            LinakCommands.MOVE_STOP,
+        ]
 
     async def test_move_legs_down(
         self,
@@ -618,14 +635,43 @@ class TestLinakMovement:
         mock_coordinator_connected,
         mock_bleak_client: MagicMock,
     ):
-        """Test move legs down sends repeated commands (Linak auto-stops when commands stop)."""
+        """Test move legs down sends a repeated burst followed by STOP."""
         coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
         await coordinator.async_connect()
         _mark_session_ready(coordinator)
 
         await coordinator.controller.move_legs_down()
 
-        _assert_repeated_command(mock_bleak_client, LinakCommands.MOVE_LEGS_DOWN, 15)
+        assert _written_commands(mock_bleak_client) == [
+            *([LinakCommands.MOVE_LEGS_DOWN] * coordinator.motor_pulse_count),
+            LinakCommands.MOVE_STOP,
+        ]
+
+    async def test_move_cleanup_releases_after_failed_movement_write(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ) -> None:
+        """A failed movement burst must still attempt the Linak release frame."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        write_command = AsyncMock(side_effect=[BleakError("movement failed"), None])
+
+        with (
+            patch.object(coordinator.controller, "write_command", new=write_command),
+            pytest.raises(BleakError, match="movement failed"),
+        ):
+            await coordinator.controller.move_head_up()
+
+        assert write_command.await_count == 2
+        assert write_command.await_args_list[0] == call(
+            LinakCommands.MOVE_HEAD_UP,
+            repeat_count=coordinator.motor_pulse_count,
+            repeat_delay_ms=coordinator.motor_pulse_delay_ms,
+        )
+        assert write_command.await_args_list[1].args == (LinakCommands.MOVE_STOP,)
+        assert isinstance(write_command.await_args_list[1].kwargs["cancel_event"], asyncio.Event)
 
     async def test_stop_all(
         self,

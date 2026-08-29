@@ -170,8 +170,8 @@ class PositionSeekPolicy:
     def sends_explicit_stop(self) -> bool:
         """Return True if this protocol needs explicit STOP writes.
 
-        Auto-stopping motors (e.g. Linak) skip explicit STOP because it can
-        cause brief reverse movement.
+        Protocols proven to stop solely when held-command refresh ends can
+        opt out through ``auto_stops_on_idle``.
         """
         return not self._controller.auto_stops_on_idle
 
@@ -231,8 +231,7 @@ class PositionSeekPolicy:
         stop: Callable[[], Awaitable[None]],
     ) -> None:
         """Transition the axis before reversing direction after overshoot."""
-        # Only send explicit stop for controllers that don't auto-stop
-        # (Linak auto-stops and explicit STOP can cause reverse blips)
+        # Only send explicit stop for controllers that define a release frame.
         if self.sends_explicit_stop:
             await stop()
             await asyncio.sleep(SEEK_REVERSAL_SETTLE_DELAY)
@@ -502,9 +501,8 @@ class PositionSeekRunner:
 
                 last_angle = current_angle
         finally:
-            # Stop the motor unless it auto-stops on idle
-            # Some controllers (e.g., Linak) auto-stop and sending explicit
-            # STOP can cause brief reverse movement.
+            # Stop the motor unless this protocol ends motion solely by
+            # ending its held-command refresh.
             if policy.sends_explicit_stop:
                 try:
                     await self._stop()

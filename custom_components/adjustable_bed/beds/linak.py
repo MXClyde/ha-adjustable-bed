@@ -220,13 +220,13 @@ class LinakController(BedController):
 
     @property
     def auto_stops_on_idle(self) -> bool:
-        """Return True - Linak motors auto-stop when commands stop arriving.
+        """Return False because current Linak apps send an explicit release.
 
-        Linak beds auto-stop within 200-500ms when commands stop. Sending an
-        explicit STOP command (0x00) can cause a brief reverse movement.
-        See: https://github.com/kristofferR/ha-adjustable-bed/issues/45
+        The reverse movement reported in issue #45 came from sending 0x00,
+        which is the all-down command. The protocol's STOP/release frame is
+        0xFF 0x00.
         """
-        return True
+        return False
 
     @property
     def reverses_position_seek_on_overshoot(self) -> bool:
@@ -925,18 +925,12 @@ class LinakController(BedController):
 
     # Motor control methods
     # Linak protocol requires continuous command sending to keep motors moving.
-    # Using 15 repeats @ 100ms = ~1.5 seconds of movement per press.
-    # Motors auto-stop when commands stop arriving - no explicit STOP needed.
+    # The default per-entry settings use 15 repeats @ 100ms, or about 1.5
+    # seconds of movement, followed by _send_stop() from the base helper.
 
-    async def _move_with_stop(self, command: bytes) -> None:
-        """Execute a movement command.
-
-        Linak beds auto-stop when commands stop arriving (typically within 200-500ms).
-        We do NOT send an explicit STOP command because it can cause a brief reverse
-        movement due to how the motor controller interprets the 0x00 command.
-        See: https://github.com/kristofferR/ha-adjustable-bed/issues/45
-        """
-        await self.write_command(command, repeat_count=15, repeat_delay_ms=100)
+    async def _send_stop(self) -> None:
+        """Send Linak's explicit STOP/release frame."""
+        await self.write_command(LinakCommands.MOVE_STOP, cancel_event=asyncio.Event())
 
     def _seek_step_repeat_count(self, remaining_distance: float | None) -> int:
         """Return an adaptive Linak seek pulse size for the remaining error."""
@@ -993,7 +987,7 @@ class LinakController(BedController):
 
     async def move_head_stop(self) -> None:
         """Stop head motor."""
-        await self.write_command(LinakCommands.MOVE_STOP, cancel_event=asyncio.Event())
+        await self._send_stop()
 
     async def move_back_up(self) -> None:
         """Move back up."""
@@ -1005,7 +999,7 @@ class LinakController(BedController):
 
     async def move_back_stop(self) -> None:
         """Stop back motor."""
-        await self.write_command(LinakCommands.MOVE_STOP, cancel_event=asyncio.Event())
+        await self._send_stop()
 
     async def move_legs_up(self) -> None:
         """Move legs up."""
@@ -1017,7 +1011,7 @@ class LinakController(BedController):
 
     async def move_legs_stop(self) -> None:
         """Stop legs motor."""
-        await self.write_command(LinakCommands.MOVE_STOP, cancel_event=asyncio.Event())
+        await self._send_stop()
 
     async def move_feet_up(self) -> None:
         """Move feet up."""
@@ -1029,11 +1023,11 @@ class LinakController(BedController):
 
     async def move_feet_stop(self) -> None:
         """Stop feet motor."""
-        await self.write_command(LinakCommands.MOVE_STOP, cancel_event=asyncio.Event())
+        await self._send_stop()
 
     async def stop_all(self) -> None:
         """Stop all motors."""
-        await self.write_command(LinakCommands.MOVE_STOP, cancel_event=asyncio.Event())
+        await self._send_stop()
 
     # Preset methods
     async def preset_flat(self) -> None:

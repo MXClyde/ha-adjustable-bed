@@ -314,9 +314,8 @@ class BedController(ABC):
     def auto_stops_on_idle(self) -> bool:
         """Return True if motors auto-stop when commands stop arriving.
 
-        Controllers that auto-stop (like Linak) should override this to return True.
-        This allows the coordinator to skip explicit STOP commands which can cause
-        brief reverse movements on some bed types.
+        Controllers whose protocol defines no STOP/release frame can override
+        this to skip an invented cleanup write.
         """
         return False
 

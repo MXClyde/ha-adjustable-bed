@@ -719,11 +719,7 @@ async def test_base_wall_clock_pacing_absorbs_write_latency() -> None:
 
 
 async def test_overridden_stop_helpers_keep_finally_cleanup() -> None:
-    """Controllers overriding stop helpers should preserve finally-based cleanup.
-
-    Linak is excluded from _move_with_stop finally enforcement because it
-    explicitly auto-stops when commands cease.
-    """
+    """Controllers overriding stop helpers should preserve finally-based cleanup."""
     instantiated: dict[type[BedController], BedController] = {}
 
     for bed_type in SUPPORTED_BED_TYPES:
