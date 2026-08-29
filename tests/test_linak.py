@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from bleak.exc import BleakError
 from homeassistant.core import HomeAssistant
 
-from custom_components.adjustable_bed.beds.linak import LinakCommands
+from custom_components.adjustable_bed.beds.linak import (
+    LinakCommands,
+    LinakPositionSeekPolicy,
+)
 from custom_components.adjustable_bed.const import (
     LINAK_CONTROL_CHAR_UUID,
     LINAK_POSITION_BACK_UUID,
@@ -17,6 +21,12 @@ from custom_components.adjustable_bed.const import (
     LINAK_POSITION_LEG_UUID,
 )
 from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+from custom_components.adjustable_bed.position_seek import (
+    PositionSeekPolicy,
+    PositionSeekRunner,
+    SeekOutcome,
+    SeekResult,
+)
 
 
 def _written_commands(mock_bleak_client: MagicMock) -> list[bytes]:
@@ -34,6 +44,35 @@ def _assert_repeated_command(
 def _mark_session_ready(coordinator: AdjustableBedCoordinator) -> None:
     """Skip the cold-connect readiness probe for command behavior tests."""
     coordinator.controller._session_ready = True
+
+
+async def _run_position_seek(
+    policy: PositionSeekPolicy,
+    *,
+    initial: float,
+    readings: list[float],
+) -> tuple[SeekResult, AsyncMock, AsyncMock]:
+    """Run a synthetic back-axis seek with the supplied policy."""
+    samples = iter(readings)
+    issue_step = AsyncMock()
+    stop = AsyncMock()
+    runner = PositionSeekRunner(
+        position_key="back",
+        target_angle=0.0,
+        policy=policy,
+        cancel_event=asyncio.Event(),
+        read_position=AsyncMock(side_effect=lambda: next(samples)),
+        issue_step=issue_step,
+        stop=stop,
+    )
+
+    with patch(
+        "custom_components.adjustable_bed.position_seek.asyncio.sleep",
+        new=AsyncMock(),
+    ):
+        result = await runner.async_run(initial)
+
+    return result, issue_step, stop
 
 
 class TestLinakController:
@@ -242,6 +281,196 @@ class TestLinakController:
         assert coordinator.controller.position_seek_stall_count == 1
         assert coordinator.controller.position_seek_check_interval == pytest.approx(0.2)
         assert coordinator.controller.position_seek_stall_threshold == pytest.approx(0.2)
+
+    async def test_lower_endpoint_requires_two_stalled_checks_and_skips_cleanup_stop(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ) -> None:
+        """A seek starting near Linak's lower limit should finish after one bounded retry."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        policy = coordinator.controller.position_seek_policy
+        assert isinstance(policy, LinakPositionSeekPolicy)
+
+        result, issue_step, stop = await _run_position_seek(
+            policy,
+            initial=1.1,
+            readings=[1.1, 1.1],
+        )
+
+        assert result.outcome is SeekOutcome.ENDPOINT_REACHED
+        assert result.final_angle == pytest.approx(1.1)
+        assert issue_step.await_args_list == [call(False, 1.1), call(False, 1.1)]
+        stop.assert_not_awaited()
+
+    async def test_movement_to_lower_endpoint_has_one_endpoint_retry(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ) -> None:
+        """Progressing to the physical limit should not enter an endpoint write storm."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        result, issue_step, _stop = await _run_position_seek(
+            coordinator.controller.position_seek_policy,
+            initial=40.0,
+            readings=[10.0, 1.1, 1.1, 1.1],
+        )
+
+        assert result.outcome is SeekOutcome.ENDPOINT_REACHED
+        assert issue_step.await_args_list == [
+            call(False, 40.0),
+            call(False, 10.0),
+            call(False, 1.1),
+        ]
+
+    async def test_lower_endpoint_rebound_requires_fresh_stall_confirmations(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ) -> None:
+        """Movement away and back must invalidate an earlier endpoint stall."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        result, issue_step, _stop = await _run_position_seek(
+            coordinator.controller.position_seek_policy,
+            initial=1.1,
+            readings=[1.1, 0.8, 1.1, 1.1, 1.1],
+        )
+
+        assert result.outcome is SeekOutcome.ENDPOINT_REACHED
+        assert issue_step.await_args_list == [
+            call(False, 1.1),
+            call(False, 1.1),
+            call(False, 1.1),
+        ]
+
+    async def test_lower_endpoint_policy_retries_mid_range_stall(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+    ) -> None:
+        """A normal mid-range stall must not be promoted to endpoint completion."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        result, issue_step, _stop = await _run_position_seek(
+            coordinator.controller.position_seek_policy,
+            initial=40.0,
+            readings=[15.0, 15.0, 0.5],
+        )
+
+        assert result.outcome is SeekOutcome.REACHED_TARGET
+        assert issue_step.await_args_list == [
+            call(False, 40.0),
+            call(False, 15.0),
+            call(False, 15.0),
+        ]
+
+    async def test_group_continues_after_lower_endpoint_completion(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ) -> None:
+        """Endpoint completion should release the grouped request for its next operation."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        _mark_session_ready(coordinator)
+        coordinator._handle_position_update("back", 1.1)
+        mock_bleak_client.write_gatt_char.reset_mock()
+        readings = iter([1.1, 1.1])
+        events: list[str] = []
+
+        async def read_position() -> None:
+            coordinator._handle_position_update("back", next(readings))
+
+        async def next_operation() -> None:
+            events.append("legs")
+
+        with (
+            patch.object(
+                coordinator,
+                "_async_read_positions",
+                new=AsyncMock(side_effect=read_position),
+            ),
+            patch(
+                "custom_components.adjustable_bed.position_seek.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            await coordinator.async_execute_command_group(
+                [
+                    lambda: coordinator.async_seek_position(
+                        "back",
+                        0.0,
+                        lambda controller: controller.move_back_up(),
+                        lambda controller: controller.move_back_down(),
+                        lambda controller: controller.move_back_stop(),
+                    ),
+                    next_operation,
+                ],
+                resources=["motor:back", "motor:legs"],
+            )
+
+        assert events == ["legs"]
+        assert coordinator._seek_outcomes["back"]["outcome"] == "endpoint_reached"
+        assert _written_commands(mock_bleak_client) == [
+            LinakCommands.MOVE_BACK_DOWN,
+            LinakCommands.MOVE_BACK_DOWN,
+        ]
+
+    async def test_stop_during_endpoint_read_prevents_retry_before_stop(
+        self,
+        hass: HomeAssistant,
+        mock_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ) -> None:
+        """A STOP arriving during feedback must win before another endpoint write."""
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+        await coordinator.async_connect()
+        _mark_session_ready(coordinator)
+        coordinator._handle_position_update("back", 1.1)
+        mock_bleak_client.write_gatt_char.reset_mock()
+        read_started = asyncio.Event()
+        release_read = asyncio.Event()
+
+        async def read_position() -> None:
+            read_started.set()
+            await release_read.wait()
+            coordinator._handle_position_update("back", 1.1)
+
+        with patch.object(
+            coordinator,
+            "_async_read_positions",
+            new=AsyncMock(side_effect=read_position),
+        ):
+            seek_task = asyncio.create_task(
+                coordinator.async_seek_position(
+                    "back",
+                    0.0,
+                    lambda controller: controller.move_back_up(),
+                    lambda controller: controller.move_back_down(),
+                    lambda controller: controller.move_back_stop(),
+                )
+            )
+            await read_started.wait()
+            stop_task = asyncio.create_task(coordinator.async_stop_command())
+            await asyncio.sleep(0)
+            release_read.set()
+            await asyncio.gather(seek_task, stop_task)
+
+        assert _written_commands(mock_bleak_client) == [
+            LinakCommands.MOVE_BACK_DOWN,
+            LinakCommands.MOVE_STOP,
+        ]
+        assert coordinator._seek_outcomes["back"]["outcome"] == "cancelled"
 
     async def test_prepare_for_position_read_waits_for_ready_session(
         self,

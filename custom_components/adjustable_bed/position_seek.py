@@ -366,8 +366,24 @@ class PositionSeekRunner:
                 # Wait and poll position
                 await asyncio.sleep(policy.check_interval)
 
+                # A STOP or replacement may arrive while the runner is waiting
+                # to poll. Do not make it wait behind another GATT read.
+                if cancel_event.is_set():
+                    _LOGGER.debug(
+                        "Position seek cancelled before feedback read for %s", position_key
+                    )
+                    return result(SeekOutcome.CANCELLED, current_angle, moving_up)
+
                 # Read current position
                 current_angle = await self._read_position()
+                # Reading feedback can itself suspend. Never issue a chained or
+                # retry step after a newer STOP or replacement landed mid-read.
+                if cancel_event.is_set():
+                    _LOGGER.debug(
+                        "Position seek cancelled during feedback read for %s", position_key
+                    )
+                    return result(SeekOutcome.CANCELLED, current_angle, moving_up)
+
                 if current_angle is None:
                     _LOGGER.warning(
                         "Lost position data for %s during seek",

@@ -117,3 +117,16 @@ From app disassembly analysis:
 - **Stop Command:** `0xFF 0x00` (use this, not `0x00 0x00` which can cause reverse jerk)
 
 Motor commands are sent continuously while the button is held.
+
+### Position seeking
+
+Linak keeps the normal 0.75° seek tolerance for ordinary targets. Live testing
+found one lower physical endpoint where the back actuator stopped at a reported
+1.0° to 1.1° when 0° was requested. A back seek to exactly 0° therefore
+completes after two consecutive stalled checks at or below 1.1°, with at most
+one retry after the first confirmed stall. Mid-range stalls continue to retry
+normally. Other axes retain the normal tolerance at both endpoints.
+
+Upper endpoints retain the normal tolerance. No upper-endpoint exception has
+been enabled without supporting evidence; beta feedback should report any
+repeatable physical maximum that remains outside the normal completion band.

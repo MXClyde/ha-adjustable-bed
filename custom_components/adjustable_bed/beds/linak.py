@@ -26,6 +26,7 @@ from ..const import (
     LINAK_POSITION_HEAD_UUID,
     LINAK_POSITION_LEG_UUID,
 )
+from ..position_seek import PositionSeekPolicy, SeekSample
 from .base import BedController
 
 if TYPE_CHECKING:
@@ -43,6 +44,8 @@ LINAK_POSITION_SEEK_TOLERANCE = 0.75
 LINAK_POSITION_SEEK_STALL_COUNT = 1
 LINAK_POSITION_SEEK_CHECK_INTERVAL_S = 0.2
 LINAK_POSITION_SEEK_STALL_THRESHOLD = 0.2
+LINAK_LOWER_ENDPOINT_MAX_ANGLE_DEGREES = 1.1
+LINAK_LOWER_ENDPOINT_STALL_CONFIRMATIONS = 2
 LINAK_COARSE_SEEK_DISTANCE_DEGREES = 20.0
 LINAK_MEDIUM_SEEK_DISTANCE_DEGREES = 10.0
 LINAK_FINE_SEEK_DISTANCE_DEGREES = 4.0
@@ -62,6 +65,55 @@ class LinakPositionSpec:
     uuid: str
     max_position: int
     max_angle: float
+
+
+class LinakPositionSeekPolicy(PositionSeekPolicy):
+    """Accept Linak's physically observed non-zero lower endpoint."""
+
+    def __init__(self, controller: BedController) -> None:
+        super().__init__(controller)
+        self._last_lower_endpoint_stall: float | None = None
+        self._lower_endpoint_stall_confirmations = 0
+
+    @staticmethod
+    def _is_observed_lower_endpoint(sample: SeekSample) -> bool:
+        """Return whether a sample is inside the evidence-backed endpoint scope."""
+        return (
+            sample.position_key == "back"
+            and sample.target == 0.0
+            and not sample.moving_up
+            and 0.0 <= sample.current <= LINAK_LOWER_ENDPOINT_MAX_ANGLE_DEGREES
+        )
+
+    def _reset_lower_endpoint_stall(self) -> None:
+        """Discard endpoint evidence after progress or an out-of-scope sample."""
+        self._last_lower_endpoint_stall = None
+        self._lower_endpoint_stall_confirmations = 0
+
+    def accepts_position(self, sample: SeekSample) -> bool:
+        """Reset stale endpoint evidence when feedback moves between stalls."""
+        previous_stall = self._last_lower_endpoint_stall
+        if previous_stall is not None and (
+            not self._is_observed_lower_endpoint(sample)
+            or abs(sample.current - previous_stall) >= self.stall_threshold
+        ):
+            self._reset_lower_endpoint_stall()
+        return super().accepts_position(sample)
+
+    def stall_completes_near_endpoint(self, sample: SeekSample) -> bool:
+        """Accept only a persistent stall near the requested 0° hard limit."""
+        if not self._is_observed_lower_endpoint(sample):
+            self._reset_lower_endpoint_stall()
+            return False
+
+        previous_stall = self._last_lower_endpoint_stall
+        if previous_stall is None or abs(sample.current - previous_stall) >= self.stall_threshold:
+            self._lower_endpoint_stall_confirmations = 1
+        else:
+            self._lower_endpoint_stall_confirmations += 1
+        self._last_lower_endpoint_stall = sample.current
+
+        return self._lower_endpoint_stall_confirmations >= LINAK_LOWER_ENDPOINT_STALL_CONFIRMATIONS
 
 
 class LinakCommands:
@@ -205,6 +257,11 @@ class LinakController(BedController):
     def position_seek_stall_threshold(self) -> float:
         """Return a smaller movement threshold for Linak angle feedback."""
         return LINAK_POSITION_SEEK_STALL_THRESHOLD
+
+    @property
+    def position_seek_policy(self) -> PositionSeekPolicy:
+        """Return Linak's lower-endpoint-aware seek policy."""
+        return LinakPositionSeekPolicy(self)
 
     @property
     def chains_position_seek_steps_while_moving(self) -> bool:
