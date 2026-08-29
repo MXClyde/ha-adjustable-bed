@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { selectBedGraphicMotors } from "./bed-graphic";
-import type { MotorEntity } from "./types";
+import { bedHasGraphicFeedback, selectBedGraphicMotors } from "./bed-graphic-state";
+import type { BedEntities, HomeAssistant, MotorEntity } from "./types";
 
 const motor = (key: string): MotorEntity => ({ key, position: `number.bed_${key}` });
 
@@ -16,4 +16,20 @@ test("bed graphic maps one upper and one lower feedback axis", () => {
   const feet = motor("feet");
 
   expect(selectBedGraphicMotors([feet, back])).toEqual({ upper: back, lower: feet });
+});
+
+test("bed graphic availability requires degree feedback for both panels", () => {
+  const bed = {
+    motors: [motor("back"), motor("legs")],
+  } as BedEntities;
+  const hass = {
+    states: {
+      "number.bed_back": { attributes: { unit_of_measurement: "°" } },
+      "number.bed_legs": { attributes: { unit_of_measurement: "%" } },
+    },
+  } as HomeAssistant;
+
+  expect(bedHasGraphicFeedback(bed, hass)).toBe(false);
+  hass.states["number.bed_legs"].attributes.unit_of_measurement = "°";
+  expect(bedHasGraphicFeedback(bed, hass)).toBe(true);
 });

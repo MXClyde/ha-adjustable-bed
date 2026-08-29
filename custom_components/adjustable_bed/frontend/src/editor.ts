@@ -8,6 +8,7 @@
 import { LitElement, type TemplateResult, css, html, nothing } from "lit";
 import { property, state } from "lit/decorators.js";
 import { SECTION_ORDER, bedEntitiesForDevice } from "./discovery";
+import { presentSections } from "./editor-sections";
 import { localize } from "./localize";
 import type {
   AdjustableBedCardConfig,
@@ -27,35 +28,6 @@ interface HaFormSchema {
 // inside the editor dialog's shadow DOM.
 const CHEVRON_UP = "M7.41 15.41 12 10.83l4.59 4.58L18 14l-6-6-6 6z";
 const CHEVRON_DOWN = "M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z";
-
-// Which sections a bed exposes — mirrors the card's own section conditions,
-// keyed by the section key (without the "show_" prefix).
-function presentSections(bed: BedEntities): Record<string, boolean> {
-  return {
-    graphic: bed.motors.some((m) => m.angle || m.position),
-    motors:
-      bed.motors.some((m) => m.cover || m.up || m.down) ||
-      !!bed.stop ||
-      !!bed.synchro,
-    firmness: bed.firmness.length > 0,
-    presets: bed.presets.length > 0,
-    memory: bed.memory.length > 0,
-    lighting: !!(
-      bed.lights.light ||
-      bed.lights.switch ||
-      bed.lights.level ||
-      bed.lights.toggle ||
-      bed.lights.cycle ||
-      bed.lights.timer
-    ),
-    massage:
-      bed.massage.buttons.length > 0 ||
-      bed.massage.numbers.length > 0 ||
-      !!bed.massage.timer,
-    climate: bed.climate.entities.length > 0 || bed.climate.selects.length > 0,
-    connection: !!(bed.connect || bed.disconnect),
-  };
-}
 
 const arraysEqual = (a: string[], b: string[]): boolean =>
   a.length === b.length && a.every((v, i) => v === b[i]);
@@ -79,7 +51,7 @@ export class AdjustableBedCardEditor
 
   // Present section keys in their DEFAULT order.
   private _presentKeys(bed: BedEntities): string[] {
-    const present = presentSections(bed);
+    const present = presentSections(bed, this.hass!);
     return SECTION_ORDER.filter((k) => present[k]);
   }
 

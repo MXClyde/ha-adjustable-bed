@@ -17,8 +17,8 @@ import {
   type DualBedGraphicSide,
   renderBedGraphic,
   renderDualBedGraphic,
-  selectBedGraphicMotors,
 } from "./bed-graphic";
+import { selectBedGraphicMotors } from "./bed-graphic-state";
 import {
   PLATFORM,
   SECTION_ORDER,

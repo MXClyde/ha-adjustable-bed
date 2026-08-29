@@ -41,13 +41,10 @@ if (watch) {
   console.log("watching frontend/src for changes…");
 } else {
   await esbuild.build(options);
-  // Lit contains a template-literal character class with a literal tab before
-  // a newline. Preserve the same regexp semantics using an escape so generated
-  // bundles pass git's trailing-whitespace check.
+  // Lit's generated template literals contain literal tabs before newlines.
+  // Preserve their semantics using escapes so generated bundles pass git's
+  // trailing-whitespace check.
   const bundle = readFileSync(outfile, "utf8");
-  writeFileSync(
-    outfile,
-    bundle.replaceAll("[ \t\n\\f\\r]", "[ \\t\n\\f\\r]"),
-  );
+  writeFileSync(outfile, bundle.replaceAll("\t\n", "\\t\n"));
   console.log(`built dist/adjustable-bed-card.js (v${manifest.version})`);
 }

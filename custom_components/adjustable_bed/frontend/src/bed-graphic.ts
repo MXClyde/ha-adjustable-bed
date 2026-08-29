@@ -2,7 +2,6 @@
 // back/legs (or head/feet) angle. Shown only for beds with angle feedback;
 // purely decorative — not interactive.
 import { type TemplateResult, svg } from "lit";
-import type { MotorEntity } from "./types";
 
 export type BedGraphicTone = "theme" | "left" | "right";
 
@@ -26,23 +25,6 @@ export interface DualBedGraphicSide {
 export interface DualBedGraphicOptions {
   left: DualBedGraphicSide;
   right: DualBedGraphicSide;
-}
-
-export interface BedGraphicMotors {
-  upper: MotorEntity;
-  lower: MotorEntity;
-}
-
-export function selectBedGraphicMotors(
-  motors: readonly MotorEntity[],
-): BedGraphicMotors | undefined {
-  const upper = motors.find(
-    (motor) => motor.key === "back" || motor.key === "head",
-  );
-  const lower = motors.find(
-    (motor) => motor.key === "legs" || motor.key === "feet",
-  );
-  return upper && lower ? { upper, lower } : undefined;
 }
 
 // Clamp so an out-of-range reading can never fold the mattress through the base.
