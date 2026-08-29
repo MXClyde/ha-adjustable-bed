@@ -158,12 +158,15 @@ class TestDiagnosticsOutput:
         assert "connected" in result["ble"]
 
         # Pairing diagnostics distinguish integration decisions from backend state.
-        assert result["pairing"]["required"] is True
-        assert result["pairing"]["persisted_bond_marker"] is True
-        assert result["pairing"]["last_bond_verification"]["status"] == "succeeded"
+        assert result["pairing"]["required"] is False
+        assert result["pairing"]["persisted_bond_marker"] is False
+        assert (
+            result["pairing"]["last_bond_verification"]["status"]
+            == "not_attempted"
+        )
         assert (
             result["pairing"]["connection_attempts"][0]["pairing"]["decision"]
-            == "pairing_requested"
+            == "not_required"
         )
 
         # Check controller info

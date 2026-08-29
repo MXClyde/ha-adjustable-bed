@@ -6280,6 +6280,37 @@ class TestBondProvenanceAndTransportGate:
 
         await coordinator.async_shutdown()
 
+    async def test_non_pairing_protocol_discards_obsolete_bond_state(
+        self, hass: HomeAssistant, mock_config_entry
+    ) -> None:
+        """A Linak upgrade should remove stale bond flags and its false repair."""
+        hass.config_entries.async_update_entry(
+            mock_config_entry,
+            data={
+                **mock_config_entry.data,
+                CONF_BLE_BOND_ESTABLISHED: False,
+                CONF_BLE_BOND_MARKER_UNRELIABLE: True,
+                CONF_BLE_BOND_CONTEXT: {"version": 1, "transport": "proxy"},
+            },
+        )
+        coordinator = AdjustableBedCoordinator(hass, mock_config_entry)
+
+        with patch(
+            "custom_components.adjustable_bed.coordinator.delete_pairing_required_issue",
+            new_callable=AsyncMock,
+        ) as delete_issue:
+            await coordinator.async_clear_obsolete_pairing_state()
+            await hass.async_block_till_done()
+
+        assert coordinator._ble_bond_established is False
+        assert coordinator._ble_bond_marker_unreliable is False
+        assert CONF_BLE_BOND_ESTABLISHED not in mock_config_entry.data
+        assert CONF_BLE_BOND_MARKER_UNRELIABLE not in mock_config_entry.data
+        assert CONF_BLE_BOND_CONTEXT not in mock_config_entry.data
+        delete_issue.assert_awaited_once_with(hass, mock_config_entry.data[CONF_ADDRESS])
+
+        await coordinator.async_shutdown()
+
     async def test_an_unknown_transport_records_no_provenance(
         self, hass: HomeAssistant, mock_config_entry
     ) -> None:

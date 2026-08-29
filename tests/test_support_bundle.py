@@ -1657,8 +1657,9 @@ class TestSupportBundle:
             entry=None,
             coordinator=None,
         )
-        assert raw_auth_failure["required"] is True
-        assert raw_auth_failure["status"] == "authentication_failed"
+        assert raw_auth_failure["required"] is False
+        assert raw_auth_failure["status"] == "not_required"
+        assert raw_auth_failure["auth_gated_probe"]["authentication_errors"]
 
     async def test_coordinator_records_command_trace(
         self,

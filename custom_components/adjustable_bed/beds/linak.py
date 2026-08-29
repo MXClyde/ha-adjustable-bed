@@ -71,15 +71,15 @@ LINAK_PROTOCOL_READ_TIMEOUT_S = 0.75
 LINAK_INITIAL_POSITION_RETRY_ATTEMPTS = 3
 LINAK_INITIAL_POSITION_RETRY_DELAY_S = 0.75
 LINAK_PASSIVE_POSITION_RECONCILIATION_INTERVAL_S = 120.0
-LINAK_POSITION_SEEK_PULSE_DELAY_MS = 100
 LINAK_POSITION_SEEK_TOLERANCE = 0.3
 LINAK_POSITION_SEEK_STALL_COUNT = 1
-LINAK_POSITION_SEEK_CHECK_INTERVAL_S = 0.2
+LINAK_POSITION_SEEK_REFRESH_INTERVAL_S = 0.1
 LINAK_POSITION_SEEK_STALL_THRESHOLD = 0.2
 LINAK_POSITION_SEEK_CACHED_FEEDBACK_MAX_AGE_S = 0.5
+LINAK_DOWNWARD_STOP_LEAD_TIME_S = 0.4
+LINAK_MAX_DOWNWARD_STOP_LEAD_DEGREES = 1.5
 LINAK_LOWER_ENDPOINT_MAX_ANGLE_DEGREES = 1.1
 LINAK_LOWER_ENDPOINT_STALL_CONFIRMATIONS = 2
-LINAK_COARSE_SEEK_DISTANCE_DEGREES = 20.0
 LINAK_CONTROLLER_STATE_SENSOR_ENTITY_KEYS = frozenset(
     {
         "linak_protocol_error",
@@ -93,13 +93,6 @@ LINAK_CONTROLLER_STATE_SENSOR_ENTITY_KEYS = frozenset(
 LINAK_CONTROLLER_STATE_BINARY_SENSOR_ENTITY_KEYS = frozenset(
     {"linak_position_feedback_fault"}
 )
-LINAK_MEDIUM_SEEK_DISTANCE_DEGREES = 10.0
-LINAK_FINE_SEEK_DISTANCE_DEGREES = 4.0
-LINAK_CHAINED_SEEK_MIN_REMAINING_DEGREES = LINAK_FINE_SEEK_DISTANCE_DEGREES
-LINAK_COARSE_SEEK_PULSE_COUNT = 6
-LINAK_MEDIUM_SEEK_PULSE_COUNT = 4
-LINAK_FINE_SEEK_PULSE_COUNT = 2
-LINAK_MICRO_SEEK_PULSE_COUNT = 1
 LINAK_MEMORY_RECALL_DURATION_S = 30
 LINAK_PERFORMANCE_HOLD_INTERVAL_MS = 300
 LINAK_BED_CONTROL_HOLD_INTERVAL_MS = 100
@@ -151,14 +144,25 @@ class LinakPositionSeekPolicy(PositionSeekPolicy):
         self._lower_endpoint_stall_confirmations = 0
 
     def accepts_position(self, sample: SeekSample) -> bool:
-        """Reset stale endpoint evidence when feedback moves between stalls."""
+        """Apply endpoint bookkeeping and downward coast compensation."""
         previous_stall = self._last_lower_endpoint_stall
         if previous_stall is not None and (
             not self._is_observed_lower_endpoint(sample)
             or abs(sample.current - previous_stall) >= self.stall_threshold
         ):
             self._reset_lower_endpoint_stall()
-        return super().accepts_position(sample)
+        if super().accepts_position(sample):
+            return True
+
+        if sample.moving_up or sample.current <= sample.target:
+            return False
+        controller = self._controller
+        if not isinstance(controller, LinakController):
+            return False
+        stop_lead = controller.downward_stop_lead(sample.position_key)
+        if stop_lead is None:
+            return False
+        return sample.remaining <= min(stop_lead, LINAK_MAX_DOWNWARD_STOP_LEAD_DEGREES)
 
     def stall_completes_near_endpoint(self, sample: SeekSample) -> bool:
         """Accept only a persistent stall near the requested 0° hard limit."""
@@ -339,8 +343,8 @@ class LinakController(BedController):
 
     @property
     def position_seek_check_interval(self) -> float:
-        """Return a faster feedback cadence for Linak pulse chaining."""
-        return LINAK_POSITION_SEEK_CHECK_INTERVAL_S
+        """Match Bed Control's 100 ms held-command refresh cadence."""
+        return LINAK_POSITION_SEEK_REFRESH_INTERVAL_S
 
     @property
     def position_seek_stall_threshold(self) -> float:
@@ -359,8 +363,8 @@ class LinakController(BedController):
 
     @property
     def position_seek_chain_min_remaining_distance(self) -> float:
-        """Switch to stop-and-check micro pulses once Linak is close to target."""
-        return LINAK_CHAINED_SEEK_MIN_REMAINING_DEGREES
+        """Keep refreshing movement until feedback enters the target band."""
+        return LINAK_POSITION_SEEK_TOLERANCE
 
     @property
     def passive_position_reconciliation_interval(self) -> float | None:
@@ -1045,6 +1049,28 @@ class LinakController(BedController):
             ),
         ]
 
+    def downward_stop_lead(self, position_key: str) -> float | None:
+        """Estimate downward coast from the live signed reference speed."""
+        specs = {
+            "back": self._back_position_spec(),
+            "legs": self._two_motor_secondary_spec(),
+            "head": self._head_position_spec(),
+            "feet": self._feet_position_spec(),
+        }
+        spec = specs.get(position_key)
+        if spec is None or spec.max_position <= 0:
+            return None
+        raw_speed = self._coordinator.controller_state.get(f"linak_{spec.source_name}_raw_speed")
+        if isinstance(raw_speed, bool) or not isinstance(raw_speed, (int, float)):
+            return None
+        if raw_speed >= 0:
+            return None
+        angular_speed = abs(float(raw_speed)) * spec.max_angle / spec.max_position
+        return max(
+            self.position_seek_tolerance,
+            angular_speed * LINAK_DOWNWARD_STOP_LEAD_TIME_S,
+        )
+
     def _build_position_characteristics(self, motor_count: int) -> list[LinakPositionSpec]:
         """Return the exact reference outputs selected by capability mask."""
         del motor_count
@@ -1302,10 +1328,11 @@ class LinakController(BedController):
 
         await self._start_protocol_notifications()
         if self._deferred_protocol_notifications or self._capability_discovery_deferred:
-            # Error/config/timer channels are capability-bearing, so resolve
-            # their known post-connect auth window before entity setup snapshots
-            # this controller. Position channels may remain lazily deferred.
-            await self._await_control_ready()
+            # Do not make optional capability/state channels gate integration
+            # setup. Some unbonded controllers reject them during the cold-link
+            # window even though the same session later accepts control. The
+            # first command retries every deferred channel after readiness.
+            _LOGGER.debug("Leaving Linak capability/state channels deferred until control is ready")
 
         if callback is None or not self.supports_position_feedback:
             return
@@ -1616,25 +1643,13 @@ class LinakController(BedController):
         """Send Linak's explicit STOP/release frame."""
         await self.write_command(self._stop_command, cancel_event=asyncio.Event())
 
-    def _seek_step_repeat_count(self, remaining_distance: float | None) -> int:
-        """Return an adaptive Linak seek pulse size for the remaining error."""
-        if remaining_distance is None:
-            return LINAK_FINE_SEEK_PULSE_COUNT
-        if remaining_distance >= LINAK_COARSE_SEEK_DISTANCE_DEGREES:
-            return LINAK_COARSE_SEEK_PULSE_COUNT
-        if remaining_distance >= LINAK_MEDIUM_SEEK_DISTANCE_DEGREES:
-            return LINAK_MEDIUM_SEEK_PULSE_COUNT
-        if remaining_distance >= LINAK_FINE_SEEK_DISTANCE_DEGREES:
-            return LINAK_FINE_SEEK_PULSE_COUNT
-        return LINAK_MICRO_SEEK_PULSE_COUNT
-
     async def seek_position_step(
         self,
         position_key: str,
         moving_up: bool,
         remaining_distance: float | None = None,
     ) -> None:
-        """Execute an adaptive Linak seek pulse based on remaining distance."""
+        """Refresh one held Linak movement without releasing between samples."""
         command_map = {
             ("back", True): LinakCommands.MOVE_BACK_UP,
             ("back", False): LinakCommands.MOVE_BACK_DOWN,
@@ -1654,18 +1669,10 @@ class LinakController(BedController):
             )
             return
 
-        repeat_count = self._seek_step_repeat_count(remaining_distance)
-        try:
-            await self.write_command(
-                command,
-                repeat_count=repeat_count,
-                repeat_delay_ms=LINAK_POSITION_SEEK_PULSE_DELAY_MS,
-            )
-        finally:
-            # A Linak movement frame remains active until the release frame is
-            # written. Release each adaptive burst before awaiting feedback so
-            # a short seek cannot coast several degrees past its target.
-            await self._send_stop()
+        # Bed Control refreshes a held command every 100 ms and writes one STOP
+        # only when the gesture ends. The seek runner provides that cadence and
+        # owns the terminal STOP, allowing one continuous motor movement.
+        await self.write_command(command)
 
     async def move_head_up(self) -> None:
         """Move head up."""

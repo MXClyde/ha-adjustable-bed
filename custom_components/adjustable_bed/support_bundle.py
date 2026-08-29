@@ -589,10 +589,10 @@ def _build_pairing_assessment(
             if uuid in probe_uuids and characteristic.get("read_result") is not None:
                 successful_probes.append(characteristic.get("uuid"))
 
-    if authentication_errors:
-        status = "authentication_failed"
-    elif not pairing_required:
+    if not pairing_required:
         status = "not_required"
+    elif authentication_errors:
+        status = "authentication_failed"
     elif successful_probes:
         status = "verified"
     else:

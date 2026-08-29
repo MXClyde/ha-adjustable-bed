@@ -1662,18 +1662,6 @@ class TestBluetoothDiscoveryFlow:
             result = await flow.async_step_disconnect_after_command(
                 {CONF_DISCONNECT_AFTER_COMMAND: False}
             )
-            assert result["step_id"] == "manual_pairing"
-            with (
-                patch.object(
-                    flow,
-                    "_attempt_pairing",
-                    new=AsyncMock(return_value=_verified_evidence()),
-                ),
-                _patch_inventory(LocalBondInventory(status=BluezReadStatus.OK)),
-            ):
-                progress = await flow.async_step_manual_pairing({"action": "pair_now"})
-                assert progress["type"] is FlowResultType.SHOW_PROGRESS
-                result = await _finish_pairing(hass, flow)
 
         assert result["type"] == FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_DISCONNECT_AFTER_COMMAND] is False
@@ -1702,8 +1690,9 @@ class TestBluetoothDiscoveryFlow:
                 CONF_DISCONNECT_AFTER_COMMAND: False,
             },
         )
-
         result = await _advance_progress(hass, result)
+        assert result["step_id"] == "verify_connection"
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
         assert result["type"] == FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_DISCONNECT_AFTER_COMMAND] is False
 
@@ -1733,10 +1722,10 @@ class TestBluetoothDiscoveryFlow:
             },
         )
 
-        # Linak setup establishes and verifies the OS bond before creating the
-        # entry. Runtime startup then performs model/capability discovery on the
-        # persistent connection instead of spending a second setup connection.
+        # Linak setup verifies reachability without requiring an OS bond.
         result = await _advance_progress(hass, result)
+        assert result["step_id"] == "verify_connection"
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
         assert result["type"] == FlowResultType.CREATE_ENTRY
         assert result["title"] == "My Bed"
         assert result["data"][CONF_ADDRESS] == mock_bluetooth_service_info.address
@@ -1923,9 +1912,10 @@ class TestBluetoothDiscoveryFlow:
             },
         )
 
-        # Accepted input proceeds through the Linak bonding step before the
-        # entry is created.
+        # Accepted input proceeds through the ordinary unbonded reachability check.
         result = await _advance_progress(hass, result)
+        assert result["step_id"] == "verify_connection"
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
         assert result["type"] == FlowResultType.CREATE_ENTRY
         assert result["data"][CONF_MOTOR_COUNT] == 3
 

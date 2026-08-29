@@ -2080,8 +2080,6 @@ BEDS_REQUIRING_PAIRING: Final[set[str]] = {
     BED_TYPE_OKIMAT,
     BED_TYPE_VIBRADORM,
     BED_TYPE_LOGICDATA,
-    # All three analyzed Linak BLE apps require Android/OS bonding before GATT.
-    BED_TYPE_LINAK,
     # Leggett & Platt Gen2 (LP Comfort Connect, 209-M001): LP Control calls
     # createBond() for an unbonded Gen2 device after service discovery. Issue
     # #385 shows repeated unbonded BlueZ connection timeouts while the box keeps

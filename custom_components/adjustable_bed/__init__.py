@@ -1171,6 +1171,7 @@ async def _maybe_create_pairing_issue_for(
     bed_type = entry_data.get(CONF_BED_TYPE)
     protocol_variant = entry_data.get(CONF_PROTOCOL_VARIANT)
     if not (bed_type and requires_pairing(bed_type, protocol_variant)):
+        await coordinator.async_clear_obsolete_pairing_state()
         return
 
     address = entry_data.get(CONF_ADDRESS, "")

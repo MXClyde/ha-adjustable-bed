@@ -1273,14 +1273,16 @@ class AdjustableBedCoordinator:
 
     def apply_confirmed_bond_removal(self) -> None:
         """Clear all runtime and persisted state for a confirmed bond removal."""
+        self._discard_bond_tracking()
+
+    def _discard_bond_tracking(self) -> None:
+        """Discard runtime and persisted bond bookkeeping without unpairing."""
         self._ble_bond_established = False
         self._ble_bond_marker_unreliable = False
         self._latched_pairing_successes = 0
-        # Every transient reason to not ask for pairing was a judgement about
-        # the bond that has just been removed. Leaving the one-shot skip set
-        # would spend the first connection after the removal on a deliberately
-        # unauthenticated attempt, which on a bed that grants one connection per
-        # pairing window is the whole window.
+        # Every transient pairing decision was tied to the bookkeeping being
+        # discarded. Keeping the one-shot skip would leak that decision into a
+        # later connection after either bond removal or a protocol reclassification.
         self._skip_pair_next_attempt = False
         data = dict(self.entry.data)
         data.pop(CONF_BLE_BOND_ESTABLISHED, None)
@@ -1291,6 +1293,13 @@ class AdjustableBedCoordinator:
             return
         self._begin_internal_entry_update(False)
         self._async_persist_config(data, keys=RUNTIME_BOND_KEYS)
+
+    async def async_clear_obsolete_pairing_state(self) -> None:
+        """Remove stale pairing state when this protocol no longer requires it."""
+        if requires_pairing(self._bed_type, self._protocol_variant):
+            return
+        self._discard_bond_tracking()
+        await delete_pairing_required_issue(self.hass, self._address)
 
     def _log_bond_marker_unreliable(self) -> None:
         """Log the latch transition. The write itself is batched by the caller."""
@@ -3176,6 +3185,8 @@ class AdjustableBedCoordinator:
                 # not answer at setup gets another chance on every connect
                 # instead of staying "unknown" until the user moves it.
                 self._schedule_position_hydration()
+
+                await self.async_clear_obsolete_pairing_state()
 
                 return True
 

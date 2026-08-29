@@ -52,9 +52,12 @@ that exact mask. A Base actuator becomes a bed-height cover; the other selected
 axes receive movement controls and position entities. The resolved variant is
 shown as the device's Model ID in Home Assistant rather than as a separate entity.
 
-All three analyzed BLE application paths require Android/OS bonding before GATT
-control. There is no application PIN, passkey, challenge, token or protocol
-encryption.
+All three analyzed BLE applications proactively request Android/OS bonding, but
+physical testing with two Advanced controllers proves that their GATT control
+works without a bond. The integration therefore does not force pairing. A short
+post-connect readiness retry handles the controllers' transient `Insufficient
+authentication` window instead. There is no application PIN, passkey,
+challenge, token or protocol encryption.
 
 ## Implemented features
 
@@ -89,7 +92,7 @@ tables below remain exhaustive.
 
 | Discovery group | Disposition | Integration surface |
 |-----------------|-------------|---------------------|
-| Bed Control discovery, bonding and GATT session | Implemented | Setup pairing and coordinator connection |
+| Bed Control discovery, optional app bonding and GATT session | Implemented | Unbonded-compatible coordinator connection with readiness retry |
 | STANDARD/TD3/ADVANCED/alarm capability selection | Implemented | Live service/mask discovery with persisted snapshot |
 | Individual, all-section and all 40 two-section movements | Implemented | Covers, preset buttons and simultaneous-move service |
 | STOP/release and 100 ms held-command lifecycle | Implemented | Guaranteed cleanup on completion, failure and cancellation |
@@ -195,10 +198,11 @@ values. The artifact does not prove a physical unit for extension or speed.
   are one-shot writes.
 - Modern massage-zone selection spaces its two writes by 100 ms.
 
-The default integration burst is 10 writes at 100 ms for Bed Control and 4 writes
-at 300 ms for the explicit Performance profile. Every movement path performs its
-profile-specific release in cleanup, including cancellation. `00 00` is flat/all
-down, never STOP.
+Ordinary movement controls use 10 writes at 100 ms for Bed Control and 4 writes
+at 300 ms for the explicit Performance profile. Feedback-driven position seeks
+refresh the movement command every 100 ms until completion. Every movement path
+performs one profile-specific release in cleanup, including cancellation. `00
+00` is flat/all down, never STOP.
 
 ## Bed Connect exclusion
 
@@ -211,10 +215,12 @@ not implement WiFi provisioning, cloud control or module firmware updates.
 
 ## Position seeking
 
-Linak uses a 0.3° seek tolerance for ordinary targets. During a seek, fresh
-per-axis reference notifications drive the feedback loop directly; an explicit
-GATT read remains the fallback when that notification stream is stale. This
-avoids slow whole-bed reads between short movement pulses while retaining safe
+Linak uses a 0.3° seek tolerance for ordinary targets. During a seek, it follows
+Bed Control's held-command lifecycle: one movement frame every 100 ms, with no
+intermediate release, then one `FF 00` release when the target is reached or the
+operation ends. Fresh per-axis reference notifications drive the feedback loop
+directly; an explicit GATT read remains the fallback when that notification
+stream is stale. This keeps the motor moving continuously while retaining safe
 behavior on variants with missing feedback.
 
 Live testing found one lower physical endpoint where the back actuator stopped
@@ -222,12 +228,6 @@ at a reported 1.0° to 1.1° when 0° was requested. A back seek to exactly 0°
 therefore completes after two consecutive stalled checks at or below 1.1°, with
 at most one retry after the first confirmed stall. Mid-range stalls continue to
 retry normally.
-
-On the tested two-motor Advanced model, notification-driven feedback reduced a
-roughly 10° back seek from about 20 seconds to 8.5 seconds and reduced settled
-error from 0.5° to 0.1° in the upward direction. The reverse back seek settled
-within 0.2°, and legs seeks in both directions settled within 0.1°, without a
-reversal or oscillation.
 
 Upper endpoints retain the normal tolerance. No upper-endpoint exception is
 enabled without supporting evidence.
