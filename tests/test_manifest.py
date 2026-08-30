@@ -32,8 +32,8 @@ def test_manifest_bluetooth_matchers_are_accepted_by_home_assistant() -> None:
     IntegrationMatcher(manifest["bluetooth"]).async_setup()
 
 
-def test_manifest_discovers_supported_embedded_qms2_name() -> None:
-    """The detector-supported name must pass the manifest's discovery gate."""
+def test_manifest_discovers_supported_prefixed_qms2_name() -> None:
+    """The detector-supported prefixed name must pass the discovery gate."""
     manifest_path = (
         Path(__file__).parents[1] / "custom_components" / "adjustable_bed" / "manifest.json"
     )

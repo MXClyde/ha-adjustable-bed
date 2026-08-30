@@ -31,7 +31,7 @@ The accepted reports prove application behavior exhaustively. Physical behavior 
 
 `QMS2` and `QMS-MQ` deliberately use the common profile. HomeKobo and Sweet Night both route these names, but only HomeKobo exposes massage. The integration does not assume that optional hardware exists.
 
-The exact S4-Y route preserves a real user's confirmed four-cover layout and the previously deployed legacy all-flat command. Auto-discovery is limited to the accepted names in the table. Broad `QMS*` and S3/S4/S5/S6 matching was removed because it would include names sourced only from the still-pending Motion Bed APK. A name merely containing `solace` is not evidence and is not auto-detected. Existing manual entries with an unidentified name retain basic back/legs movement and STOP but do not receive guessed query, preset, massage, or lighting commands.
+The exact S4-Y route preserves a real user's confirmed four-cover layout and the previously deployed legacy all-flat command. Auto-discovery is limited to names beginning with the accepted values in the table, plus the accepted `My QMS2` prefix. Broad `QMS*`, arbitrarily prefixed substring, and S3/S4/S5/S6 matching was removed because Home Assistant cannot safely index leading-wildcard discovery hints and the broader families include names sourced only from the still-pending Motion Bed APK. A name merely containing `solace` is not evidence and is not auto-detected. Existing manual entries with an unidentified name retain basic back/legs movement and STOP but do not receive guessed query, preset, massage, or lighting commands.
 
 ## BLE session
 
@@ -114,7 +114,7 @@ Every behavior reachable in the frozen MotionFlex report has one disposition bel
 
 | Reachable discovery | Disposition | Integration reference |
 |---|---|---|
-| Accepted local-name discovery, including names that contain `My QMS2`, and conservative profile routing | IMPLEMENTED | `manifest.json`, `detection.py`, and `resolve_solace_profile()` |
+| Accepted local-name prefix discovery, including `My QMS2`, and conservative profile routing | IMPLEMENTED | `manifest.json`, `detection.py`, and `resolve_solace_profile()` |
 | FFE1 connection, notification/CCCD setup, writes, clean disconnect, and the absence of authentication or bonding | ALREADY_IMPLEMENTED | Coordinator BLE lifecycle plus `SolaceController` transport tests |
 | Fixed CRC frames and additive-checksum variable frames | IMPLEMENTED | `SolaceCommands`, `_with_additive_checksum()`, and artifact-vector tests |
 | Back/legs movement with STOP cleanup | ALREADY_IMPLEMENTED | Solace movement methods and cancellation tests |
@@ -126,7 +126,7 @@ Every behavior reachable in the frozen MotionFlex report has one disposition bel
 | Brightness writes 0-10 and three timer toggles | ALREADY_IMPLEMENTED | Solace light, number, and select entities plus command tests |
 | Model-setting identifiers whose predicate has no visible effect | EXCLUDED | Reachable app settings are behaviorally inert, so there is no state or command to reproduce |
 | Sync notifications with empty EventBus consumers | EXCLUDED | The app records a switch, but no reachable behavior consumes or changes it |
-| Broad case-sensitive `QMS` substring discovery outside accepted profile names | EXCLUDED | Auto-configuring an unknown FFE1 device would be unsafe; narrower names are backed by the accepted app set, while the remaining families still await their own frozen analyses |
+| Arbitrarily prefixed or broad case-sensitive `QMS` substring discovery | EXCLUDED | Home Assistant rejects leading-wildcard discovery hints as too broad; accepted prefixes remain reachable, while auto-configuring unknown FFE1 families would be unsafe |
 | Initial FFE1 write without an initialized application value | EXCLUDED | The artifact does not assign command bytes before this write, so reproducing an unknown cached characteristic value would be nondeterministic and unsafe |
 | Reads of every GATT descriptor and their passive callbacks | EXCLUDED | The app has no consumer for the returned values; Home Assistant's Bluetooth stack owns the CCCD operation needed for notifications |
 

@@ -988,7 +988,7 @@ OCTO_NAME_PATTERNS: Final = (
     "da1458x",
 )
 
-# Exact case-folded substrings admitted by the accepted apps. The separate
+# Exact case-folded prefixes accepted for automatic discovery. The separate
 # S-series app is pending Phase 4; only exact S4-Y has legacy hardware evidence
 # and is handled by the narrow regex in detection.py.
 SOLACE_NAME_PATTERNS: Final = (

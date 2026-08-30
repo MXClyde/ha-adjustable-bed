@@ -126,7 +126,7 @@ These beds have their own dedicated integrations:
 2. **Check the remote or controller** for brand markings.
 
 3. **Look at the device name** (shown during manual setup or in diagnostics):
-   - Accepted `QMS-IQ`, `QMS-I06`, `QMS-LQ`, `QMS-L04`, `QMS-JQ-D`, `QMS4`, `QMS-NQ`, `QMS3`, `QMS-MQ`, `QMS2`, `SealyMF*`, or exact `S4-Y-<digits>-<id>` → Solace/QMS 11-byte family
+   - A name beginning with accepted `QMS-IQ`, `QMS-I06`, `QMS-LQ`, `QMS-L04`, `QMS-JQ-D`, `QMS4`, `QMS-NQ`, `QMS3`, `QMS-MQ`, `QMS2`, `My QMS2`, `SealyMF`, or exact `S4-Y-<digits>-<id>` → Solace/QMS 11-byte family
    - `HHC*` → MotoSleep
    - `DPG*` or `Desk*` → Linak
    - `Mouselet*` → Kaidi
@@ -170,7 +170,7 @@ These beds have their own dedicated integrations:
    - Service `6e400001-...` + name `AHF*` → TiMOTION AHF
    - Service `0000fee9-...` → Richmat WiLinke or BedTech
    - Service `00001525-...` → Vibradorm
-   - An accepted QMS name listed above, `SealyMF*`, or exact `S4-Y-<digits>-<id>` → Solace/QMS; accepted apps discover FFE1 dynamically and do not require advertised FFE0
+   - A name beginning with an accepted QMS or SealyMF prefix listed above, or exact `S4-Y-<digits>-<id>` → Solace/QMS; accepted apps discover FFE1 dynamically and do not require advertised FFE0
    - Service `6e403587-...` → Remacro
    - Service `09d23fae-...` → [Sleep Number](beds/sleep_number.md) (Climate 360 / FlexFit, Fuzion)
    - Service `ffffd1fd-...` → [Sleep Number](beds/sleep_number.md) (i8 / 360 FlexFit 2, BAM/MCR)

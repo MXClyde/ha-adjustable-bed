@@ -386,7 +386,26 @@ class TestSolaceProfiles:
         assert state is not None
         assert state.state == "5"
 
-    async def test_non_motionflex_setup_removes_legacy_light_level_number(
+        notify_callback(
+            SOLACE_CHAR_UUID,
+            bytearray.fromhex("FF FF FF FF 01 00 04 13 0F 06 45 00 8A 01 02 01 15"),
+        )
+        alarm_entity_id = registry.async_get_entity_id(
+            "binary_sensor",
+            DOMAIN,
+            "AA:BB:CC:DD:EE:FF_solace_alarm_enabled",
+        )
+        assert alarm_entity_id is not None
+        alarm_state = hass.states.get(alarm_entity_id)
+        assert alarm_state is not None
+        assert alarm_state.state == "on"
+        assert alarm_state.attributes["solace_alarm_time"] == "06:45"
+        assert alarm_state.attributes["solace_alarm_weekdays"] == "1,3,7"
+        assert alarm_state.attributes["solace_alarm_mode"] == "memory_1"
+        assert alarm_state.attributes["solace_alarm_massage"] is True
+        assert alarm_state.attributes["solace_alarm_sound"] == "music_5"
+
+    async def test_non_motionflex_setup_removes_motionflex_only_entities(
         self,
         hass: HomeAssistant,
         mock_solace_config_entry,
@@ -404,11 +423,25 @@ class TestSolaceProfiles:
             "AA:BB:CC:DD:EE:FF_light_level",
             config_entry=mock_solace_config_entry,
         )
+        stale_audio = registry.async_get_or_create(
+            "sensor",
+            DOMAIN,
+            "AA:BB:CC:DD:EE:FF_solace_audio_volume",
+            config_entry=mock_solace_config_entry,
+        )
+        stale_alarm = registry.async_get_or_create(
+            "binary_sensor",
+            DOMAIN,
+            "AA:BB:CC:DD:EE:FF_solace_alarm_enabled",
+            config_entry=mock_solace_config_entry,
+        )
 
         await hass.config_entries.async_setup(mock_solace_config_entry.entry_id)
         await hass.async_block_till_done()
 
         assert registry.async_get(stale.entity_id) is None
+        assert registry.async_get(stale_audio.entity_id) is None
+        assert registry.async_get(stale_alarm.entity_id) is None
 
     async def test_query_sequence_is_serialized_with_app_pacing(self) -> None:
         coordinator = MagicMock()

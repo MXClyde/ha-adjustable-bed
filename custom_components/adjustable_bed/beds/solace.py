@@ -19,7 +19,12 @@ from bleak.exc import BleakError
 from homeassistant.util import dt as dt_util
 
 from ..const import SOLACE_CHAR_UUID
-from .base import BedController, ControllerStateSensorSpec, MotorControlSpec
+from .base import (
+    BedController,
+    ControllerStateBinarySensorSpec,
+    ControllerStateSensorSpec,
+    MotorControlSpec,
+)
 
 if TYPE_CHECKING:
     from ..coordinator import AdjustableBedCoordinator
@@ -294,6 +299,44 @@ class SolaceController(BedController):
                 icon="mdi:volume-high",
             ),
         )
+
+    @property
+    def controller_state_binary_sensor_specs(
+        self,
+    ) -> tuple[ControllerStateBinarySensorSpec, ...]:
+        """Expose the decoded MotionFlex alarm reply and its configuration."""
+        if not self.supports_solace_alarm:
+            return ()
+        return (
+            ControllerStateBinarySensorSpec(
+                key="solace_alarm_enabled",
+                translation_key="solace_alarm_enabled",
+                state_key="solace_alarm_enabled",
+                icon="mdi:alarm",
+                attribute_keys=(
+                    "solace_alarm_time",
+                    "solace_alarm_weekdays",
+                    "solace_alarm_mode",
+                    "solace_alarm_massage",
+                    "solace_alarm_sound",
+                    "solace_audio_available",
+                ),
+            ),
+        )
+
+    @property
+    def stale_controller_state_sensor_entity_keys(self) -> frozenset[str]:
+        """Remove MotionFlex-only sensor entities from narrower profiles."""
+        if self.supports_solace_audio:
+            return frozenset()
+        return frozenset({"solace_audio_volume"})
+
+    @property
+    def stale_controller_state_binary_sensor_entity_keys(self) -> frozenset[str]:
+        """Remove MotionFlex-only binary sensors from narrower profiles."""
+        if self.supports_solace_alarm:
+            return frozenset()
+        return frozenset({"solace_alarm_enabled"})
 
     @property
     def control_characteristic_uuid(self) -> str:

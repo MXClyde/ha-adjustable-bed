@@ -1839,10 +1839,12 @@ def detect_bed_type_detailed(service_info: BluetoothServiceInfoBleak) -> Detecti
         )
         return DetectionResult(bed_type=BED_TYPE_OCTO, confidence=0.9, signals=signals)
 
-    # Accepted apps route QMS/SealyMF by local name alone and discover FFE1 by
-    # traversing every GATT service. Exact S4-Y retains its hardware-confirmed
-    # legacy route; broader S-series matching awaits its own Phase 4 analysis.
-    if any(pattern in device_name for pattern in SOLACE_NAME_PATTERNS) or (
+    # Home Assistant's Bluetooth index requires three literal leading characters,
+    # so automatic discovery is limited to the accepted prefixes represented in
+    # the manifest. Exact S4-Y retains its hardware-confirmed legacy route.
+    if any(device_name.startswith(pattern) for pattern in SOLACE_NAME_PATTERNS) or (
+        device_name.startswith("my qms2")
+    ) or (
         SOLACE_NAME_PATTERN.fullmatch(device_name)
     ):
         signals.append("name:solace")
