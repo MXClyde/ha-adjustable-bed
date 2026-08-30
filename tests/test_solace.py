@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,11 +14,14 @@ from custom_components.adjustable_bed.beds.solace import (
     SolaceCommands,
     SolaceController,
     SolaceProfile,
+    build_solace_alarm_command,
+    build_solace_clock_command,
     resolve_solace_profile,
 )
 from custom_components.adjustable_bed.const import (
     BED_TYPE_SOLACE,
     CONF_BED_TYPE,
+    CONF_BLE_DEVICE_NAME,
     CONF_DISABLE_ANGLE_SENSING,
     CONF_HAS_MASSAGE,
     CONF_MOTOR_COUNT,
@@ -188,6 +192,122 @@ class TestSolaceProfiles:
         coordinator.ble_device_name = name
 
         assert SolaceController(coordinator)._query_family == expected
+
+    async def test_offline_profile_uses_persisted_observed_name(
+        self,
+        hass: HomeAssistant,
+        mock_solace_config_entry_data: dict,
+    ) -> None:
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Renamed bedroom bed",
+            data={
+                **mock_solace_config_entry_data,
+                CONF_NAME: "Renamed bedroom bed",
+                CONF_BLE_DEVICE_NAME: "SealyMF Base",
+            },
+            unique_id="AA:BB:CC:DD:EE:11",
+        )
+        entry.add_to_hass(hass)
+        coordinator = AdjustableBedCoordinator(hass, entry)
+
+        await coordinator.async_prime_offline_controller()
+
+        assert isinstance(coordinator.capability_controller, SolaceController)
+        assert coordinator.capability_controller.profile is SolaceProfile.MOTION_FLEX
+
+    async def test_observed_name_is_persisted_for_offline_routing(
+        self,
+        hass: HomeAssistant,
+        mock_solace_config_entry,
+    ) -> None:
+        coordinator = AdjustableBedCoordinator(hass, mock_solace_config_entry)
+
+        coordinator._record_observed_ble_device_name("SealyMF Base")
+
+        assert mock_solace_config_entry.data[CONF_BLE_DEVICE_NAME] == "SealyMF Base"
+
+    def test_motionflex_variable_frame_vectors(self) -> None:
+        assert build_solace_clock_command(datetime(2023, 12, 31, 23, 59, 58)).hex() == (
+            "ffffffff01000111235958072312315005"
+        )
+        assert build_solace_alarm_command(
+            enabled=False,
+            hour=0,
+            minute=0,
+            weekdays=(),
+            mode="no_action",
+            massage=False,
+            sound="none",
+        ).hex() == "ffffffff01000213a10000000000030000b604"
+
+    async def test_motionflex_startup_syncs_clock_before_queries(self) -> None:
+        coordinator = MagicMock()
+        coordinator.ble_device_name = "SealyMF Base"
+        controller = SolaceController(coordinator)
+        controller.write_command = AsyncMock()
+
+        async def execute_query(query_fn, **kwargs):
+            return await query_fn(controller)
+
+        coordinator.async_execute_controller_query = AsyncMock(side_effect=execute_query)
+        now = datetime(2023, 12, 31, 23, 59, 58)
+        with (
+            patch("custom_components.adjustable_bed.beds.solace.dt_util.now", return_value=now),
+            patch(
+                "custom_components.adjustable_bed.beds.solace.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await controller._async_query_preset_states("q2")
+
+        assert [call.args[0] for call in controller.write_command.await_args_list] == [
+            build_solace_clock_command(now),
+            *SolaceCommands.QUERY_Q2,
+        ]
+
+    async def test_motionflex_audio_commands_match_artifact_vectors(self) -> None:
+        coordinator = MagicMock()
+        coordinator.ble_device_name = "SealyMF Base"
+        controller = SolaceController(coordinator)
+        controller.write_command = AsyncMock()
+
+        await controller.solace_select_music(3)
+        await controller.solace_select_music(5, preview=True)
+        await controller.solace_set_audio_volume(4)
+        await controller.solace_query_audio_volume()
+
+        assert [call.args[0].hex() for call in controller.write_command.await_args_list] == [
+            "ffffffff0100130b031e04",
+            "ffffffff0100130b85a004",
+            "ffffffff0100140b042004",
+            "ffffffff0100150b001d04",
+        ]
+
+    def test_motionflex_notification_parser_tracks_audio_and_alarm(self) -> None:
+        coordinator = MagicMock()
+        coordinator.ble_device_name = "SealyMF Base"
+        controller = SolaceController(coordinator)
+
+        controller._parse_notification(bytes.fromhex("FF FF FF FF 01 00 15 0B AF 00 00"))
+        coordinator.handle_controller_state_updates.assert_called_once_with(
+            {"solace_audio_volume": 15}
+        )
+
+        coordinator.handle_controller_state_updates.reset_mock()
+        controller._parse_notification(
+            bytes.fromhex("FF FF FF FF 01 00 04 13 0F 06 45 00 8A 01 02 01 15")
+        )
+        coordinator.handle_controller_state_updates.assert_called_once_with(
+            {
+                "solace_alarm_enabled": True,
+                "solace_alarm_time": "06:45",
+                "solace_alarm_weekdays": "1,3,7",
+                "solace_alarm_mode": "memory_1",
+                "solace_alarm_massage": True,
+                "solace_alarm_sound": "music_5",
+            }
+        )
 
     async def test_query_sequence_is_serialized_with_app_pacing(self) -> None:
         coordinator = MagicMock()

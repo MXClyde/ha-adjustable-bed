@@ -114,6 +114,7 @@ from .const import (
     CONF_BLE_BOND_ATTEMPTED_SOURCE,
     CONF_BLE_BOND_ESTABLISHED,
     CONF_BLE_BOND_MARKER_UNRELIABLE,
+    CONF_BLE_DEVICE_NAME,
     CONF_CB24_BED_SELECTION,
     CONF_CONNECTION_PROFILE,
     CONF_DISABLE_ANGLE_SENSING,
@@ -323,7 +324,7 @@ class AdjustableBedCoordinator:
         # Malouf's APK has one command exception keyed to Smartbed238. Keep the
         # configured name as a controller fallback, but track actual observations
         # separately so protocol detection never relies on a user-facing rename.
-        self._ble_device_name: str = self._name
+        self._ble_device_name: str = entry.data.get(CONF_BLE_DEVICE_NAME, self._name)
         self._observed_ble_device_name: str | None = None
         self._malouf_layout: str = entry.data.get(CONF_MALOUF_LAYOUT, MALOUF_LAYOUT_AUTO)
         self._malouf_memory_slots: int = int(
@@ -558,6 +559,19 @@ class AdjustableBedCoordinator:
             entry.persist_data(new_data, keys=keys)
         else:
             self.hass.config_entries.async_update_entry(entry, data=new_data)
+
+    def _record_observed_ble_device_name(self, device_name: str) -> None:
+        """Remember the advertising name used by protocol capability routing."""
+        self._ble_device_name = device_name
+        self._observed_ble_device_name = device_name
+        if (
+            self._bed_type == BED_TYPE_SOLACE
+            and self.entry.data.get(CONF_BLE_DEVICE_NAME) != device_name
+        ):
+            self._async_persist_config(
+                {**self.entry.data, CONF_BLE_DEVICE_NAME: device_name},
+                keys={CONF_BLE_DEVICE_NAME},
+            )
 
     def _apply_runtime_bed_type_correction(self, corrected_bed_type: str) -> bool:
         """Apply a protocol correction discovered after BLE service discovery."""
@@ -890,8 +904,12 @@ class AdjustableBedCoordinator:
         is_linak_performance = (
             bed_type == BED_TYPE_LINAK and self._protocol_variant == LINAK_VARIANT_PERFORMANCE
         )
+        statically_mintable = bed_type in OFFLINE_CAPABILITY_SAFE_BED_TYPES and (
+            bed_type != BED_TYPE_SOLACE
+            or isinstance(self.entry.data.get(CONF_BLE_DEVICE_NAME), str)
+        )
         mintable = (
-            bed_type in OFFLINE_CAPABILITY_SAFE_BED_TYPES
+            statically_mintable
             or (bed_type == BED_TYPE_OCTO and (octo_snapshot is not None or is_octo_star2))
             or (bed_type == BED_TYPE_LINAK and (linak_snapshot is not None or is_linak_performance))
         )
@@ -2443,8 +2461,7 @@ class AdjustableBedCoordinator:
                     getattr(device, "details", "N/A"),
                 )
                 if device.name:
-                    self._ble_device_name = device.name
-                    self._observed_ble_device_name = device.name
+                    self._record_observed_ble_device_name(device.name)
 
                 if self._preferred_adapter and self._preferred_adapter != ADAPTER_AUTO:
                     if device_source == self._preferred_adapter:
@@ -2496,8 +2513,7 @@ class AdjustableBedCoordinator:
                         svc_source = getattr(svc_info, "source", None)
                         if selected_source is None or svc_source == selected_source:
                             if svc_info.device.name:
-                                self._ble_device_name = svc_info.device.name
-                                self._observed_ble_device_name = svc_info.device.name
+                                self._record_observed_ble_device_name(svc_info.device.name)
                             _LOGGER.debug(
                                 "ble_device_callback returning device from %s (RSSI: %s, connectable=%s)",
                                 svc_source or "unknown",
@@ -2521,8 +2537,7 @@ class AdjustableBedCoordinator:
                     if fallback is None:
                         raise BleakError(f"Device {self._address} not found")
                     if fallback.name:
-                        self._ble_device_name = fallback.name
-                        self._observed_ble_device_name = fallback.name
+                        self._record_observed_ble_device_name(fallback.name)
                     if connectable is False:
                         _LOGGER.debug(
                             "ble_device_callback falling back to non-connectable record for %s",

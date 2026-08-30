@@ -38,7 +38,9 @@ from custom_components.adjustable_bed.const import (
     BED_TYPE_OCTO,
     BED_TYPE_RICHMAT,
     BED_TYPE_SBI,
+    BED_TYPE_SOLACE,
     CONF_BED_TYPE,
+    CONF_BLE_DEVICE_NAME,
     CONF_DISABLE_ANGLE_SENSING,
     CONF_HAS_MASSAGE,
     CONF_KAIDI_RESOLVED_VARIANT,
@@ -2711,6 +2713,8 @@ class TestOfflineSafeBedTypes:
         data[CONF_BED_TYPE] = bed_type
         for child in data[CONF_PAIR_CHILDREN]:
             child[CONF_BED_TYPE] = bed_type
+            if bed_type == BED_TYPE_SOLACE:
+                child[CONF_BLE_DEVICE_NAME] = "SealyMF Base"
         entry = MockConfigEntry(
             domain=DOMAIN,
             title=bed_type,
@@ -2724,6 +2728,61 @@ class TestOfflineSafeBedTypes:
 
         await left.async_prime_offline_controller()
         assert left.capability_controller is not None, bed_type
+
+    async def test_solace_offline_profile_uses_observed_ble_name(
+        self, hass: HomeAssistant
+    ) -> None:
+        data = _paired_entry_data()
+        data[CONF_BED_TYPE] = BED_TYPE_SOLACE
+        for child in data[CONF_PAIR_CHILDREN]:
+            child.update(
+                {
+                    CONF_BED_TYPE: BED_TYPE_SOLACE,
+                    CONF_NAME: "Renamed bedroom bed",
+                    CONF_BLE_DEVICE_NAME: "SealyMF Base",
+                }
+            )
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Renamed bedroom bed",
+            data=data,
+            unique_id="pair_solace_observed_name",
+            version=4,
+        )
+        entry.add_to_hass(hass)
+        left = _build_paired_children(hass, entry)[SIDE_LEFT]
+
+        await left.async_prime_offline_controller()
+
+        assert left.capability_controller is not None
+        assert left.capability_controller.supports_solace_audio is True
+
+    async def test_legacy_solace_without_observed_name_is_not_minted(
+        self, hass: HomeAssistant
+    ) -> None:
+        data = _paired_entry_data()
+        data[CONF_BED_TYPE] = BED_TYPE_SOLACE
+        for child in data[CONF_PAIR_CHILDREN]:
+            child.update(
+                {
+                    CONF_BED_TYPE: BED_TYPE_SOLACE,
+                    CONF_NAME: "Renamed bedroom bed",
+                }
+            )
+            child.pop(CONF_BLE_DEVICE_NAME, None)
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Renamed bedroom bed",
+            data=data,
+            unique_id="pair_solace_legacy_name",
+            version=4,
+        )
+        entry.add_to_hass(hass)
+        left = _build_paired_children(hass, entry)[SIDE_LEFT]
+
+        await left.async_prime_offline_controller()
+
+        assert left.capability_controller is None
 
 
 class TestOctoOfflineSnapshot:

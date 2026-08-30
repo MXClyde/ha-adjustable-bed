@@ -102,7 +102,37 @@ These historical commands remain out of accepted profiles until their own APKs p
 - Broad S3/S4/S5/S6 detection
 - The historical STOP + 200 ms preset preamble
 
-MotionFlex also contains reachable relaxing-bedtime, music/audio, clock, and alarm surfaces. They are documented in its frozen analysis but are not mapped onto unrelated existing Home Assistant entities in this controller change.
+## MotionFlex audio, clock, and alarm
+
+The MotionFlex profile exposes its relaxing-bedtime preset and music start/stop actions as buttons. The `adjustable_bed.solace_audio` service selects or previews tracks 1-5, queries the current volume, and sets volume levels 1-5. The `adjustable_bed.solace_set_alarm` service programs the enabled state, time, weekdays, bed action, massage flag, and alarm or music sound. These services reject non-MotionFlex targets.
+
+On notification startup the controller first sends the app's local-time clock frame, then runs the Q2 preset queries. MotionFlex audio-volume and alarm replies are decoded into controller diagnostic state.
+
+## MotionFlex discovery ledger
+
+Every behavior reachable in the frozen MotionFlex report has one disposition below. Grouped rows cover commands or notifications that share one reachable surface and implementation path.
+
+| Reachable discovery | Disposition | Integration reference |
+|---|---|---|
+| Accepted local-name discovery, including names that contain `My QMS2`, and conservative profile routing | IMPLEMENTED | `manifest.json`, `detection.py`, and `resolve_solace_profile()` |
+| FFE1 connection, notification/CCCD setup, writes, clean disconnect, and the absence of authentication or bonding | ALREADY_IMPLEMENTED | Coordinator BLE lifecycle plus `SolaceController` transport tests |
+| Fixed CRC frames and additive-checksum variable frames | IMPLEMENTED | `SolaceCommands`, `_with_additive_checksum()`, and artifact-vector tests |
+| Back/legs movement with STOP cleanup | ALREADY_IMPLEMENTED | Solace movement methods and cancellation tests |
+| Flat, relaxing-bedtime, memory, TV, zero-G, and anti-snore actions | IMPLEMENTED | Preset buttons/methods and Solace command tests |
+| Five startup preset queries and selected-state notification parsing | ALREADY_IMPLEMENTED | `_async_query_preset_states()` and notification tests |
+| Music start/stop, track selection, previews, volume query/set, and volume reply | IMPLEMENTED | Music buttons, `solace_audio`, and parser tests |
+| Startup local-time clock synchronization | IMPLEMENTED | `build_solace_clock_command()` and startup-query tests |
+| Alarm programming and alarm/audio-availability replies | IMPLEMENTED | `solace_set_alarm`, `build_solace_alarm_command()`, and parser tests |
+| Brightness 0-10, brightness query/reply, and three timer toggles | ALREADY_IMPLEMENTED | Solace light and select entities plus command/parser tests |
+| Model-setting identifiers whose predicate has no visible effect | EXCLUDED | Reachable app settings are behaviorally inert, so there is no state or command to reproduce |
+| Sync notifications with empty EventBus consumers | EXCLUDED | The app records a switch, but no reachable behavior consumes or changes it |
+| Broad case-sensitive `QMS` substring discovery outside accepted profile names | EXCLUDED | Auto-configuring an unknown FFE1 device would be unsafe; narrower names are backed by the accepted app set, while the remaining families still await their own frozen analyses |
+| Initial FFE1 write without an initialized application value | EXCLUDED | The artifact does not assign command bytes before this write, so reproducing an unknown cached characteristic value would be nondeterministic and unsafe |
+| Reads of every GATT descriptor and their passive callbacks | EXCLUDED | The app has no consumer for the returned values; Home Assistant's Bluetooth stack owns the CCCD operation needed for notifications |
+
+Ledger totals: **IMPLEMENTED 6, ALREADY_IMPLEMENTED 4, EXCLUDED 5**.
+
+Dead or unreachable artifact code is outside the reachable ledger: the hidden massage and fault surfaces, characteristic reads, RSSI reads, reliable writes, and the unused advertisement parser are not exposed by the MotionFlex application.
 
 ## Validation requests
 

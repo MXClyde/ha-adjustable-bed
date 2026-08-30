@@ -67,6 +67,7 @@ CONF_PASSIVE_POSITION_RECONCILIATION: Final = "passive_position_reconciliation"
 # Stored separately via discovery_settings, surfaced as a checkbox in the options
 # flow. Manual "Add Integration" is unaffected.
 CONF_DISABLE_DISCOVERY: Final = "disable_discovery"
+CONF_BLE_DEVICE_NAME: Final = "ble_device_name"
 CONF_OCTO_PIN: Final = "octo_pin"
 CONF_RICHMAT_REMOTE: Final = "richmat_remote"
 CONF_JENSEN_PIN: Final = "jensen_pin"

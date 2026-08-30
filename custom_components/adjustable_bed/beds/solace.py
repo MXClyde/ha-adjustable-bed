@@ -10,11 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Collection
+from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from bleak.exc import BleakError
+from homeassistant.util import dt as dt_util
 
 from ..const import SOLACE_CHAR_UUID
 from .base import BedController, MotorControlSpec
@@ -40,6 +42,76 @@ _HOME_K1_PRIMARY_NAMES = ("qms-iq", "qms-i06", "qms-lq", "qms-l04")
 _HOME_K1_FALLBACK_NAMES = ("qms-nq", "qms3")
 _HOME_K2_NAMES = ("qms-jq-d", "qms4")
 _LEGACY_S4_Y_PATTERN = re.compile(r"^s4-y-\d+-[a-z0-9]+$", re.IGNORECASE)
+
+_SOLACE_ALARM_MODES = {"zero_g": 0x01, "memory_1": 0x02, "no_action": 0x03}
+_SOLACE_ALARM_SOUNDS = {
+    "none": 0x00,
+    "alarm": 0x01,
+    "music_1": 0x11,
+    "music_2": 0x12,
+    "music_3": 0x13,
+    "music_4": 0x14,
+    "music_5": 0x15,
+}
+
+
+def _bcd(value: int) -> int:
+    """Encode a two-digit decimal value as one BCD byte."""
+    return ((value // 10) << 4) | (value % 10)
+
+
+def _with_additive_checksum(body: bytes) -> bytes:
+    """Append the app's unpadded little-endian additive checksum."""
+    checksum = sum(body)
+    encoded = bytearray()
+    while checksum:
+        encoded.append(checksum & 0xFF)
+        checksum >>= 8
+    return body + bytes(encoded)
+
+
+def build_solace_clock_command(now: datetime) -> bytes:
+    """Build the MotionFlex startup clock-sync frame."""
+    body = bytes.fromhex("FF FF FF FF 01 00 01 11") + bytes(
+        (
+            _bcd(now.hour),
+            _bcd(now.minute),
+            _bcd(now.second),
+            _bcd(now.isoweekday()),
+            _bcd(now.year % 100),
+            _bcd(now.month),
+            _bcd(now.day),
+        )
+    )
+    return _with_additive_checksum(body)
+
+
+def build_solace_alarm_command(
+    *,
+    enabled: bool,
+    hour: int,
+    minute: int,
+    weekdays: Collection[int],
+    mode: str,
+    massage: bool,
+    sound: str,
+) -> bytes:
+    """Build the MotionFlex alarm frame from user-facing values."""
+    weekday_mask = sum(1 << weekday for weekday in weekdays)
+    body = bytes.fromhex("FF FF FF FF 01 00 02 13") + bytes(
+        (
+            0x01 if enabled else 0xA1,
+            _bcd(hour),
+            _bcd(minute),
+            0x00,
+            weekday_mask,
+            bool(weekdays),
+            _SOLACE_ALARM_MODES[mode],
+            massage,
+            _SOLACE_ALARM_SOUNDS[sound],
+        )
+    )
+    return _with_additive_checksum(body)
 
 
 def resolve_solace_profile(device_name: str) -> SolaceProfile:
@@ -68,6 +140,7 @@ class SolaceCommands:
     PRESET_ZERO_G = bytes([0xFF, 0xFF, 0xFF, 0xFF, 0x05, 0x00, 0x00, 0x00, 0x09, 0x17, 0x06])
     PRESET_ANTI_SNORE = bytes([0xFF, 0xFF, 0xFF, 0xFF, 0x05, 0x00, 0x00, 0x00, 0x0F, 0x97, 0x04])
     PRESET_FLAT_BED = bytes([0xFF, 0xFF, 0xFF, 0xFF, 0x05, 0x00, 0x00, 0x00, 0x08, 0xD6, 0xC6])
+    PRESET_RELAXING_BEDTIME = bytes.fromhex("FF FF FF FF 05 00 00 00 6A 57 2F")
     PRESET_LEGACY_ALL_FLAT = bytes(
         [0xFF, 0xFF, 0xFF, 0xFF, 0x05, 0x00, 0x00, 0x00, 0x2A, 0x56, 0xDF]
     )
@@ -178,6 +251,11 @@ class SolaceCommands:
     LIGHT_TIMER_8_HOURS = bytes([0xFF, 0xFF, 0xFF, 0xFF, 0x05, 0x00, 0x00, 0x00, 0x1A, 0x56, 0xCB])
     LIGHT_TIMER_10_HOURS = bytes([0xFF, 0xFF, 0xFF, 0xFF, 0x05, 0x00, 0x00, 0x00, 0x1B, 0x97, 0x0B])
 
+    # MotionFlex music/audio controls use the additive-checksum frame family.
+    MUSIC_TOGGLE = bytes.fromhex("FF FF FF FF 01 00 13 0B FF 1A 05")
+    MUSIC_OFF = bytes.fromhex("FF FF FF FF 01 00 13 0B 00 1B 04")
+    AUDIO_VOLUME_QUERY = bytes.fromhex("FF FF FF FF 01 00 15 0B 00 1D 04")
+
 
 class SolaceController(BedController):
     """Controller for Solace beds."""
@@ -257,6 +335,11 @@ class SolaceController(BedController):
         queries = SolaceCommands.QUERY_Q1 if query_family == "q1" else SolaceCommands.QUERY_Q2
 
         async def run_queries(controller: BedController) -> None:
+            if self.profile is SolaceProfile.MOTION_FLEX:
+                await controller.write_command(
+                    build_solace_clock_command(dt_util.now()),
+                    cancel_event=asyncio.Event(),
+                )
             for index, command in enumerate(queries):
                 await controller.write_command(command, cancel_event=asyncio.Event())
                 if index < len(queries) - 1:
@@ -300,7 +383,7 @@ class SolaceController(BedController):
 
     def _parse_notification(self, data: bytes) -> None:
         """Update selected preset flags from Q1/Q2 replies and command echoes."""
-        updates: dict[str, bool] = {}
+        updates: dict[str, bool | int | str] = {}
         selectors = {
             0x05: "tv",
             0x09: "zero_g",
@@ -328,6 +411,43 @@ class SolaceController(BedController):
         for frame, (key, selected) in state_frames.items():
             if frame in data:
                 updates[f"solace_{key}_selected"] = selected
+
+        volume_prefix = bytes.fromhex("FF FF FF FF 01 00 15 0B")
+        if (volume_index := data.find(volume_prefix)) >= 0 and len(data) > volume_index + 8:
+            updates["solace_audio_volume"] = data[volume_index + 8] & 0x0F
+
+        alarm_none_prefix = bytes.fromhex("FF FF FF FF 01 00 03 0B")
+        if (alarm_none_index := data.find(alarm_none_prefix)) >= 0 and len(
+            data
+        ) > alarm_none_index + 8:
+            updates.update(
+                {
+                    "solace_alarm_enabled": False,
+                    "solace_audio_available": data[alarm_none_index + 8] != 0,
+                }
+            )
+
+        alarm_prefix = bytes.fromhex("FF FF FF FF 01 00 04 13")
+        if (alarm_index := data.find(alarm_prefix)) >= 0 and len(data) >= alarm_index + 17:
+            payload = data[alarm_index + 8 : alarm_index + 17]
+            enabled = payload[0] in {0x0F, 0x1F}
+            weekdays = [str(day) for day in range(1, 8) if payload[4] & (1 << day)]
+            mode = {value: key for key, value in _SOLACE_ALARM_MODES.items()}.get(
+                payload[6], f"unknown_{payload[6]:02x}"
+            )
+            sound = {value: key for key, value in _SOLACE_ALARM_SOUNDS.items()}.get(
+                payload[8], f"unknown_{payload[8]:02x}"
+            )
+            updates.update(
+                {
+                    "solace_alarm_enabled": enabled,
+                    "solace_alarm_time": f"{payload[1]:02x}:{payload[2]:02x}",
+                    "solace_alarm_weekdays": ",".join(weekdays),
+                    "solace_alarm_mode": mode,
+                    "solace_alarm_massage": payload[7] == 1,
+                    "solace_alarm_sound": sound,
+                }
+            )
         if updates:
             self.forward_controller_state_updates(updates)
 
@@ -353,6 +473,21 @@ class SolaceController(BedController):
     def supports_preset_yoga(self) -> bool:
         # Yoga belongs to a different app whose Phase 4 analysis is pending.
         return False
+
+    @property
+    def supports_relaxing_bedtime(self) -> bool:
+        """Return whether MotionFlex exposes its relaxing-bedtime preset."""
+        return self.profile is SolaceProfile.MOTION_FLEX
+
+    @property
+    def supports_solace_audio(self) -> bool:
+        """Return whether MotionFlex exposes music and volume controls."""
+        return self.profile is SolaceProfile.MOTION_FLEX
+
+    @property
+    def supports_solace_alarm(self) -> bool:
+        """Return whether MotionFlex exposes its alarm packet family."""
+        return self.profile is SolaceProfile.MOTION_FLEX
 
     @property
     def supports_memory_presets(self) -> bool:
@@ -601,6 +736,62 @@ class SolaceController(BedController):
             else SolaceCommands.PRESET_TV
         )
         await self._send_preset(command)
+
+    async def preset_relaxing_bedtime(self) -> None:
+        """Run the MotionFlex relaxing-bedtime preset."""
+        await self._send_preset(SolaceCommands.PRESET_RELAXING_BEDTIME)
+
+    async def solace_music_toggle(self) -> None:
+        """Send the MotionFlex short-press music action."""
+        await self.write_command(SolaceCommands.MUSIC_TOGGLE, cancel_event=asyncio.Event())
+
+    async def solace_music_off(self) -> None:
+        """Send the MotionFlex long-press/dialog-save music action."""
+        await self.write_command(SolaceCommands.MUSIC_OFF, cancel_event=asyncio.Event())
+
+    async def solace_select_music(self, track: int, *, preview: bool = False) -> None:
+        """Select one of the five MotionFlex tracks, optionally as an alarm preview."""
+        value = track | (0x80 if preview else 0)
+        body = bytes.fromhex("FF FF FF FF 01 00 13 0B") + bytes((value,))
+        await self.write_command(_with_additive_checksum(body), cancel_event=asyncio.Event())
+
+    async def solace_set_audio_volume(self, level: int) -> None:
+        """Set the MotionFlex audio volume to an app-supported level (1-5)."""
+        body = bytes.fromhex("FF FF FF FF 01 00 14 0B") + bytes((level,))
+        await self.write_command(_with_additive_checksum(body), cancel_event=asyncio.Event())
+        self.forward_controller_state_updates({"solace_audio_volume": level})
+
+    async def solace_query_audio_volume(self) -> None:
+        """Request the MotionFlex audio volume notification."""
+        await self.write_command(
+            SolaceCommands.AUDIO_VOLUME_QUERY,
+            cancel_event=asyncio.Event(),
+        )
+
+    async def program_solace_alarm(
+        self,
+        *,
+        enabled: bool,
+        hour: int,
+        minute: int,
+        weekdays: Collection[int],
+        mode: str,
+        massage: bool,
+        sound: str,
+    ) -> None:
+        """Program the MotionFlex alarm surface."""
+        await self.write_command(
+            build_solace_alarm_command(
+                enabled=enabled,
+                hour=hour,
+                minute=minute,
+                weekdays=weekdays,
+                mode=mode,
+                massage=massage,
+                sound=sound,
+            ),
+            cancel_event=asyncio.Event(),
+        )
 
     def _preset_is_selected(self, key: str) -> bool:
         """Return the last state proven by a query response or command echo."""
