@@ -601,25 +601,47 @@ class AdjustableBedCoordinator:
     async def _async_reload_after_capability_change(self) -> None:
         """Wait for commands to release the link, then reconcile entity platforms."""
         try:
-            async with self._command_lock:
-                if not self._pending_capability_reload or self._shutting_down:
-                    return
-                if self._client is not None and self._client.is_connected:
-                    return
-                loaded = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
-                owns_loaded_child = False
-                if isinstance(self.entry, ChildEntryView) and loaded is not None:
-                    child_for_side = getattr(loaded, "child_for_side", None)
-                    side = self.entry.data.get(CONF_SIDE)
-                    owns_loaded_child = (
-                        callable(child_for_side) and child_for_side(side) is self
-                    )
-                if loaded is not self and not owns_loaded_child:
-                    return
-                self._pending_capability_reload = False
-                await self.hass.config_entries.async_reload(self.entry.entry_id)
+            loaded = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
+            reload_guard = (
+                getattr(loaded, "async_capability_reload_guard", None)
+                if isinstance(self.entry, ChildEntryView)
+                else None
+            )
+            if callable(reload_guard):
+                typed_reload_guard = cast(
+                    Callable[[], contextlib.AbstractAsyncContextManager[None]],
+                    reload_guard,
+                )
+                async with typed_reload_guard():
+                    await self._async_reload_if_capability_changed()
+            else:
+                async with self.async_command_operation_guard():
+                    await self._async_reload_if_capability_changed()
         finally:
             self._capability_reload_scheduled = False
+
+    async def _async_reload_if_capability_changed(self) -> None:
+        """Reload if this disconnected coordinator still owns the loaded entry."""
+        if not self._pending_capability_reload or self._shutting_down:
+            return
+        if self._client is not None and self._client.is_connected:
+            return
+        loaded = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
+        owns_loaded_child = False
+        if isinstance(self.entry, ChildEntryView) and loaded is not None:
+            child_for_side = getattr(loaded, "child_for_side", None)
+            side = self.entry.data.get(CONF_SIDE)
+            owns_loaded_child = callable(child_for_side) and child_for_side(side) is self
+        if loaded is not self and not owns_loaded_child:
+            return
+        self._pending_capability_reload = False
+        await self.hass.config_entries.async_reload(self.entry.entry_id)
+
+    @contextlib.asynccontextmanager
+    async def async_command_operation_guard(self) -> AsyncIterator[None]:
+        """Wait for this child's command lane and keep it idle."""
+        async with self._command_lock:
+            yield
 
     def _capability_reload_blocks_connection(self) -> bool:
         """Return whether a deferred entity reload owns the next disconnected state."""

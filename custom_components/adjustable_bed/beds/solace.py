@@ -397,6 +397,8 @@ class SolaceController(BedController):
 
     async def _async_query_preset_states(self, query_family: str) -> None:
         """Issue the app-proven startup query sequence without delaying setup."""
+        if self._coordinator.controller is not self:
+            return
         self.forward_controller_state_updates(
             {
                 f"solace_{key}_selected": False
@@ -406,6 +408,8 @@ class SolaceController(BedController):
         queries = SolaceCommands.QUERY_Q1 if query_family == "q1" else SolaceCommands.QUERY_Q2
 
         async def run_queries(controller: BedController) -> None:
+            if controller is not self:
+                return
             if self.profile is SolaceProfile.MOTION_FLEX:
                 await controller.write_command(
                     build_solace_clock_command(dt_util.now()),
@@ -425,7 +429,8 @@ class SolaceController(BedController):
                 run_queries,
                 skip_disconnect=True,
                 preemptible=True,
-                run_if=lambda: self._query_task is asyncio.current_task(),
+                run_if=lambda: self._query_task is asyncio.current_task()
+                and self._coordinator.controller is self,
             )
         except asyncio.CancelledError:
             raise
@@ -871,6 +876,18 @@ class SolaceController(BedController):
                 sound=sound,
             ),
             cancel_event=asyncio.Event(),
+        )
+        self.forward_controller_state_updates(
+            {
+                "solace_alarm_enabled": enabled,
+                "solace_alarm_time": f"{hour:02d}:{minute:02d}",
+                "solace_alarm_weekdays": ",".join(
+                    str(day) for day in sorted(set(weekdays))
+                ),
+                "solace_alarm_mode": mode,
+                "solace_alarm_massage": massage,
+                "solace_alarm_sound": sound,
+            }
         )
 
     def _preset_is_selected(self, key: str) -> bool:

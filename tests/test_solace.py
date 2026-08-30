@@ -287,6 +287,7 @@ class TestSolaceProfiles:
         coordinator = MagicMock()
         coordinator.ble_device_name = "SealyMF Base"
         controller = SolaceController(coordinator)
+        coordinator.controller = controller
         controller.write_command = AsyncMock()
 
         async def execute_query(query_fn, **kwargs):
@@ -309,6 +310,29 @@ class TestSolaceProfiles:
             SolaceCommands.LIGHT_STATUS_QUERY,
         ]
 
+    async def test_stale_startup_query_does_not_write_to_replacement_controller(
+        self,
+    ) -> None:
+        coordinator = MagicMock()
+        coordinator.ble_device_name = "QMS-IQ"
+        controller = SolaceController(coordinator)
+        replacement = MagicMock()
+        replacement.write_command = AsyncMock()
+        coordinator.controller = controller
+
+        async def execute_query(query_fn, **kwargs):
+            coordinator.controller = replacement
+            return await query_fn(replacement)
+
+        coordinator.async_execute_controller_query = AsyncMock(side_effect=execute_query)
+        with patch(
+            "custom_components.adjustable_bed.beds.solace.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            await controller._async_query_preset_states("q1")
+
+        replacement.write_command.assert_not_awaited()
+
     async def test_motionflex_audio_commands_match_artifact_vectors(self) -> None:
         coordinator = MagicMock()
         coordinator.ble_device_name = "SealyMF Base"
@@ -326,6 +350,33 @@ class TestSolaceProfiles:
             "ffffffff0100140b042004",
             "ffffffff0100150b001d04",
         ]
+
+    async def test_alarm_programming_publishes_requested_state(self) -> None:
+        coordinator = MagicMock()
+        coordinator.ble_device_name = "SealyMF Base"
+        controller = SolaceController(coordinator)
+        controller.write_command = AsyncMock()
+
+        await controller.program_solace_alarm(
+            enabled=True,
+            hour=6,
+            minute=45,
+            weekdays=(1, 3, 7),
+            mode="memory_1",
+            massage=True,
+            sound="music_5",
+        )
+
+        coordinator.handle_controller_state_updates.assert_called_once_with(
+            {
+                "solace_alarm_enabled": True,
+                "solace_alarm_time": "06:45",
+                "solace_alarm_weekdays": "1,3,7",
+                "solace_alarm_mode": "memory_1",
+                "solace_alarm_massage": True,
+                "solace_alarm_sound": "music_5",
+            }
+        )
 
     async def test_motionflex_light_writes_publish_selected_level(self) -> None:
         coordinator = MagicMock()
@@ -502,6 +553,7 @@ class TestSolaceProfiles:
         coordinator = MagicMock()
         coordinator.ble_device_name = "QMS-IQ"
         controller = SolaceController(coordinator)
+        coordinator.controller = controller
         controller.write_command = AsyncMock()
 
         async def execute_query(query_fn, **kwargs):

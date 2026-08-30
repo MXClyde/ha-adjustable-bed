@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -2808,6 +2809,7 @@ class TestOfflineSafeBedTypes:
         hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
         remove_listener = entry.add_update_listener(_async_update_listener)
         left = children[SIDE_LEFT]
+        right = children[SIDE_RIGHT]
         client = AsyncMock()
         client.is_connected = True
         left._client = client
@@ -2837,7 +2839,11 @@ class TestOfflineSafeBedTypes:
                 client.disconnect.side_effect = lambda: setattr(
                     client, "is_connected", False
                 )
-                await left.async_disconnect()
+                async with right.async_command_operation_guard():
+                    await left.async_disconnect()
+                    await asyncio.sleep(0)
+
+                    reload_entry.assert_not_awaited()
                 await hass.async_block_till_done()
 
                 reload_entry.assert_awaited_once_with(entry.entry_id)
