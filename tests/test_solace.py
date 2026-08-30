@@ -32,6 +32,7 @@ from custom_components.adjustable_bed.const import (
     SOLACE_CHAR_UUID,
 )
 from custom_components.adjustable_bed.coordinator import AdjustableBedCoordinator
+from custom_components.adjustable_bed.number import _number_entities_for
 
 
 @pytest.fixture
@@ -224,10 +225,32 @@ class TestSolaceProfiles:
         mock_solace_config_entry,
     ) -> None:
         coordinator = AdjustableBedCoordinator(hass, mock_solace_config_entry)
+        hass.data.setdefault(DOMAIN, {})[mock_solace_config_entry.entry_id] = coordinator
 
         coordinator._record_observed_ble_device_name("SealyMF Base")
 
         assert mock_solace_config_entry.data[CONF_BLE_DEVICE_NAME] == "SealyMF Base"
+        assert coordinator.consume_internal_entry_update(mock_solace_config_entry) is True
+
+    async def test_unknown_profile_keeps_existing_light_level_entity(
+        self,
+        hass: HomeAssistant,
+        mock_solace_config_entry,
+    ) -> None:
+        coordinator = AdjustableBedCoordinator(hass, mock_solace_config_entry)
+        registry = er.async_get(hass)
+        stale = registry.async_get_or_create(
+            "number",
+            DOMAIN,
+            "AA:BB:CC:DD:EE:FF_light_level",
+            config_entry=mock_solace_config_entry,
+        )
+
+        assert coordinator.capability_controller is None
+
+        _number_entities_for(hass, coordinator)
+
+        assert registry.async_get(stale.entity_id) is not None
 
     def test_motionflex_variable_frame_vectors(self) -> None:
         assert build_solace_clock_command(datetime(2023, 12, 31, 23, 59, 58)).hex() == (

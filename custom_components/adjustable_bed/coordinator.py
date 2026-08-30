@@ -568,6 +568,9 @@ class AdjustableBedCoordinator:
             self._bed_type == BED_TYPE_SOLACE
             and self.entry.data.get(CONF_BLE_DEVICE_NAME) != device_name
         ):
+            self._begin_internal_entry_update(
+                bool(self.entry.data.get(CONF_BLE_BOND_ESTABLISHED, False))
+            )
             self._async_persist_config(
                 {**self.entry.data, CONF_BLE_DEVICE_NAME: device_name},
                 keys={CONF_BLE_DEVICE_NAME},

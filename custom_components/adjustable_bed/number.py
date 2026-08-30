@@ -400,7 +400,7 @@ def _number_entities_for(
             mode=NumberMode.SLIDER,
         )
         entities.append(AdjustableBedLightLevelNumber(coordinator, light_adjusted))
-    elif bed_type == BED_TYPE_SOLACE:
+    elif bed_type == BED_TYPE_SOLACE and controller is not None:
         _async_remove_stale_light_level_entity(hass, coordinator)
 
     sleep_number_sides = controller.sleep_number_setting_sides if controller else ()
