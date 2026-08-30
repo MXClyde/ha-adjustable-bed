@@ -397,6 +397,7 @@ async def _execute_sided(
     command_fn: Callable[[BedController], Coroutine[Any, Any, None]],
     *,
     cancel_running: bool = True,
+    skip_disconnect: bool = False,
     resource: str | None = None,
     resources: Collection[str] | None = None,
 ) -> None:
@@ -410,6 +411,7 @@ async def _execute_sided(
             command_fn,
             side=side,
             cancel_running=cancel_running,
+            skip_disconnect=skip_disconnect,
             resource=resource,
             resources=resources,
         )
@@ -417,6 +419,7 @@ async def _execute_sided(
         await coordinator.async_execute_controller_command(
             command_fn,
             cancel_running=cancel_running,
+            skip_disconnect=skip_disconnect,
             resource=resource,
             resources=resources,
         )
@@ -1297,6 +1300,7 @@ async def handle_solace_audio(call: ServiceCall) -> None:
                 side,
                 control,
                 cancel_running=False,
+                skip_disconnect=action == "query",
                 resource="audio",
             )
     except Exception:

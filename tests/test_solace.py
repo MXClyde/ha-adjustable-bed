@@ -25,6 +25,7 @@ from custom_components.adjustable_bed.const import (
     CONF_BED_TYPE,
     CONF_BLE_DEVICE_NAME,
     CONF_DISABLE_ANGLE_SENSING,
+    CONF_DISCONNECT_AFTER_COMMAND,
     CONF_HAS_MASSAGE,
     CONF_MOTOR_COUNT,
     CONF_PREFERRED_ADAPTER,
@@ -130,8 +131,11 @@ class TestSolaceProfiles:
             ("QMS2", SolaceProfile.COMMON),
             ("QMS-MQ-123", SolaceProfile.COMMON),
             ("SealyMF Base", SolaceProfile.MOTION_FLEX),
+            ("My QMS2", SolaceProfile.COMMON),
             ("S4-Y-192-461000AD", SolaceProfile.LEGACY_S4_Y),
             ("S3-Y-192-461000AD", SolaceProfile.UNVERIFIED),
+            ("Other-QMS2", SolaceProfile.UNVERIFIED),
+            ("Other-SealyMF", SolaceProfile.UNVERIFIED),
             ("Solace Smart Bed", SolaceProfile.UNVERIFIED),
         ],
     )
@@ -348,7 +352,7 @@ class TestSolaceProfiles:
 
         coordinator.handle_controller_state_updates.reset_mock()
         controller._parse_notification(bytes.fromhex("FF FF FF FF 05 00 01 FE 00 00 00"))
-        coordinator.handle_controller_state_updates.assert_called_once_with({"light_level": 254})
+        coordinator.handle_controller_state_updates.assert_not_called()
 
         coordinator.handle_controller_state_updates.reset_mock()
         controller._parse_notification(
@@ -377,9 +381,17 @@ class TestSolaceProfiles:
         """The query result should be observable through Home Assistant state."""
         del mock_coordinator_connected, enable_custom_integrations
         mock_async_ble_device_from_address.return_value.name = "SealyMF Base"
+        hass.config_entries.async_update_entry(
+            mock_solace_config_entry,
+            data={
+                **mock_solace_config_entry.data,
+                CONF_DISCONNECT_AFTER_COMMAND: True,
+            },
+        )
 
         await hass.config_entries.async_setup(mock_solace_config_entry.entry_id)
         await hass.async_block_till_done()
+        mock_bleak_client.disconnect.reset_mock()
 
         devices = dr.async_entries_for_config_entry(
             dr.async_get(hass), mock_solace_config_entry.entry_id
@@ -396,6 +408,7 @@ class TestSolaceProfiles:
             SolaceCommands.AUDIO_VOLUME_QUERY,
             response=True,
         )
+        mock_bleak_client.disconnect.assert_not_awaited()
 
         notify_callback = mock_bleak_client.start_notify.await_args.args[1]
         notify_callback(
@@ -512,6 +525,15 @@ class TestSolaceProfiles:
             0.5,
             0.5,
         ]
+        coordinator.handle_controller_state_updates.assert_called_once_with(
+            {
+                "solace_tv_selected": False,
+                "solace_zero_g_selected": False,
+                "solace_memory_1_selected": False,
+                "solace_memory_2_selected": False,
+                "solace_anti_snore_selected": False,
+            }
+        )
 
     def test_notification_parser_tracks_preset_selection(self) -> None:
         coordinator = MagicMock()

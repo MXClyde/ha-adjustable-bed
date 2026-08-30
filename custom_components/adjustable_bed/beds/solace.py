@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 from bleak.exc import BleakError
 from homeassistant.util import dt as dt_util
 
-from ..const import SOLACE_CHAR_UUID
+from ..const import SOLACE_CHAR_UUID, SOLACE_NAME_PATTERNS
 from .base import (
     BedController,
     ControllerStateBinarySensorSpec,
@@ -126,15 +126,20 @@ def resolve_solace_profile(device_name: str) -> SolaceProfile:
     name = device_name.strip().lower()
     if _LEGACY_S4_Y_PATTERN.fullmatch(name):
         return SolaceProfile.LEGACY_S4_Y
-    if "sealymf" in name:
+    if not (
+        any(name.startswith(prefix) for prefix in SOLACE_NAME_PATTERNS)
+        or name.startswith("my qms2")
+    ):
+        return SolaceProfile.UNVERIFIED
+    if name.startswith("sealymf"):
         return SolaceProfile.MOTION_FLEX
-    if any(token in name for token in _HOME_K1_PRIMARY_NAMES):
+    if any(name.startswith(prefix) for prefix in _HOME_K1_PRIMARY_NAMES):
         return SolaceProfile.HOME_K1
-    if any(token in name for token in _HOME_K2_NAMES):
+    if any(name.startswith(prefix) for prefix in _HOME_K2_NAMES):
         return SolaceProfile.HOME_K2
-    if "qms-mq" in name or "qms2" in name:
+    if name.startswith(("qms-mq", "qms2", "my qms2")):
         return SolaceProfile.COMMON
-    if any(token in name for token in _HOME_K1_FALLBACK_NAMES):
+    if any(name.startswith(prefix) for prefix in _HOME_K1_FALLBACK_NAMES):
         return SolaceProfile.HOME_K1
     return SolaceProfile.UNVERIFIED
 
@@ -392,6 +397,12 @@ class SolaceController(BedController):
 
     async def _async_query_preset_states(self, query_family: str) -> None:
         """Issue the app-proven startup query sequence without delaying setup."""
+        self.forward_controller_state_updates(
+            {
+                f"solace_{key}_selected": False
+                for key in ("tv", "zero_g", "memory_1", "memory_2", "anti_snore")
+            }
+        )
         queries = SolaceCommands.QUERY_Q1 if query_family == "q1" else SolaceCommands.QUERY_Q2
 
         async def run_queries(controller: BedController) -> None:
@@ -481,7 +492,9 @@ class SolaceController(BedController):
 
         light_prefix = bytes.fromhex("FF FF FF FF 05 00 01")
         if (light_index := data.find(light_prefix)) >= 0 and len(data) > light_index + 7:
-            updates["light_level"] = data[light_index + 7]
+            light_level = data[light_index + 7]
+            if 0 <= light_level <= self.light_level_max:
+                updates["light_level"] = light_level
 
         alarm_none_prefix = bytes.fromhex("FF FF FF FF 01 00 03 0B")
         if (alarm_none_index := data.find(alarm_none_prefix)) >= 0 and len(
