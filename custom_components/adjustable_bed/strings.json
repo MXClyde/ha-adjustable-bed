@@ -1681,6 +1681,9 @@
       "linak_alarm_status": {
         "name": "Alarm Status"
       },
+      "solace_audio_volume": {
+        "name": "Audio Volume"
+      },
       "head_angle_left": {
         "name": "Left: Head Angle"
       },

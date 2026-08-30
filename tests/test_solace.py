@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.adjustable_bed.beds.solace import (
@@ -241,6 +243,19 @@ class TestSolaceProfiles:
             sound="none",
         ).hex() == "ffffffff01000213a10000000000030000b604"
 
+    def test_alarm_weekday_mask_ignores_duplicate_days(self) -> None:
+        command = build_solace_alarm_command(
+            enabled=True,
+            hour=6,
+            minute=30,
+            weekdays=(1, 1, 2),
+            mode="zero_g",
+            massage=False,
+            sound="alarm",
+        )
+
+        assert command[12] == (1 << 1) | (1 << 2)
+
     async def test_motionflex_startup_syncs_clock_before_queries(self) -> None:
         coordinator = MagicMock()
         coordinator.ble_device_name = "SealyMF Base"
@@ -284,6 +299,19 @@ class TestSolaceProfiles:
             "ffffffff0100150b001d04",
         ]
 
+    async def test_motionflex_light_writes_publish_selected_level(self) -> None:
+        coordinator = MagicMock()
+        coordinator.ble_device_name = "SealyMF Base"
+        controller = SolaceController(coordinator)
+        controller.write_command = AsyncMock()
+
+        await controller.set_light_level(4)
+        coordinator.handle_controller_state_update.assert_called_once_with("light_level", 4)
+
+        coordinator.handle_controller_state_update.reset_mock()
+        await controller.lights_off()
+        coordinator.handle_controller_state_update.assert_called_once_with("light_level", 0)
+
     def test_motionflex_notification_parser_tracks_audio_and_alarm(self) -> None:
         coordinator = MagicMock()
         coordinator.ble_device_name = "SealyMF Base"
@@ -308,6 +336,79 @@ class TestSolaceProfiles:
                 "solace_alarm_sound": "music_5",
             }
         )
+
+    async def test_audio_query_reply_updates_sensor_entity(
+        self,
+        hass: HomeAssistant,
+        mock_solace_config_entry,
+        mock_coordinator_connected,
+        mock_async_ble_device_from_address: MagicMock,
+        mock_bleak_client: MagicMock,
+        enable_custom_integrations,
+    ) -> None:
+        """The query result should be observable through Home Assistant state."""
+        del mock_coordinator_connected, enable_custom_integrations
+        mock_async_ble_device_from_address.return_value.name = "SealyMF Base"
+
+        await hass.config_entries.async_setup(mock_solace_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        devices = dr.async_entries_for_config_entry(
+            dr.async_get(hass), mock_solace_config_entry.entry_id
+        )
+        assert devices
+        await hass.services.async_call(
+            DOMAIN,
+            "solace_audio",
+            {"device_id": [devices[0].id], "action": "query"},
+            blocking=True,
+        )
+        mock_bleak_client.write_gatt_char.assert_any_call(
+            SOLACE_CHAR_UUID,
+            SolaceCommands.AUDIO_VOLUME_QUERY,
+            response=True,
+        )
+
+        notify_callback = mock_bleak_client.start_notify.await_args.args[1]
+        notify_callback(
+            SOLACE_CHAR_UUID,
+            bytearray.fromhex("FF FF FF FF 01 00 15 0B 05 00 00"),
+        )
+
+        registry = er.async_get(hass)
+        entity_id = registry.async_get_entity_id(
+            "sensor",
+            DOMAIN,
+            "AA:BB:CC:DD:EE:FF_solace_audio_volume",
+        )
+        assert entity_id is not None
+        state = hass.states.get(entity_id)
+        assert state is not None
+        assert state.state == "5"
+
+    async def test_non_motionflex_setup_removes_legacy_light_level_number(
+        self,
+        hass: HomeAssistant,
+        mock_solace_config_entry,
+        mock_coordinator_connected,
+        mock_async_ble_device_from_address: MagicMock,
+        enable_custom_integrations,
+    ) -> None:
+        """A narrowed Solace profile should remove its old broad brightness entity."""
+        del mock_coordinator_connected, enable_custom_integrations
+        mock_async_ble_device_from_address.return_value.name = "QMS-IQ"
+        registry = er.async_get(hass)
+        stale = registry.async_get_or_create(
+            "number",
+            DOMAIN,
+            "AA:BB:CC:DD:EE:FF_light_level",
+            config_entry=mock_solace_config_entry,
+        )
+
+        await hass.config_entries.async_setup(mock_solace_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        assert registry.async_get(stale.entity_id) is None
 
     async def test_query_sequence_is_serialized_with_app_pacing(self) -> None:
         coordinator = MagicMock()

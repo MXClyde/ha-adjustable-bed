@@ -120,10 +120,10 @@ Every behavior reachable in the frozen MotionFlex report has one disposition bel
 | Back/legs movement with STOP cleanup | ALREADY_IMPLEMENTED | Solace movement methods and cancellation tests |
 | Flat, relaxing-bedtime, memory, TV, zero-G, and anti-snore actions | IMPLEMENTED | Preset buttons/methods and Solace command tests |
 | Five startup preset queries and selected-state notification parsing | ALREADY_IMPLEMENTED | `_async_query_preset_states()` and notification tests |
-| Music start/stop, track selection, previews, volume query/set, and volume reply | IMPLEMENTED | Music buttons, `solace_audio`, and parser tests |
+| Music start/stop, track selection, previews, volume query/set, and volume reply | IMPLEMENTED | Music buttons, `solace_audio`, audio-volume sensor, and service-to-entity test |
 | Startup local-time clock synchronization | IMPLEMENTED | `build_solace_clock_command()` and startup-query tests |
 | Alarm programming and alarm/audio-availability replies | IMPLEMENTED | `solace_set_alarm`, `build_solace_alarm_command()`, and parser tests |
-| Brightness 0-10, brightness query/reply, and three timer toggles | ALREADY_IMPLEMENTED | Solace light and select entities plus command/parser tests |
+| Brightness writes 0-10 and three timer toggles | ALREADY_IMPLEMENTED | Solace light, number, and select entities plus command tests |
 | Model-setting identifiers whose predicate has no visible effect | EXCLUDED | Reachable app settings are behaviorally inert, so there is no state or command to reproduce |
 | Sync notifications with empty EventBus consumers | EXCLUDED | The app records a switch, but no reachable behavior consumes or changes it |
 | Broad case-sensitive `QMS` substring discovery outside accepted profile names | EXCLUDED | Auto-configuring an unknown FFE1 device would be unsafe; narrower names are backed by the accepted app set, while the remaining families still await their own frozen analyses |

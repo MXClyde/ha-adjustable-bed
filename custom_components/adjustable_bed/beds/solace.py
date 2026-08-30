@@ -19,7 +19,7 @@ from bleak.exc import BleakError
 from homeassistant.util import dt as dt_util
 
 from ..const import SOLACE_CHAR_UUID
-from .base import BedController, MotorControlSpec
+from .base import BedController, ControllerStateSensorSpec, MotorControlSpec
 
 if TYPE_CHECKING:
     from ..coordinator import AdjustableBedCoordinator
@@ -97,7 +97,9 @@ def build_solace_alarm_command(
     sound: str,
 ) -> bytes:
     """Build the MotionFlex alarm frame from user-facing values."""
-    weekday_mask = sum(1 << weekday for weekday in weekdays)
+    weekday_mask = 0
+    for weekday in weekdays:
+        weekday_mask |= 1 << weekday
     body = bytes.fromhex("FF FF FF FF 01 00 02 13") + bytes(
         (
             0x01 if enabled else 0xA1,
@@ -278,6 +280,20 @@ class SolaceController(BedController):
             "solace_profile": self.profile.value,
             "solace_query_family": self._query_family or "none",
         }
+
+    @property
+    def controller_state_sensor_specs(self) -> tuple[ControllerStateSensorSpec, ...]:
+        """Expose the result returned by MotionFlex audio-volume queries."""
+        if not self.supports_solace_audio:
+            return ()
+        return (
+            ControllerStateSensorSpec(
+                key="solace_audio_volume",
+                translation_key="solace_audio_volume",
+                state_key="solace_audio_volume",
+                icon="mdi:volume-high",
+            ),
+        )
 
     @property
     def control_characteristic_uuid(self) -> str:
@@ -926,10 +942,12 @@ class SolaceController(BedController):
     async def lights_on(self) -> None:
         """Turn lights on (set to max brightness)."""
         await self.write_command(SolaceCommands.LIGHT_LEVEL_10)
+        self.forward_controller_state_update("light_level", 10)
 
     async def lights_off(self) -> None:
         """Turn lights off."""
         await self.write_command(SolaceCommands.LIGHT_LEVEL_0)
+        self.forward_controller_state_update("light_level", 0)
 
     @property
     def supports_light_level_control(self) -> bool:
@@ -958,6 +976,7 @@ class SolaceController(BedController):
         ]
         if 0 <= level <= 10:
             await self.write_command(commands[level])
+            self.forward_controller_state_update("light_level", level)
         else:
             _LOGGER.warning("Invalid light level: %d (valid: 0-10)", level)
 
