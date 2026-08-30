@@ -302,6 +302,7 @@ class TestSolaceProfiles:
         assert [call.args[0] for call in controller.write_command.await_args_list] == [
             build_solace_clock_command(now),
             *SolaceCommands.QUERY_Q2,
+            SolaceCommands.LIGHT_STATUS_QUERY,
         ]
 
     async def test_motionflex_audio_commands_match_artifact_vectors(self) -> None:
@@ -344,6 +345,10 @@ class TestSolaceProfiles:
         coordinator.handle_controller_state_updates.assert_called_once_with(
             {"solace_audio_volume": 15}
         )
+
+        coordinator.handle_controller_state_updates.reset_mock()
+        controller._parse_notification(bytes.fromhex("FF FF FF FF 05 00 01 FE 00 00 00"))
+        coordinator.handle_controller_state_updates.assert_called_once_with({"light_level": 254})
 
         coordinator.handle_controller_state_updates.reset_mock()
         controller._parse_notification(
@@ -427,6 +432,20 @@ class TestSolaceProfiles:
         assert alarm_state.attributes["solace_alarm_mode"] == "memory_1"
         assert alarm_state.attributes["solace_alarm_massage"] is True
         assert alarm_state.attributes["solace_alarm_sound"] == "music_5"
+
+        notify_callback(
+            SOLACE_CHAR_UUID,
+            bytearray.fromhex("FF FF FF FF 05 00 01 07 00 00 00"),
+        )
+        light_entity_id = registry.async_get_entity_id(
+            "number",
+            DOMAIN,
+            "AA:BB:CC:DD:EE:FF_light_level",
+        )
+        assert light_entity_id is not None
+        light_state = hass.states.get(light_entity_id)
+        assert light_state is not None
+        assert light_state.state == "7.0"
 
     async def test_non_motionflex_setup_removes_motionflex_only_entities(
         self,

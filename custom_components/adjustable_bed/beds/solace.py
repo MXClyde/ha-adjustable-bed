@@ -252,6 +252,7 @@ class SolaceCommands:
     LIGHT_LEVEL_8 = bytes([0xFF, 0xFF, 0xFF, 0xFF, 0x05, 0x00, 0x00, 0x08, 0x23, 0x91, 0x19])
     LIGHT_LEVEL_9 = bytes([0xFF, 0xFF, 0xFF, 0xFF, 0x05, 0x00, 0x00, 0x09, 0x23, 0x90, 0x89])
     LIGHT_LEVEL_10 = bytes([0xFF, 0xFF, 0xFF, 0xFF, 0x05, 0x00, 0x00, 0x0A, 0x23, 0x90, 0x79])
+    LIGHT_STATUS_QUERY = bytes.fromhex("FF FF FF FF 05 00 05 FF 23 C7 28")
 
     # Light timers
     LIGHT_TIMER_10_MIN = bytes([0xFF, 0xFF, 0xFF, 0xFF, 0x05, 0x00, 0x00, 0x00, 0x19, 0x16, 0xCA])
@@ -399,9 +400,12 @@ class SolaceController(BedController):
                     build_solace_clock_command(dt_util.now()),
                     cancel_event=asyncio.Event(),
                 )
-            for index, command in enumerate(queries):
+                queries_with_accessories = (*queries, SolaceCommands.LIGHT_STATUS_QUERY)
+            else:
+                queries_with_accessories = queries
+            for index, command in enumerate(queries_with_accessories):
                 await controller.write_command(command, cancel_event=asyncio.Event())
-                if index < len(queries) - 1:
+                if index < len(queries_with_accessories) - 1:
                     await asyncio.sleep(0.5)
 
         try:
@@ -474,6 +478,10 @@ class SolaceController(BedController):
         volume_prefix = bytes.fromhex("FF FF FF FF 01 00 15 0B")
         if (volume_index := data.find(volume_prefix)) >= 0 and len(data) > volume_index + 8:
             updates["solace_audio_volume"] = data[volume_index + 8] & 0x0F
+
+        light_prefix = bytes.fromhex("FF FF FF FF 05 00 01")
+        if (light_index := data.find(light_prefix)) >= 0 and len(data) > light_index + 7:
+            updates["light_level"] = data[light_index + 7]
 
         alarm_none_prefix = bytes.fromhex("FF FF FF FF 01 00 03 0B")
         if (alarm_none_index := data.find(alarm_none_prefix)) >= 0 and len(

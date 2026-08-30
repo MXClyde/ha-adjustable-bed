@@ -106,7 +106,7 @@ These historical commands remain out of accepted profiles until their own APKs p
 
 The MotionFlex profile exposes its relaxing-bedtime preset and music start/stop actions as buttons. The `adjustable_bed.solace_audio` service selects or previews tracks 1-5, queries the current volume, and sets volume levels 1-5. The `adjustable_bed.solace_set_alarm` service programs the enabled state, time, weekdays, bed action, massage flag, and alarm or music sound. These services reject non-MotionFlex targets.
 
-On notification startup the controller first sends the app's local-time clock frame, then runs the Q2 preset queries. MotionFlex audio-volume and alarm replies are decoded into controller diagnostic state.
+On notification startup the controller first sends the app's local-time clock frame, then runs the Q2 preset queries and brightness query. MotionFlex brightness, audio-volume, and alarm replies are decoded into controller state.
 
 ## MotionFlex discovery ledger
 
@@ -123,14 +123,14 @@ Every behavior reachable in the frozen MotionFlex report has one disposition bel
 | Music start/stop, track selection, previews, volume query/set, and volume reply | IMPLEMENTED | Music buttons, `solace_audio`, audio-volume sensor, and service-to-entity test |
 | Startup local-time clock synchronization | IMPLEMENTED | `build_solace_clock_command()` and startup-query tests |
 | Alarm programming and alarm/audio-availability replies | IMPLEMENTED | `solace_set_alarm`, `build_solace_alarm_command()`, and parser tests |
-| Brightness writes 0-10 and three timer toggles | ALREADY_IMPLEMENTED | Solace light, number, and select entities plus command tests |
+| Brightness writes 0-10, brightness query/reply, and three timer toggles | IMPLEMENTED | Solace light, number, and select entities plus command, parser, and entity-state tests |
 | Model-setting identifiers whose predicate has no visible effect | EXCLUDED | Reachable app settings are behaviorally inert, so there is no state or command to reproduce |
 | Sync notifications with empty EventBus consumers | EXCLUDED | The app records a switch, but no reachable behavior consumes or changes it |
 | Arbitrarily prefixed or broad case-sensitive `QMS` substring discovery | EXCLUDED | Home Assistant rejects leading-wildcard discovery hints as too broad; accepted prefixes remain reachable, while auto-configuring unknown FFE1 families would be unsafe |
 | Initial FFE1 write without an initialized application value | EXCLUDED | The artifact does not assign command bytes before this write, so reproducing an unknown cached characteristic value would be nondeterministic and unsafe |
 | Reads of every GATT descriptor and their passive callbacks | EXCLUDED | The app has no consumer for the returned values; Home Assistant's Bluetooth stack owns the CCCD operation needed for notifications |
 
-Ledger totals: **IMPLEMENTED 6, ALREADY_IMPLEMENTED 4, EXCLUDED 5**.
+Ledger totals: **IMPLEMENTED 7, ALREADY_IMPLEMENTED 3, EXCLUDED 5**.
 
 Dead or unreachable artifact code is outside the reachable ledger: the hidden massage and fault surfaces, characteristic reads, RSSI reads, reliable writes, and the unused advertisement parser are not exposed by the MotionFlex application.
 
