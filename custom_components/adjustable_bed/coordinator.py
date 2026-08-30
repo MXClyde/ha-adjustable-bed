@@ -476,6 +476,12 @@ class AdjustableBedCoordinator:
         # Set just before an internal bond-marker write; see
         # _begin_internal_entry_update().
         self._pending_internal_bond_marker: bool | None = None
+        # Learning a Solace profile changes which entities should exist. Persist
+        # the name immediately, but defer the resulting reload until this link is
+        # released so discovery cannot unload us halfway through a connection.
+        self._pending_capability_reload = False
+        self._capability_reload_scheduled = False
+        self._shutting_down = False
         self._last_bond_verification: dict[str, Any] = {
             "status": "not_attempted",
             "timestamp": None,
@@ -571,10 +577,56 @@ class AdjustableBedCoordinator:
             self._begin_internal_entry_update(
                 bool(self.entry.data.get(CONF_BLE_BOND_ESTABLISHED, False))
             )
+            if self._pending_internal_bond_marker is not None:
+                self._pending_capability_reload = True
             self._async_persist_config(
                 {**self.entry.data, CONF_BLE_DEVICE_NAME: device_name},
                 keys={CONF_BLE_DEVICE_NAME},
             )
+
+    def _schedule_pending_capability_reload(self) -> None:
+        """Reload capability-gated entities once this BLE link is released."""
+        if (
+            not self._pending_capability_reload
+            or self._capability_reload_scheduled
+            or self._shutting_down
+        ):
+            return
+        self._capability_reload_scheduled = True
+        self.hass.async_create_task(
+            self._async_reload_after_capability_change(),
+            f"adjustable_bed_capability_reload_{self._address}",
+        )
+
+    async def _async_reload_after_capability_change(self) -> None:
+        """Wait for commands to release the link, then reconcile entity platforms."""
+        try:
+            async with self._command_lock:
+                if not self._pending_capability_reload or self._shutting_down:
+                    return
+                if self._client is not None and self._client.is_connected:
+                    return
+                loaded = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id)
+                owns_loaded_child = False
+                if isinstance(self.entry, ChildEntryView) and loaded is not None:
+                    child_for_side = getattr(loaded, "child_for_side", None)
+                    side = self.entry.data.get(CONF_SIDE)
+                    owns_loaded_child = (
+                        callable(child_for_side) and child_for_side(side) is self
+                    )
+                if loaded is not self and not owns_loaded_child:
+                    return
+                self._pending_capability_reload = False
+                await self.hass.config_entries.async_reload(self.entry.entry_id)
+        finally:
+            self._capability_reload_scheduled = False
+
+    def _capability_reload_blocks_connection(self) -> bool:
+        """Return whether a deferred entity reload owns the next disconnected state."""
+        link_is_up = self._client is not None and self._client.is_connected
+        return (
+            self._pending_capability_reload or self._capability_reload_scheduled
+        ) and not link_is_up
 
     def _apply_runtime_bed_type_correction(self, corrected_bed_type: str) -> bool:
         """Apply a protocol correction discovered after BLE service discovery."""
@@ -1545,6 +1597,12 @@ class AdjustableBedCoordinator:
         success while the link is still unbonded.
         """
         async with self._lock:
+            if self._capability_reload_blocks_connection():
+                _LOGGER.debug(
+                    "Deferring pairing for %s until its capability reload completes",
+                    self._address,
+                )
+                return False
             self._clear_ble_bond_established()
             self._skip_pair_next_attempt = False
             self._bond_probe_timed_out = False
@@ -2274,6 +2332,12 @@ class AdjustableBedCoordinator:
         self, reset_timer: bool = True
     ) -> bool:
         """Connect to the bed (must hold lock)."""
+        if self._capability_reload_blocks_connection():
+            _LOGGER.debug(
+                "Deferring connection to %s until its capability reload completes",
+                self._address,
+            )
+            return False
         # Clear any prior manual/idle disconnect marker before a fresh connect attempt.
         self._intentional_disconnect = False
 
@@ -3358,6 +3422,7 @@ class AdjustableBedCoordinator:
             self._max_retries,
             total_elapsed,
         )
+        self._schedule_pending_capability_reload()
         return False
 
     def _on_disconnect(self, client: BleakClient) -> None:
@@ -3408,6 +3473,7 @@ class AdjustableBedCoordinator:
             # Keep _position_data for last known state; entity availability handles offline
             # Flag is reset in _async_connect_locked when reconnecting
             self._notify_connection_state_change(False)
+            self._schedule_pending_capability_reload()
             return
 
         _LOGGER.warning(
@@ -3426,6 +3492,7 @@ class AdjustableBedCoordinator:
         self._cancel_disconnect_timer()
         self._notify_connection_state_change(False)
         _LOGGER.debug("Disconnect cleanup complete for %s", self._address)
+        self._schedule_pending_capability_reload()
 
         if not self._auto_reconnect_enabled():
             _LOGGER.debug(
@@ -3825,6 +3892,8 @@ class AdjustableBedCoordinator:
 
     async def async_shutdown(self) -> None:
         """Stop background tasks and disconnect the coordinator."""
+        self._shutting_down = True
+        self._pending_capability_reload = False
         try:
             await self._async_cancel_position_hydration()
         finally:
@@ -4023,6 +4092,7 @@ class AdjustableBedCoordinator:
             # _on_disconnect, which may not fire after a clean disconnect).
             self._last_disconnected = datetime.now(UTC)
             self._notify_connection_state_change(False)
+        self._schedule_pending_capability_reload()
         return True
 
     def _reset_disconnect_timer(self) -> None:

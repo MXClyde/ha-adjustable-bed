@@ -19,6 +19,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.adjustable_bed import (
     _async_release_absorbed_singles,
+    _async_update_listener,
     _build_paired_children,
     _device_for_entry_and_identifier,
     _make_child_persist_cb,
@@ -2783,6 +2784,66 @@ class TestOfflineSafeBedTypes:
         await left.async_prime_offline_controller()
 
         assert left.capability_controller is None
+
+    async def test_solace_learned_profile_reloads_after_connection_release(
+        self, hass: HomeAssistant
+    ) -> None:
+        """A legacy offline side gains its profile entities without a manual reload."""
+        data = _paired_entry_data()
+        data[CONF_BED_TYPE] = BED_TYPE_SOLACE
+        for child in data[CONF_PAIR_CHILDREN]:
+            child[CONF_BED_TYPE] = BED_TYPE_SOLACE
+            child.pop(CONF_BLE_DEVICE_NAME, None)
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            title="Legacy Solace pair",
+            data=data,
+            unique_id="pair_solace_deferred_reload",
+            entry_id="pair_solace_deferred_reload",
+            version=4,
+        )
+        entry.add_to_hass(hass)
+        children = _build_paired_children(hass, entry)
+        coordinator = PairedBedCoordinator(hass, entry, children)
+        hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+        remove_listener = entry.add_update_listener(_async_update_listener)
+        left = children[SIDE_LEFT]
+        client = AsyncMock()
+        client.is_connected = True
+        left._client = client
+
+        try:
+            with patch.object(
+                hass.config_entries,
+                "async_reload",
+                new_callable=AsyncMock,
+            ) as reload_entry:
+                left._record_observed_ble_device_name("SealyMF Base")
+                await hass.async_block_till_done()
+
+                # Persist the profile without unloading the coordinator during
+                # connection setup.
+                reload_entry.assert_not_awaited()
+                persisted = get_child(entry.data, SIDE_LEFT)
+                assert persisted is not None
+                assert dict(persisted)[CONF_BLE_DEVICE_NAME] == "SealyMF Base"
+
+                # Once the learned-profile link drops, neither an ordinary
+                # reconnect nor an explicit pairing attempt may race the reload.
+                client.is_connected = False
+                assert await left.async_connect() is False
+                assert await left.async_pair_now() is False
+                client.is_connected = True
+                client.disconnect.side_effect = lambda: setattr(
+                    client, "is_connected", False
+                )
+                await left.async_disconnect()
+                await hass.async_block_till_done()
+
+                reload_entry.assert_awaited_once_with(entry.entry_id)
+        finally:
+            remove_listener()
+            hass.data[DOMAIN].pop(entry.entry_id, None)
 
 
 class TestOctoOfflineSnapshot:
