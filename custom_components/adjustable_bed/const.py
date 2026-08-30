@@ -987,21 +987,20 @@ OCTO_NAME_PATTERNS: Final = (
     "da1458x",
 )
 
-# Solace/Motion Bed name patterns (from Motion Bed app reverse engineering)
-# These help distinguish Solace beds from Octo beds which share the same UUID
-# - QMS-* (QMS-IQ, QMS-I06, QMS-I16, QMS-L04, QMS-NQ, QMS-MQ, QMS-KQ-H, QMS-DFQ, QMS-DQ, etc.)
-# - QMS2, QMS3, QMS4 (no hyphen variants)
-# - S3-*, S4-*, S5-*, S6-* (model series)
-# - SealyMF (Sealy Motion Flex)
+# Exact case-folded substrings admitted by the accepted apps. The separate
+# S-series app is pending Phase 4; only exact S4-Y has legacy hardware evidence
+# and is handled by the narrow regex in detection.py.
 SOLACE_NAME_PATTERNS: Final = (
-    "qms-",
-    "qms2",
-    "qms3",
+    "qms-iq",
+    "qms-i06",
+    "qms-lq",
+    "qms-l04",
+    "qms-jq-d",
     "qms4",
-    "s3-",
-    "s4-",
-    "s5-",
-    "s6-",
+    "qms-nq",
+    "qms3",
+    "qms-mq",
+    "qms2",
     "sealymf",
 )
 

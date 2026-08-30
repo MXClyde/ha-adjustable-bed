@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant.const import CONF_ADDRESS, CONF_NAME
@@ -11,6 +11,9 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.adjustable_bed.beds.solace import (
     SolaceCommands,
+    SolaceController,
+    SolaceProfile,
+    resolve_solace_profile,
 )
 from custom_components.adjustable_bed.const import (
     BED_TYPE_SOLACE,
@@ -103,6 +106,171 @@ class TestSolaceController:
 
         with pytest.raises(ConnectionError):
             await coordinator.controller.write_command(SolaceCommands.MOTOR_STOP)
+
+
+class TestSolaceProfiles:
+    """Test evidence-backed device-name routing and capability isolation."""
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("QMS-IQ-123", SolaceProfile.HOME_K1),
+            ("QMS-NQ", SolaceProfile.HOME_K1),
+            ("QMS-JQ-D", SolaceProfile.HOME_K2),
+            ("QMS4", SolaceProfile.HOME_K2),
+            ("QMS4-QMS3", SolaceProfile.HOME_K2),
+            ("QMS-IQ-QMS4", SolaceProfile.HOME_K1),
+            ("QMS2", SolaceProfile.COMMON),
+            ("QMS-MQ-123", SolaceProfile.COMMON),
+            ("SealyMF Base", SolaceProfile.MOTION_FLEX),
+            ("S4-Y-192-461000AD", SolaceProfile.LEGACY_S4_Y),
+            ("S3-Y-192-461000AD", SolaceProfile.UNVERIFIED),
+            ("Solace Smart Bed", SolaceProfile.UNVERIFIED),
+        ],
+    )
+    def test_profile_resolution(self, name: str, expected: SolaceProfile) -> None:
+        assert resolve_solace_profile(name) is expected
+
+    @pytest.mark.parametrize(
+        ("name", "motor_keys", "massage", "lights", "timer"),
+        [
+            ("QMS-IQ", {"back", "legs", "head", "hip"}, True, False, True),
+            ("QMS4", {"back", "legs", "head", "lumbar"}, True, False, True),
+            ("QMS2", {"back", "legs"}, False, False, True),
+            ("SealyMF", {"back", "legs"}, False, True, True),
+            (
+                "S4-Y-192-461000AD",
+                {"back", "legs", "bed_height", "tilt"},
+                False,
+                False,
+                False,
+            ),
+            ("Solace Smart Bed", {"back", "legs"}, False, False, False),
+        ],
+    )
+    def test_profile_capabilities(
+        self,
+        name: str,
+        motor_keys: set[str],
+        massage: bool,
+        lights: bool,
+        timer: bool,
+    ) -> None:
+        coordinator = MagicMock()
+        coordinator.ble_device_name = name
+        controller = SolaceController(coordinator)
+
+        assert {spec.key for spec in controller.motor_control_specs} == motor_keys
+        assert controller.supports_massage is massage
+        assert controller.supports_lights is lights
+        assert controller.supports_light_level_control is lights
+        assert controller.supports_light_timer is timer
+        assert controller.memory_slot_count == (0 if name == "Solace Smart Bed" else 2)
+        assert controller.supports_preset_flat is (name != "Solace Smart Bed")
+        assert controller.supports_preset_tv is (name != "Solace Smart Bed")
+        assert controller.supports_memory_presets is (name != "Solace Smart Bed")
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("QMS-IQ", "q1"),
+            ("QMS-JQ-D", "q1"),
+            ("QMS-JQ-D-QMS3", "q2"),
+            ("QMS-JQ-D-QMS2", "q2"),
+            ("QMS2", "q2"),
+            ("SealyMF", "q2"),
+            ("S4-Y-192-461000AD", None),
+            ("Solace Smart Bed", None),
+        ],
+    )
+    def test_query_family(self, name: str, expected: str | None) -> None:
+        coordinator = MagicMock()
+        coordinator.ble_device_name = name
+
+        assert SolaceController(coordinator)._query_family == expected
+
+    async def test_query_sequence_is_serialized_with_app_pacing(self) -> None:
+        coordinator = MagicMock()
+        coordinator.ble_device_name = "QMS-IQ"
+        controller = SolaceController(coordinator)
+        controller.write_command = AsyncMock()
+
+        async def execute_query(query_fn, **kwargs):
+            assert kwargs["skip_disconnect"] is True
+            assert kwargs["preemptible"] is True
+            assert callable(kwargs["run_if"])
+            return await query_fn(controller)
+
+        coordinator.async_execute_controller_query = AsyncMock(side_effect=execute_query)
+        sleep = AsyncMock()
+        with patch("custom_components.adjustable_bed.beds.solace.asyncio.sleep", sleep):
+            await controller._async_query_preset_states("q1")
+
+        assert [call.args[0] for call in controller.write_command.await_args_list] == list(
+            SolaceCommands.QUERY_Q1
+        )
+        assert [call.args[0] for call in sleep.await_args_list] == [
+            0.3,
+            0.5,
+            0.5,
+            0.5,
+            0.5,
+        ]
+
+    def test_notification_parser_tracks_preset_selection(self) -> None:
+        coordinator = MagicMock()
+        coordinator.ble_device_name = "QMS2"
+        controller = SolaceController(coordinator)
+
+        controller._parse_notification(bytes.fromhex("00 FF FF FF FF 03 06 00 09 00"))
+        coordinator.handle_controller_state_updates.assert_called_once_with(
+            {"solace_zero_g_selected": True}
+        )
+
+        coordinator.handle_controller_state_updates.reset_mock()
+        controller._parse_notification(SolaceCommands.PROGRAM_MEMORY_1)
+        coordinator.handle_controller_state_updates.assert_called_once_with(
+            {"solace_memory_1_selected": True}
+        )
+
+    async def test_named_presets_use_selected_branch_after_status_reply(self) -> None:
+        coordinator = MagicMock()
+        coordinator.ble_device_name = "QMS2"
+        coordinator.controller_state = {
+            "solace_tv_selected": True,
+            "solace_zero_g_selected": True,
+            "solace_anti_snore_selected": True,
+        }
+        controller = SolaceController(coordinator)
+        controller.write_command = AsyncMock()
+
+        await controller.preset_tv()
+        await controller.preset_zero_g()
+        await controller.preset_anti_snore()
+
+        assert [call.args[0] for call in controller.write_command.await_args_list] == [
+            SolaceCommands.PRESET_TV_SELECTED,
+            SolaceCommands.PRESET_ZERO_G_SELECTED,
+            SolaceCommands.PRESET_ANTI_SNORE_SELECTED,
+        ]
+
+    async def test_program_memory_uses_selected_state_branch(self) -> None:
+        coordinator = MagicMock()
+        coordinator.ble_device_name = "QMS2"
+        coordinator.controller_state = {
+            "solace_memory_1_selected": True,
+            "solace_memory_2_selected": False,
+        }
+        controller = SolaceController(coordinator)
+        controller.write_command = AsyncMock()
+
+        await controller.program_memory(1)
+        await controller.program_memory(2)
+
+        assert [call.args[0] for call in controller.write_command.await_args_list] == [
+            SolaceCommands.PROGRAM_MEMORY_1_SELECTED,
+            SolaceCommands.PROGRAM_MEMORY_2,
+        ]
 
 
 class TestSolaceMovement:
@@ -218,8 +386,18 @@ class TestSolacePresets:
         await coordinator.controller.preset_flat()
 
         calls = mock_bleak_client.write_gatt_char.call_args_list
-        assert calls[0][0][1] == SolaceCommands.MOTOR_STOP  # STOP sent first
-        assert calls[1][0][1] == SolaceCommands.PRESET_ALL_FLAT
+        assert [call.args[1] for call in calls] == [SolaceCommands.PRESET_FLAT_BED]
+
+    async def test_s4_y_uses_deployed_legacy_all_flat_variant(self) -> None:
+        coordinator = MagicMock()
+        coordinator.ble_device_name = "S4-Y-192-461000AD"
+        controller = SolaceController(coordinator)
+        controller.write_command = AsyncMock()
+
+        await controller.preset_flat()
+
+        controller.write_command.assert_awaited_once()
+        assert controller.write_command.await_args.args[0] == SolaceCommands.PRESET_LEGACY_ALL_FLAT
 
     async def test_preset_zero_g(
         self,
@@ -235,8 +413,7 @@ class TestSolacePresets:
         await coordinator.controller.preset_zero_g()
 
         calls = mock_bleak_client.write_gatt_char.call_args_list
-        assert calls[0][0][1] == SolaceCommands.MOTOR_STOP
-        assert calls[1][0][1] == SolaceCommands.PRESET_ZERO_G
+        assert [call.args[1] for call in calls] == [SolaceCommands.PRESET_ZERO_G]
 
     async def test_preset_tv(
         self,
@@ -252,8 +429,7 @@ class TestSolacePresets:
         await coordinator.controller.preset_tv()
 
         calls = mock_bleak_client.write_gatt_char.call_args_list
-        assert calls[0][0][1] == SolaceCommands.MOTOR_STOP
-        assert calls[1][0][1] == SolaceCommands.PRESET_TV
+        assert [call.args[1] for call in calls] == [SolaceCommands.PRESET_TV]
 
     async def test_preset_anti_snore(
         self,
@@ -269,8 +445,7 @@ class TestSolacePresets:
         await coordinator.controller.preset_anti_snore()
 
         calls = mock_bleak_client.write_gatt_char.call_args_list
-        assert calls[0][0][1] == SolaceCommands.MOTOR_STOP
-        assert calls[1][0][1] == SolaceCommands.PRESET_ANTI_SNORE
+        assert [call.args[1] for call in calls] == [SolaceCommands.PRESET_ANTI_SNORE]
 
     async def test_preset_yoga(
         self,
@@ -279,23 +454,20 @@ class TestSolacePresets:
         mock_coordinator_connected,
         mock_bleak_client: MagicMock,
     ):
-        """Test preset yoga command."""
+        """Yoga stays unavailable until its separate APK passes Phase 4."""
         coordinator = AdjustableBedCoordinator(hass, mock_solace_config_entry)
         await coordinator.async_connect()
 
-        await coordinator.controller.preset_yoga()
-
-        calls = mock_bleak_client.write_gatt_char.call_args_list
-        assert calls[0][0][1] == SolaceCommands.MOTOR_STOP
-        assert calls[1][0][1] == SolaceCommands.PRESET_YOGA
+        assert coordinator.controller.supports_preset_yoga is False
+        with pytest.raises(NotImplementedError):
+            await coordinator.controller.preset_yoga()
+        mock_bleak_client.write_gatt_char.assert_not_called()
 
     @pytest.mark.parametrize(
         "memory_num,expected_command",
         [
             (1, SolaceCommands.PRESET_MEMORY_1),
             (2, SolaceCommands.PRESET_MEMORY_2),
-            (3, SolaceCommands.PRESET_MEMORY_3),
-            (4, SolaceCommands.PRESET_MEMORY_4),
         ],
     )
     async def test_preset_memory(
@@ -314,16 +486,13 @@ class TestSolacePresets:
         await coordinator.controller.preset_memory(memory_num)
 
         calls = mock_bleak_client.write_gatt_char.call_args_list
-        assert calls[0][0][1] == SolaceCommands.MOTOR_STOP
-        assert calls[1][0][1] == expected_command
+        assert [call.args[1] for call in calls] == [expected_command]
 
     @pytest.mark.parametrize(
         "memory_num,expected_command",
         [
             (1, SolaceCommands.PROGRAM_MEMORY_1),
             (2, SolaceCommands.PROGRAM_MEMORY_2),
-            (3, SolaceCommands.PROGRAM_MEMORY_3),
-            (4, SolaceCommands.PROGRAM_MEMORY_4),
         ],
     )
     async def test_program_memory(
