@@ -1,0 +1,47 @@
+"""Canonical protocol intermediate representation for Phase 4 v2."""
+
+from .model import (
+    SCHEMA_REVISION,
+    ActionDefinition,
+    CommandBinding,
+    ExpectedActionRule,
+    IRDiagnostic,
+    IRValidationError,
+    Predicate,
+    ProtocolDefinition,
+    ProtocolIRDocument,
+    UniverseIssue,
+    UniverseKey,
+    UniverseValidation,
+    VariantSpace,
+    dumps_ir,
+    load_ir,
+    loads_ir,
+    parse_ir,
+    semantic_fingerprint,
+    validate_universe,
+)
+from .schema import schema_document
+
+__all__ = [
+    "SCHEMA_REVISION",
+    "ActionDefinition",
+    "CommandBinding",
+    "ExpectedActionRule",
+    "IRDiagnostic",
+    "IRValidationError",
+    "Predicate",
+    "ProtocolDefinition",
+    "ProtocolIRDocument",
+    "UniverseIssue",
+    "UniverseKey",
+    "UniverseValidation",
+    "VariantSpace",
+    "dumps_ir",
+    "load_ir",
+    "loads_ir",
+    "parse_ir",
+    "schema_document",
+    "semantic_fingerprint",
+    "validate_universe",
+]
