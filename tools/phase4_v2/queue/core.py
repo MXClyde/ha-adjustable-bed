@@ -1,0 +1,1176 @@
+"""Atomic SQLite work leasing for independent Phase 4 v2 workers.
+
+Every path is supplied by the caller. The module has no live-database default and
+never removes an attempt workspace. SQLite serializes claims; fencing tokens stop
+an expired worker from publishing after another worker recovers its unit.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sqlite3
+import uuid
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
+
+SCHEMA_REVISION = 1
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+
+
+class QueueError(RuntimeError):
+    """Base error for queue operations."""
+
+
+class QueueConflictError(QueueError):
+    """An immutable queue definition conflicts with an existing definition."""
+
+
+class StaleLeaseError(QueueError):
+    """A worker no longer owns the lease identified by its fencing token."""
+
+
+class DependencyNotSatisfiedError(QueueError):
+    """A pinned dependency or pipeline capability is absent or changed."""
+
+
+class CompletionConflictError(QueueError):
+    """A unit already has a different formal completion."""
+
+
+class ExecutionMode(StrEnum):
+    """Whether the v2 queue is allowed to execute a work unit."""
+
+    NORMAL = "NORMAL"
+    LEGACY_EXTERNAL_ACTIVE = "LEGACY_EXTERNAL_ACTIVE"
+
+
+class WorkUnitStatus(StrEnum):
+    """Materialized scheduling state for a work unit."""
+
+    READY = "READY"
+    LEASED = "LEASED"
+    REPAIR_REQUIRED = "REPAIR_REQUIRED"
+    BLOCKED = "BLOCKED"
+    COMPLETED = "COMPLETED"
+    EXTERNAL_ACTIVE = "EXTERNAL_ACTIVE"
+
+
+class TerminalOutcome(StrEnum):
+    """Immutable outcome of one attempt."""
+
+    ACCEPTED = "ACCEPTED"
+    PARTIAL = "PARTIAL"
+    BLOCKED = "BLOCKED"
+    FAILED = "FAILED"
+    INPUT_MISMATCH = "INPUT_MISMATCH"
+    ABANDONED = "ABANDONED"
+
+
+class FinishDisposition(StrEnum):
+    """Whether a finish created or repeated a formal completion."""
+
+    COMPLETED = "COMPLETED"
+    IDEMPOTENT = "IDEMPOTENT"
+    TERMINAL_ONLY = "TERMINAL_ONLY"
+
+
+@dataclass(frozen=True, slots=True)
+class Lease:
+    """The complete capability needed to mutate one leased attempt."""
+
+    unit_id: str
+    attempt_id: str
+    lease_id: str
+    owner: str
+    fencing_token: int
+    expires_at: int
+    workspace: Path
+
+
+@dataclass(frozen=True, slots=True)
+class FinishResult:
+    """Result of recording an attempt terminal."""
+
+    disposition: FinishDisposition
+    unit_id: str
+    attempt_id: str
+    output_digest: str | None
+
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_meta (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    revision INTEGER NOT NULL,
+    attempts_root TEXT NOT NULL,
+    attempts_device INTEGER NOT NULL,
+    attempts_inode INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS work_units (
+    unit_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    cluster_id TEXT,
+    priority INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL UNIQUE,
+    execution_mode TEXT NOT NULL CHECK (
+        execution_mode IN ('NORMAL', 'LEGACY_EXTERNAL_ACTIVE')
+    ),
+    status TEXT NOT NULL CHECK (
+        status IN (
+            'READY', 'LEASED', 'REPAIR_REQUIRED', 'BLOCKED',
+            'COMPLETED', 'EXTERNAL_ACTIVE'
+        )
+    ),
+    input_digest TEXT NOT NULL CHECK (length(input_digest) = 64),
+    fencing_generation INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE TABLE IF NOT EXISTS pipeline_capabilities (
+    capability TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    digest TEXT NOT NULL CHECK (length(digest) = 64),
+    accepted_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    PRIMARY KEY (capability, revision)
+);
+
+CREATE TABLE IF NOT EXISTS capability_requirements (
+    unit_id TEXT NOT NULL REFERENCES work_units(unit_id),
+    capability TEXT NOT NULL,
+    required_revision TEXT NOT NULL,
+    required_digest TEXT NOT NULL CHECK (length(required_digest) = 64),
+    PRIMARY KEY (unit_id, capability)
+);
+
+CREATE TABLE IF NOT EXISTS dependencies (
+    unit_id TEXT NOT NULL REFERENCES work_units(unit_id),
+    parent_unit_id TEXT NOT NULL REFERENCES work_units(unit_id),
+    required_revision TEXT NOT NULL,
+    required_digest TEXT NOT NULL CHECK (length(required_digest) = 64),
+    PRIMARY KEY (unit_id, parent_unit_id),
+    CHECK (unit_id <> parent_unit_id)
+);
+
+CREATE TABLE IF NOT EXISTS attempts (
+    attempt_id TEXT PRIMARY KEY,
+    unit_id TEXT NOT NULL REFERENCES work_units(unit_id),
+    lease_id TEXT NOT NULL UNIQUE,
+    owner TEXT NOT NULL,
+    fencing_token INTEGER NOT NULL,
+    workspace TEXT NOT NULL UNIQUE,
+    input_digest TEXT NOT NULL CHECK (length(input_digest) = 64),
+    started_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE (unit_id, fencing_token)
+);
+
+CREATE TABLE IF NOT EXISTS leases (
+    unit_id TEXT PRIMARY KEY REFERENCES work_units(unit_id),
+    lease_id TEXT NOT NULL UNIQUE,
+    attempt_id TEXT NOT NULL UNIQUE REFERENCES attempts(attempt_id),
+    owner TEXT NOT NULL,
+    fencing_token INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    CHECK (expires_at > 0)
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id),
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE TABLE IF NOT EXISTS attempt_terminals (
+    attempt_id TEXT PRIMARY KEY REFERENCES attempts(attempt_id),
+    outcome TEXT NOT NULL CHECK (
+        outcome IN (
+            'ACCEPTED', 'PARTIAL', 'BLOCKED', 'FAILED',
+            'INPUT_MISMATCH', 'ABANDONED'
+        )
+    ),
+    output_digest TEXT,
+    completion_revision TEXT,
+    finished_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    CHECK (output_digest IS NULL OR length(output_digest) = 64),
+    CHECK (
+        outcome <> 'ACCEPTED'
+        OR (output_digest IS NOT NULL AND completion_revision IS NOT NULL)
+    )
+);
+
+CREATE TABLE IF NOT EXISTS formal_completions (
+    unit_id TEXT PRIMARY KEY REFERENCES work_units(unit_id),
+    attempt_id TEXT NOT NULL UNIQUE REFERENCES attempts(attempt_id),
+    output_digest TEXT NOT NULL CHECK (length(output_digest) = 64),
+    completion_revision TEXT NOT NULL,
+    completed_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS work_units_schedule
+    ON work_units(status, execution_mode, priority DESC, ordinal, unit_id);
+CREATE INDEX IF NOT EXISTS dependencies_child ON dependencies(unit_id);
+CREATE INDEX IF NOT EXISTS capability_requirements_unit
+    ON capability_requirements(unit_id);
+
+CREATE TRIGGER IF NOT EXISTS attempts_no_update
+BEFORE UPDATE ON attempts BEGIN SELECT RAISE(ABORT, 'attempts are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS attempts_no_delete
+BEFORE DELETE ON attempts BEGIN SELECT RAISE(ABORT, 'attempts are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS events_no_update
+BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'events are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS events_no_delete
+BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'events are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS terminals_no_update
+BEFORE UPDATE ON attempt_terminals
+BEGIN SELECT RAISE(ABORT, 'attempt terminals are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS terminals_no_delete
+BEFORE DELETE ON attempt_terminals
+BEGIN SELECT RAISE(ABORT, 'attempt terminals are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS completions_no_update
+BEFORE UPDATE ON formal_completions
+BEGIN SELECT RAISE(ABORT, 'formal completions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS completions_no_delete
+BEFORE DELETE ON formal_completions
+BEGIN SELECT RAISE(ABORT, 'formal completions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS dependencies_no_update
+BEFORE UPDATE ON dependencies
+BEGIN SELECT RAISE(ABORT, 'dependencies are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS dependencies_no_delete
+BEFORE DELETE ON dependencies
+BEGIN SELECT RAISE(ABORT, 'dependencies are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS capability_requirements_no_update
+BEFORE UPDATE ON capability_requirements
+BEGIN SELECT RAISE(ABORT, 'capability requirements are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS capability_requirements_no_delete
+BEFORE DELETE ON capability_requirements
+BEGIN SELECT RAISE(ABORT, 'capability requirements are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS pipeline_capabilities_no_update
+BEFORE UPDATE ON pipeline_capabilities
+BEGIN SELECT RAISE(ABORT, 'pipeline capabilities are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS pipeline_capabilities_no_delete
+BEFORE DELETE ON pipeline_capabilities
+BEGIN SELECT RAISE(ABORT, 'pipeline capabilities are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS work_unit_definition_no_update
+BEFORE UPDATE OF
+    unit_id, kind, cluster_id, priority, ordinal, execution_mode, input_digest
+ON work_units
+BEGIN SELECT RAISE(ABORT, 'work unit definitions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS work_units_no_delete
+BEFORE DELETE ON work_units
+BEGIN SELECT RAISE(ABORT, 'work units are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS schema_meta_no_update
+BEFORE UPDATE ON schema_meta
+BEGIN SELECT RAISE(ABORT, 'schema metadata is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS schema_meta_no_delete
+BEFORE DELETE ON schema_meta
+BEGIN SELECT RAISE(ABORT, 'schema metadata is immutable'); END;
+"""
+
+
+class Queue:
+    """A host-local, process-safe queue backed by one explicit SQLite path."""
+
+    def __init__(
+        self,
+        database: Path,
+        attempts_root: Path,
+        *,
+        busy_timeout_ms: int = 30_000,
+    ) -> None:
+        normalized_database = Path(os.path.realpath(database))
+        normalized_attempts_root = Path(os.path.realpath(attempts_root))
+        if (
+            normalized_database == normalized_attempts_root
+            or normalized_database in normalized_attempts_root.parents
+            or normalized_attempts_root in normalized_database.parents
+        ):
+            raise ValueError("database and attempts root must be separate")
+        if busy_timeout_ms < 1:
+            raise ValueError("busy_timeout_ms must be positive")
+        self.database = normalized_database
+        self.attempts_root = normalized_attempts_root
+        self.busy_timeout_ms = busy_timeout_ms
+
+    def initialize(self) -> None:
+        """Create the explicitly configured database and attempt root."""
+        self._create_directory_tree_durably(self.database.parent)
+        self._create_directory_tree_durably(self.attempts_root)
+        root_fd = self._open_directory_path(self.attempts_root)
+        try:
+            root_stat = os.fstat(root_fd)
+        finally:
+            os.close(root_fd)
+        connection = self._connect()
+        try:
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.executescript(_SCHEMA)
+        finally:
+            connection.close()
+        with self._immediate() as connection:
+            existing = connection.execute(
+                """
+                SELECT revision, attempts_root, attempts_device, attempts_inode
+                FROM schema_meta WHERE singleton = 1
+                """
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO schema_meta(
+                        singleton, revision, attempts_root, attempts_device, attempts_inode
+                    ) VALUES (1, ?, ?, ?, ?)
+                    """,
+                    (
+                        SCHEMA_REVISION,
+                        str(self.attempts_root),
+                        root_stat.st_dev,
+                        root_stat.st_ino,
+                    ),
+                )
+            elif int(existing["revision"]) != SCHEMA_REVISION:
+                raise QueueError(f"unsupported queue schema revision: {existing['revision']}")
+            elif (
+                existing["attempts_root"],
+                existing["attempts_device"],
+                existing["attempts_inode"],
+            ) != (str(self.attempts_root), root_stat.st_dev, root_stat.st_ino):
+                raise QueueError("attempt root identity differs from initialized queue")
+
+    def enqueue(
+        self,
+        unit_id: str,
+        *,
+        kind: str,
+        input_digest: str,
+        cluster_id: str | None = None,
+        priority: int = 0,
+        execution_mode: ExecutionMode = ExecutionMode.NORMAL,
+    ) -> None:
+        """Add an immutable work definition, idempotently when identical."""
+        _validate_identifier(unit_id, "unit_id")
+        _validate_identifier(kind, "kind")
+        if cluster_id is not None:
+            _validate_identifier(cluster_id, "cluster_id")
+        _validate_digest(input_digest, "input_digest")
+        status = (
+            WorkUnitStatus.EXTERNAL_ACTIVE
+            if execution_mode is ExecutionMode.LEGACY_EXTERNAL_ACTIVE
+            else WorkUnitStatus.READY
+        )
+        with self._immediate() as connection:
+            existing = connection.execute(
+                """
+                SELECT kind, cluster_id, priority, execution_mode, input_digest
+                FROM work_units WHERE unit_id = ?
+                """,
+                (unit_id,),
+            ).fetchone()
+            definition = (
+                kind,
+                cluster_id,
+                priority,
+                execution_mode.value,
+                input_digest,
+            )
+            if existing is not None:
+                observed = tuple(existing)
+                if observed != definition:
+                    raise QueueConflictError(f"work unit definition changed: {unit_id}")
+                return
+            ordinal_row = connection.execute(
+                "SELECT COALESCE(MAX(ordinal), 0) + 1 AS ordinal FROM work_units"
+            ).fetchone()
+            connection.execute(
+                """
+                INSERT INTO work_units(
+                    unit_id, kind, cluster_id, priority, ordinal,
+                    execution_mode, status, input_digest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    unit_id,
+                    kind,
+                    cluster_id,
+                    priority,
+                    int(ordinal_row["ordinal"]),
+                    execution_mode.value,
+                    status.value,
+                    input_digest,
+                ),
+            )
+
+    def register_capability(self, capability: str, revision: str, digest: str) -> None:
+        """Register one accepted immutable pipeline capability revision."""
+        _validate_identifier(capability, "capability")
+        _validate_revision(revision)
+        _validate_digest(digest, "digest")
+        with self._immediate() as connection:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO pipeline_capabilities(capability, revision, digest)
+                    VALUES (?, ?, ?)
+                    """,
+                    (capability, revision, digest),
+                )
+            except sqlite3.IntegrityError as error:
+                existing = connection.execute(
+                    """
+                    SELECT digest FROM pipeline_capabilities
+                    WHERE capability = ? AND revision = ?
+                    """,
+                    (capability, revision),
+                ).fetchone()
+                if existing is None or existing["digest"] != digest:
+                    raise QueueConflictError(
+                        f"capability revision changed: {capability}/{revision}"
+                    ) from error
+
+    def require_capability(
+        self,
+        unit_id: str,
+        capability: str,
+        *,
+        revision: str,
+        digest: str,
+    ) -> None:
+        """Pin a work unit to one exact pipeline capability."""
+        _validate_identifier(unit_id, "unit_id")
+        _validate_identifier(capability, "capability")
+        _validate_revision(revision)
+        _validate_digest(digest, "digest")
+        with self._immediate() as connection:
+            self._require_unstarted(connection, unit_id)
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO capability_requirements(
+                        unit_id, capability, required_revision, required_digest
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (unit_id, capability, revision, digest),
+                )
+            except sqlite3.IntegrityError as error:
+                existing = connection.execute(
+                    """
+                    SELECT required_revision, required_digest
+                    FROM capability_requirements
+                    WHERE unit_id = ? AND capability = ?
+                    """,
+                    (unit_id, capability),
+                ).fetchone()
+                if existing is None or tuple(existing) != (revision, digest):
+                    raise QueueConflictError(
+                        f"capability requirement changed: {unit_id}/{capability}"
+                    ) from error
+
+    def add_dependency(
+        self,
+        unit_id: str,
+        parent_unit_id: str,
+        *,
+        revision: str,
+        digest: str,
+    ) -> None:
+        """Require one exact formal completion before a unit may run."""
+        _validate_identifier(unit_id, "unit_id")
+        _validate_identifier(parent_unit_id, "parent_unit_id")
+        _validate_revision(revision)
+        _validate_digest(digest, "digest")
+        with self._immediate() as connection:
+            self._require_unstarted(connection, unit_id)
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO dependencies(
+                        unit_id, parent_unit_id, required_revision, required_digest
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (unit_id, parent_unit_id, revision, digest),
+                )
+            except sqlite3.IntegrityError as error:
+                existing = connection.execute(
+                    """
+                    SELECT required_revision, required_digest FROM dependencies
+                    WHERE unit_id = ? AND parent_unit_id = ?
+                    """,
+                    (unit_id, parent_unit_id),
+                ).fetchone()
+                if existing is None or tuple(existing) != (revision, digest):
+                    raise QueueConflictError(
+                        f"dependency changed: {unit_id}/{parent_unit_id}"
+                    ) from error
+
+    def claim(self, owner: str, *, ttl_seconds: int = 1_800) -> Lease | None:
+        """Atomically claim the first eligible work unit."""
+        _validate_owner(owner)
+        _validate_ttl(ttl_seconds)
+        with self._immediate() as connection:
+            self._recover_expired(connection)
+            row = connection.execute(
+                """
+                SELECT unit_id, input_digest, fencing_generation
+                FROM work_units AS unit
+                WHERE unit.status = 'READY'
+                  AND unit.execution_mode = 'NORMAL'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM leases WHERE leases.unit_id = unit.unit_id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM dependencies AS dependency
+                      LEFT JOIN formal_completions AS completion
+                        ON completion.unit_id = dependency.parent_unit_id
+                      WHERE dependency.unit_id = unit.unit_id
+                        AND (
+                            completion.unit_id IS NULL
+                            OR completion.completion_revision <> dependency.required_revision
+                            OR completion.output_digest <> dependency.required_digest
+                        )
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM capability_requirements AS requirement
+                      LEFT JOIN pipeline_capabilities AS capability
+                        ON capability.capability = requirement.capability
+                       AND capability.revision = requirement.required_revision
+                       AND capability.digest = requirement.required_digest
+                      WHERE requirement.unit_id = unit.unit_id
+                        AND capability.capability IS NULL
+                  )
+                ORDER BY unit.priority DESC, unit.ordinal, unit.unit_id
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+
+            unit_id = str(row["unit_id"])
+            fencing_token = int(row["fencing_generation"]) + 1
+            attempt_id = uuid.uuid4().hex
+            lease_id = uuid.uuid4().hex
+            workspace = self.attempts_root / unit_id / attempt_id
+            connection.execute(
+                """
+                UPDATE work_units
+                SET fencing_generation = ?, status = 'LEASED'
+                WHERE unit_id = ? AND status = 'READY'
+                """,
+                (fencing_token, unit_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO attempts(
+                    attempt_id, unit_id, lease_id, owner, fencing_token, workspace, input_digest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt_id,
+                    unit_id,
+                    lease_id,
+                    owner,
+                    fencing_token,
+                    str(workspace),
+                    str(row["input_digest"]),
+                ),
+            )
+            expiry_row = connection.execute(
+                """
+                SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER) + (? * 1000)
+                    AS expires_at
+                """,
+                (ttl_seconds,),
+            ).fetchone()
+            expires_at = int(expiry_row["expires_at"])
+            connection.execute(
+                """
+                INSERT INTO leases(
+                    unit_id, lease_id, attempt_id, owner, fencing_token, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (unit_id, lease_id, attempt_id, owner, fencing_token, expires_at),
+            )
+            self._append_event(
+                connection,
+                attempt_id,
+                "CLAIMED",
+                {"fencing_token": fencing_token},
+            )
+            lease = Lease(
+                unit_id=unit_id,
+                attempt_id=attempt_id,
+                lease_id=lease_id,
+                owner=owner,
+                fencing_token=fencing_token,
+                expires_at=expires_at,
+                workspace=workspace,
+            )
+        try:
+            self._create_workspace(lease)
+        except BaseException as error:
+            try:
+                self._record_workspace_failure(lease)
+            except BaseException as record_error:
+                raise record_error from error
+            if not isinstance(error, Exception):
+                raise
+            raise QueueError(f"could not create attempt workspace: {workspace}") from error
+        with self._immediate() as connection:
+            self._require_live_lease(connection, lease)
+        return lease
+
+    def renew(self, lease: Lease, *, ttl_seconds: int = 1_800) -> Lease:
+        """Renew a live lease using SQLite's clock."""
+        _validate_ttl(ttl_seconds)
+        with self._immediate() as connection:
+            self._require_live_lease(connection, lease)
+            expiry_row = connection.execute(
+                """
+                SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER) + (? * 1000)
+                    AS expires_at
+                """,
+                (ttl_seconds,),
+            ).fetchone()
+            expires_at = int(expiry_row["expires_at"])
+            updated = connection.execute(
+                """
+                UPDATE leases SET expires_at = MAX(expires_at, ?)
+                WHERE unit_id = ? AND lease_id = ? AND attempt_id = ?
+                  AND owner = ? AND fencing_token = ?
+                  AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
+                """,
+                (
+                    expires_at,
+                    lease.unit_id,
+                    lease.lease_id,
+                    lease.attempt_id,
+                    lease.owner,
+                    lease.fencing_token,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise StaleLeaseError(f"lease expired: {lease.unit_id}")
+            renewed_row = connection.execute(
+                "SELECT expires_at FROM leases WHERE unit_id = ?", (lease.unit_id,)
+            ).fetchone()
+            if renewed_row is None:
+                raise StaleLeaseError(f"lease disappeared while renewing: {lease.unit_id}")
+            expires_at = int(renewed_row["expires_at"])
+            self._append_event(connection, lease.attempt_id, "RENEWED", {})
+            return Lease(
+                unit_id=lease.unit_id,
+                attempt_id=lease.attempt_id,
+                lease_id=lease.lease_id,
+                owner=lease.owner,
+                fencing_token=lease.fencing_token,
+                expires_at=expires_at,
+                workspace=lease.workspace,
+            )
+
+    def checkpoint(
+        self,
+        lease: Lease,
+        event_type: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> None:
+        """Append a milestone for a live fenced attempt."""
+        _validate_identifier(event_type, "event_type")
+        with self._immediate() as connection:
+            self._require_live_lease(connection, lease)
+            self._append_event(connection, lease.attempt_id, event_type, payload or {})
+
+    def finish(
+        self,
+        lease: Lease,
+        outcome: TerminalOutcome,
+        *,
+        output_digest: str | None = None,
+        completion_revision: str | None = None,
+    ) -> FinishResult:
+        """Record an immutable terminal and, for ACCEPTED, formal completion."""
+        if outcome is TerminalOutcome.ACCEPTED:
+            if output_digest is None or completion_revision is None:
+                raise ValueError("accepted attempts require output digest and revision")
+            _validate_digest(output_digest, "output_digest")
+            _validate_revision(completion_revision)
+        elif output_digest is not None:
+            _validate_digest(output_digest, "output_digest")
+        if completion_revision is not None:
+            _validate_revision(completion_revision)
+
+        with self._immediate() as connection:
+            terminal = connection.execute(
+                """
+                SELECT outcome, output_digest, completion_revision
+                FROM attempt_terminals WHERE attempt_id = ?
+                """,
+                (lease.attempt_id,),
+            ).fetchone()
+            if terminal is not None:
+                return self._repeat_finish(
+                    connection,
+                    lease,
+                    terminal,
+                    outcome,
+                    output_digest,
+                    completion_revision,
+                )
+
+            self._require_live_lease(connection, lease)
+            if outcome is TerminalOutcome.ACCEPTED and not self._dependencies_satisfied(
+                connection, lease.unit_id
+            ):
+                raise DependencyNotSatisfiedError(
+                    f"dependencies changed before completion: {lease.unit_id}"
+                )
+
+            connection.execute(
+                """
+                INSERT INTO attempt_terminals(
+                    attempt_id, outcome, output_digest, completion_revision
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    lease.attempt_id,
+                    outcome.value,
+                    output_digest,
+                    completion_revision,
+                ),
+            )
+            self._append_event(connection, lease.attempt_id, "FINISHED", {"outcome": outcome})
+
+            disposition = FinishDisposition.TERMINAL_ONLY
+            if outcome is TerminalOutcome.ACCEPTED:
+                existing = connection.execute(
+                    """
+                    SELECT attempt_id, output_digest, completion_revision
+                    FROM formal_completions WHERE unit_id = ?
+                    """,
+                    (lease.unit_id,),
+                ).fetchone()
+                if existing is None:
+                    connection.execute(
+                        """
+                        INSERT INTO formal_completions(
+                            unit_id, attempt_id, output_digest, completion_revision
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            lease.unit_id,
+                            lease.attempt_id,
+                            output_digest,
+                            completion_revision,
+                        ),
+                    )
+                    disposition = FinishDisposition.COMPLETED
+                elif (
+                    existing["output_digest"],
+                    existing["completion_revision"],
+                ) == (output_digest, completion_revision):
+                    disposition = FinishDisposition.IDEMPOTENT
+                else:
+                    raise CompletionConflictError(
+                        f"different completion already exists: {lease.unit_id}"
+                    )
+                next_status = WorkUnitStatus.COMPLETED
+            elif outcome is TerminalOutcome.BLOCKED:
+                next_status = WorkUnitStatus.BLOCKED
+            else:
+                next_status = WorkUnitStatus.REPAIR_REQUIRED
+
+            connection.execute("DELETE FROM leases WHERE unit_id = ?", (lease.unit_id,))
+            connection.execute(
+                "UPDATE work_units SET status = ? WHERE unit_id = ?",
+                (next_status.value, lease.unit_id),
+            )
+            return FinishResult(
+                disposition=disposition,
+                unit_id=lease.unit_id,
+                attempt_id=lease.attempt_id,
+                output_digest=output_digest,
+            )
+
+    def status(self, unit_id: str) -> WorkUnitStatus:
+        """Return the materialized status of one unit."""
+        _validate_identifier(unit_id, "unit_id")
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT status FROM work_units WHERE unit_id = ?", (unit_id,)
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            raise QueueError(f"unknown work unit: {unit_id}")
+        return WorkUnitStatus(row["status"])
+
+    def _repeat_finish(
+        self,
+        connection: sqlite3.Connection,
+        lease: Lease,
+        terminal: sqlite3.Row,
+        outcome: TerminalOutcome,
+        output_digest: str | None,
+        completion_revision: str | None,
+    ) -> FinishResult:
+        attempt = connection.execute(
+            """
+            SELECT unit_id, lease_id, owner, fencing_token
+            FROM attempts WHERE attempt_id = ?
+            """,
+            (lease.attempt_id,),
+        ).fetchone()
+        if attempt is None or (
+            attempt["unit_id"],
+            attempt["lease_id"],
+            attempt["owner"],
+            attempt["fencing_token"],
+        ) != (lease.unit_id, lease.lease_id, lease.owner, lease.fencing_token):
+            raise StaleLeaseError(f"attempt capability mismatch: {lease.unit_id}")
+        observed = (
+            terminal["outcome"],
+            terminal["output_digest"],
+            terminal["completion_revision"],
+        )
+        requested = (outcome.value, output_digest, completion_revision)
+        if observed != requested:
+            if terminal["outcome"] == TerminalOutcome.ABANDONED.value:
+                raise StaleLeaseError(f"attempt lease expired: {lease.unit_id}")
+            if terminal["outcome"] == TerminalOutcome.ACCEPTED.value:
+                raise CompletionConflictError(
+                    f"attempt already completed differently: {lease.unit_id}"
+                )
+            raise QueueConflictError(f"attempt already terminated differently: {lease.attempt_id}")
+        return FinishResult(
+            disposition=(
+                FinishDisposition.IDEMPOTENT
+                if outcome is TerminalOutcome.ACCEPTED
+                else FinishDisposition.TERMINAL_ONLY
+            ),
+            unit_id=lease.unit_id,
+            attempt_id=lease.attempt_id,
+            output_digest=output_digest,
+        )
+
+    def _recover_expired(self, connection: sqlite3.Connection) -> None:
+        expired = connection.execute(
+            """
+            SELECT unit_id, attempt_id FROM leases
+            WHERE expires_at <= CAST(unixepoch('subsec') * 1000 AS INTEGER)
+            ORDER BY unit_id
+            """
+        ).fetchall()
+        for row in expired:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO attempt_terminals(attempt_id, outcome)
+                VALUES (?, 'ABANDONED')
+                """,
+                (row["attempt_id"],),
+            )
+            self._append_event(connection, row["attempt_id"], "LEASE_EXPIRED", {})
+            connection.execute("DELETE FROM leases WHERE unit_id = ?", (row["unit_id"],))
+            connection.execute(
+                """
+                UPDATE work_units SET status = 'READY'
+                WHERE unit_id = ? AND execution_mode = 'NORMAL'
+                  AND status = 'LEASED'
+                """,
+                (row["unit_id"],),
+            )
+
+    def _record_workspace_failure(self, lease: Lease) -> None:
+        with self._immediate() as connection:
+            try:
+                self._require_live_lease(connection, lease)
+            except StaleLeaseError:
+                return
+            connection.execute(
+                """
+                INSERT INTO attempt_terminals(attempt_id, outcome)
+                VALUES (?, 'FAILED')
+                """,
+                (lease.attempt_id,),
+            )
+            self._append_event(connection, lease.attempt_id, "WORKSPACE_ALLOCATION_FAILED", {})
+            connection.execute("DELETE FROM leases WHERE unit_id = ?", (lease.unit_id,))
+            connection.execute(
+                "UPDATE work_units SET status = 'REPAIR_REQUIRED' WHERE unit_id = ?",
+                (lease.unit_id,),
+            )
+
+    def _create_workspace(self, lease: Lease) -> None:
+        root_fd = self._open_attempts_root()
+        unit_fd = -1
+        workspace_fd = -1
+        marker_fd = -1
+        try:
+            try:
+                os.mkdir(lease.unit_id, mode=0o700, dir_fd=root_fd)
+                os.fsync(root_fd)
+            except FileExistsError:
+                pass
+            unit_fd = self._open_directory_at(root_fd, lease.unit_id)
+            os.mkdir(lease.attempt_id, mode=0o700, dir_fd=unit_fd)
+            workspace_fd = self._open_directory_at(unit_fd, lease.attempt_id)
+            marker = (
+                json.dumps(
+                    {
+                        "attempt_id": lease.attempt_id,
+                        "fencing_token": lease.fencing_token,
+                        "lease_id": lease.lease_id,
+                        "owner": lease.owner,
+                        "unit_id": lease.unit_id,
+                    },
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+                + b"\n"
+            )
+            marker_fd = os.open(
+                "ATTEMPT.READY",
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o400,
+                dir_fd=workspace_fd,
+            )
+            written = 0
+            while written < len(marker):
+                chunk_size = os.write(marker_fd, marker[written:])
+                if chunk_size <= 0:
+                    raise QueueError("short write while publishing attempt marker")
+                written += chunk_size
+            os.fsync(marker_fd)
+            os.close(marker_fd)
+            marker_fd = -1
+            os.fsync(workspace_fd)
+            os.fsync(unit_fd)
+            os.fsync(root_fd)
+        finally:
+            if marker_fd >= 0:
+                os.close(marker_fd)
+            if workspace_fd >= 0:
+                os.close(workspace_fd)
+            if unit_fd >= 0:
+                os.close(unit_fd)
+            os.close(root_fd)
+
+    def _open_attempts_root(self) -> int:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT attempts_root, attempts_device, attempts_inode
+                FROM schema_meta WHERE singleton = 1
+                """
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None or row["attempts_root"] != str(self.attempts_root):
+            raise QueueError("queue attempt root is not initialized")
+        descriptor = self._open_directory_path(self.attempts_root)
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (
+            row["attempts_device"],
+            row["attempts_inode"],
+        ):
+            os.close(descriptor)
+            raise QueueError("queue attempt root identity changed")
+        return descriptor
+
+    @staticmethod
+    def _open_directory_path(path: Path) -> int:
+        flags = (
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            return os.open(path, flags)
+        except OSError as error:
+            raise QueueError(f"unsafe or inaccessible directory: {path}") from error
+
+    @classmethod
+    def _fsync_directory_path(cls, path: Path) -> None:
+        descriptor = cls._open_directory_path(path)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _create_directory_tree_durably(self, path: Path) -> None:
+        """Create a directory tree and sync every link to its existing anchor."""
+        anchor = path
+        while not anchor.exists():
+            parent = anchor.parent
+            if parent == anchor:
+                raise QueueError(f"directory tree has no existing anchor: {path}")
+            anchor = parent
+        if not anchor.is_dir():
+            raise QueueError(f"directory tree anchor is not a directory: {anchor}")
+
+        path.mkdir(parents=True, exist_ok=True)
+        current = path
+        while True:
+            self._fsync_directory_path(current)
+            if current == anchor:
+                break
+            current = current.parent
+
+    @staticmethod
+    def _open_directory_at(parent_fd: int, name: str) -> int:
+        flags = (
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            return os.open(name, flags, dir_fd=parent_fd)
+        except OSError as error:
+            raise QueueError(f"unsafe attempt directory component: {name}") from error
+
+    def _require_live_lease(self, connection: sqlite3.Connection, lease: Lease) -> None:
+        row = connection.execute(
+            """
+            SELECT 1 FROM leases
+            WHERE unit_id = ? AND lease_id = ? AND attempt_id = ?
+              AND owner = ? AND fencing_token = ?
+              AND expires_at > CAST(unixepoch('subsec') * 1000 AS INTEGER)
+            """,
+            (
+                lease.unit_id,
+                lease.lease_id,
+                lease.attempt_id,
+                lease.owner,
+                lease.fencing_token,
+            ),
+        ).fetchone()
+        if row is None:
+            raise StaleLeaseError(f"stale or expired lease: {lease.unit_id}")
+
+    @staticmethod
+    def _require_unstarted(connection: sqlite3.Connection, unit_id: str) -> None:
+        row = connection.execute(
+            """
+            SELECT status,
+                   EXISTS(SELECT 1 FROM attempts WHERE attempts.unit_id = work_units.unit_id)
+                       AS has_attempt
+            FROM work_units WHERE unit_id = ?
+            """,
+            (unit_id,),
+        ).fetchone()
+        if row is None:
+            raise QueueError(f"unknown work unit: {unit_id}")
+        if row["status"] != WorkUnitStatus.READY.value or bool(row["has_attempt"]):
+            raise QueueConflictError(f"dependencies are frozen after work starts: {unit_id}")
+
+    def _dependencies_satisfied(self, connection: sqlite3.Connection, unit_id: str) -> bool:
+        missing = connection.execute(
+            """
+            SELECT 1
+            FROM dependencies AS dependency
+            LEFT JOIN formal_completions AS completion
+              ON completion.unit_id = dependency.parent_unit_id
+            WHERE dependency.unit_id = ?
+              AND (
+                  completion.unit_id IS NULL
+                  OR completion.completion_revision <> dependency.required_revision
+                  OR completion.output_digest <> dependency.required_digest
+              )
+            UNION ALL
+            SELECT 1
+            FROM capability_requirements AS requirement
+            LEFT JOIN pipeline_capabilities AS capability
+              ON capability.capability = requirement.capability
+             AND capability.revision = requirement.required_revision
+             AND capability.digest = requirement.required_digest
+            WHERE requirement.unit_id = ? AND capability.capability IS NULL
+            LIMIT 1
+            """,
+            (unit_id, unit_id),
+        ).fetchone()
+        return missing is None
+
+    @staticmethod
+    def _append_event(
+        connection: sqlite3.Connection,
+        attempt_id: str,
+        event_type: str,
+        payload: Mapping[str, object],
+    ) -> None:
+        encoded = json.dumps(
+            payload,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        connection.execute(
+            """
+            INSERT INTO events(attempt_id, event_type, payload_json)
+            VALUES (?, ?, ?)
+            """,
+            (attempt_id, event_type, encoded),
+        )
+
+    @contextmanager
+    def _immediate(self) -> Iterator[sqlite3.Connection]:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            yield connection
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            self.database,
+            timeout=self.busy_timeout_ms / 1_000,
+            isolation_level=None,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+        connection.execute("PRAGMA synchronous = FULL")
+        return connection
+
+
+def _validate_identifier(value: str, label: str) -> None:
+    if _IDENTIFIER.fullmatch(value) is None:
+        raise ValueError(f"{label} must be a stable path-safe identifier")
+
+
+def _validate_digest(value: str, label: str) -> None:
+    if _DIGEST.fullmatch(value) is None:
+        raise ValueError(f"{label} must be a lowercase SHA-256 digest")
+
+
+def _validate_revision(value: str) -> None:
+    if not value or "\x00" in value or len(value) > 200:
+        raise ValueError("revision must be a non-empty bounded string")
+
+
+def _validate_owner(owner: str) -> None:
+    if not owner or "\x00" in owner or len(owner) > 500:
+        raise ValueError("owner must be a non-empty bounded string")
+
+
+def _validate_ttl(ttl_seconds: int) -> None:
+    if ttl_seconds < 1:
+        raise ValueError("ttl_seconds must be positive")
