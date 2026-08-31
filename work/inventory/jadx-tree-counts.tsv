@@ -1,0 +1,5 @@
+tree	total_files	source_files	resource_files	note
+work/jadx	6962	6133	829	original full normal run
+work/jadx-deobf	6962	6133	829	original full deobfuscated run
+work/jadx-diagnostic-rerun	6133	6133	0	2026-08-29 authoritative DEBUG diagnostic rerun with --no-res
+work/jadx-deobf-diagnostic-rerun	6133	6133	0	2026-08-29 authoritative DEBUG diagnostic deobfuscated rerun with --no-res

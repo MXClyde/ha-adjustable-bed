@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Model support evidence from GitHub issues</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #000;
+      --surface: #111;
+      --surface-2: #181818;
+      --line: #303030;
+      --text: #fff;
+      --muted: #aaa;
+      --green: #8ee28e;
+      --amber: #f4c77a;
+      --red: #ff9090;
+      --blue: #8dbdff;
+    }
+    * { box-sizing: border-box; }
+    html { background: var(--bg); }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 1380px; margin: 0 auto; padding: 42px 24px 72px; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { max-width: 860px; font-size: clamp(28px, 5vw, 52px); line-height: 1.02; letter-spacing: -0.04em; }
+    h2 { margin-top: 42px; font-size: 22px; letter-spacing: -0.02em; }
+    h3 { font-size: 16px; }
+    a { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; }
+    .lede { max-width: 780px; margin-top: 16px; color: var(--muted); font-size: 17px; }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 20px; color: var(--muted); font-size: 13px; }
+    .summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin-top: 32px; background: var(--line); border: 1px solid var(--line); }
+    .summary div { min-height: 108px; padding: 16px; background: var(--surface); }
+    .summary strong { display: block; font-size: 32px; line-height: 1; }
+    .summary span { display: block; margin-top: 10px; color: var(--muted); }
+    .green { color: var(--green); }
+    .amber { color: var(--amber); }
+    .red { color: var(--red); }
+    .blue { color: var(--blue); }
+    .method { margin-top: 30px; padding: 18px 20px; border-left: 3px solid var(--blue); background: var(--surface); color: var(--muted); }
+    .method strong { color: var(--text); }
+    .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-top: 28px; }
+    label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+    input, select { min-height: 40px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 0; background: var(--surface-2); color: var(--text); font: inherit; }
+    input { min-width: min(360px, 80vw); }
+    .result-count { margin-left: auto; color: var(--muted); font-size: 13px; }
+    .section-note { margin-top: 8px; color: var(--muted); }
+    .table-wrap { overflow-x: auto; margin-top: 16px; border: 1px solid var(--line); }
+    table { width: 100%; min-width: 920px; border-collapse: collapse; }
+    th, td { padding: 13px 14px; vertical-align: top; border-bottom: 1px solid var(--line); text-align: left; }
+    th { background: var(--surface-2); color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; }
+    tr:last-child td { border-bottom: 0; }
+    td:first-child { width: 24%; font-weight: 600; }
+    td:nth-child(2) { width: 40%; }
+    td:nth-child(3) { width: 22%; color: var(--muted); }
+    td:last-child { width: 14%; white-space: nowrap; }
+    .issue-links { display: flex; flex-wrap: wrap; gap: 5px 10px; }
+    .issue-links a { white-space: nowrap; }
+    .status-line { display: inline-block; margin-top: 5px; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+    .hidden { display: none; }
+    footer { margin-top: 46px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+    @media (max-width: 760px) {
+      main { padding: 28px 14px 48px; }
+      .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .result-count { width: 100%; margin-left: 0; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Model support evidence from GitHub issues</h1>
+      <p class="lede">A conservative model-level read of the repository issue history. “Confirmed working” means a user explicitly reported Adjustable Bed control working for that exact model or a very specific hardware variant. It does not mean complete feature parity.</p>
+      <div class="meta">
+        <span>Repository: <a href="https://github.com/kristofferR/ha-adjustable-bed">kristofferR/ha-adjustable-bed</a></span>
+        <span>Scan date: 2026-08-09</span>
+        <span>Coverage: 222 issues, open and closed, including comments</span>
+      </div>
+    </header>
+
+    <section class="summary" aria-label="Summary">
+      <div><strong class="green" data-count="confirmed">8</strong><span>confirmed working models</span></div>
+      <div><strong class="amber" data-count="partial">14</strong><span>partial or mixed evidence</span></div>
+      <div><strong class="blue" data-count="unknown">9</strong><span>not confirmed by a user</span></div>
+      <div><strong class="red" data-count="failed">6</strong><span>explicitly not working or unsupported</span></div>
+    </section>
+
+    <div class="method">
+      <strong>How to read this:</strong> closed implementation issues were not counted as hardware proof by themselves. Rows combine related issue numbers when they describe the same model. Protocol-level evidence, generic brand support, and app-only success are kept separate from exact model confirmation.
+    </div>
+
+    <div class="controls" aria-label="Report filters">
+      <label>Search model, brand, or evidence
+        <input id="model-search" type="search" placeholder="Try “Okin”, “L600”, or “massage”">
+      </label>
+      <label>Category
+        <select id="category-filter">
+          <option value="all">All model records</option>
+          <option value="confirmed">Confirmed working</option>
+          <option value="partial">Partial or mixed</option>
+          <option value="unknown">Not confirmed</option>
+          <option value="failed">Not working or unsupported</option>
+        </select>
+      </label>
+      <span class="result-count" aria-live="polite">37 matching model records</span>
+    </div>
+
+    <section aria-labelledby="confirmed-heading">
+      <h2 id="confirmed-heading" class="green">Confirmed working</h2>
+      <p class="section-note">The issue discussion contains a direct positive report for the exact model or hardware variant.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Model / variant</th><th>Evidence</th><th>Caveat</th><th>Source</th></tr></thead>
+          <tbody>
+            <tr data-category="confirmed"><td>Members Mark Premium<br><span class="status-line green">Keeson</span></td><td>“The back, leg, and massage controls all seem to work perfectly.” The maintainer marked Keeson as tested from this report.</td><td>Feature coverage beyond the reported controls was not audited.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/2">#2</a></div></td></tr>
+            <tr data-category="confirmed"><td>Malouf 755 / S755<br><span class="status-line green">Okin CB.24.42</span></td><td>User reported that version 1.6.1 was working with the S755. A later issue confirms S755 detection as Malouf New Okin.</td><td>Split-bed and partner-control behavior may need separate validation.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/47">#47</a><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/393">#393</a></div></td></tr>
+            <tr data-category="confirmed"><td>Lamalit Diamant<br><span class="status-line green">Okimat 4 IPS 94993</span></td><td>After the pairing and remote-code work, the user replied: “It works!!!!!”</td><td>Memory-slot support was added afterward.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/116">#116</a></div></td></tr>
+            <tr data-category="confirmed"><td>Better Living Australia<br><span class="status-line green">PCU-JLDK-18-4</span></td><td>User reported: “All commands seem to be working perfectly.”</td><td>Entity label cleanup was handled separately.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/229">#229</a></div></td></tr>
+            <tr data-category="confirmed"><td>Rize Remedy III<br><span class="status-line green">Kaidi KDH281-003</span></td><td>After pairing and discovery fixes, the user reported that the bed connected and “now works properly.”</td><td>Setup may require removing remote batteries and power-cycling before pairing.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/247">#247</a></div></td></tr>
+            <tr data-category="confirmed"><td>Ergomotion Rio 6.0<br><span class="status-line green">KEESON RF392D</span></td><td>The issue is explicitly titled “confirmed working.” The support-bundle review says the bed is already supported and working.</td><td>Detection may show a generic device name.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/297">#297</a></div></td></tr>
+            <tr data-category="confirmed"><td>Casper Adjustable Base Max<br><span class="status-line green">Richmat HJC27</span></td><td>User confirmed the integration was working, then specifically confirmed that lighting and sync were working.</td><td>Additional color controls and split-bed wiring may vary by installation.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/300">#300</a></div></td></tr>
+            <tr data-category="confirmed"><td>BedTech BT6500<br><span class="status-line green">Richmat-compatible profile</span></td><td>User reported that the buttons worked after selecting the Richmat profile. The later light fix was tested and reported working in v2.9.12.</td><td>BT6500 is not an RGB-light variant.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/194">#194</a><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/348">#348</a></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="partial-heading">
+      <h2 id="partial-heading" class="amber">Partial or mixed evidence</h2>
+      <p class="section-note">Some controls work, but the thread contains unresolved features, regressions, or conflicting follow-ups. These should not be treated as full model certification.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Model / variant</th><th>What the issues establish</th><th>Open concern</th><th>Source</th></tr></thead>
+          <tbody>
+            <tr data-category="partial"><td>Ashley / Nectar M1X1232<br><span class="status-line amber">Star25 / sleepys_box25</span></td><td>Head and foot movement, light, and massage were reported working.</td><td>Preset behavior repeatedly needed Stop All or disconnect, with conflicting later reports.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/372">#372</a></div></td></tr>
+            <tr data-category="partial"><td>Lucid L600<br><span class="status-line amber">Multiple L600 protocol families</span></td><td>Users reported the model working in earlier and later releases, including a later “all of the buttons” confirmation.</td><td>The thread also records regressions, stuttering, and preset overwrites. L600 is not one protocol.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/309">#309</a><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/358">#358</a><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/441">#441</a></div></td></tr>
+            <tr data-category="partial"><td>Svane LinON Pro<br><span class="status-line amber">LinON</span></td><td>The user could control the bed and later said the connection was fine.</td><td>Flat and memory functions were repeatedly reported as unreliable.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/152">#152</a></div></td></tr>
+            <tr data-category="partial"><td>Jensen Mattress Toppers<br><span class="status-line amber">JMC400 / LinON</span></td><td>The user reported that integration controls worked for the bed.</td><td>Flat automation was unreliable or required a preceding movement command.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/146">#146</a><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/217">#217</a></div></td></tr>
+            <tr data-category="partial"><td>SUTA-B201B<br><span class="status-line amber">SUTA</span></td><td>User said the integration worked well for the model for the most part.</td><td>Preset motion was choppy and was tracked as a timing or movement-shape bug.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/223">#223</a></div></td></tr>
+            <tr data-category="partial"><td>Motosleep HHC0120182CDEH<br><span class="status-line amber">MotoSleep</span></td><td>Core controls were reported working.</td><td>Under-bed light control was broken in the original report, and a later HHC report identifies missing lumbar control.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/51">#51</a><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/445">#445</a></div></td></tr>
+            <tr data-category="partial"><td>BedTech BT3000<br><span class="status-line amber">Dual base</span></td><td>After manually identifying the correct devices, the user reported being able to control both beds.</td><td>Under-bed light behavior was a separate unresolved or version-dependent problem.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/296">#296</a><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/410">#410</a></div></td></tr>
+            <tr data-category="partial"><td>OKIMAT 4 IPS/M, Lattoflex<br><span class="status-line amber">Remote 94440</span></td><td>The user tested the fix branch and confirmed the light bug was fixed.</td><td>Position feedback is unavailable on this hardware and some entities were missing after variant correction.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/406">#406</a><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/149">#149</a></div></td></tr>
+            <tr data-category="partial"><td>Sealy Element<br><span class="status-line amber">Okin CB35 / Nordic</span></td><td>Motor commands were reported working under an Okin variant.</td><td>Movement was only a short, indeterminate pulse, and there was no final end-to-end confirmation.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/310">#310</a></div></td></tr>
+            <tr data-category="partial"><td>Beautyrest Baselogic Platinum<br><span class="status-line amber">RF-432A-21</span></td><td>Massage controls were later reported working.</td><td>Light and sound toggles did not work, and the issue contains protocol uncertainty.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/311">#311</a></div></td></tr>
+            <tr data-category="partial"><td>Vibradorm V-MAT-Memory<br><span class="status-line amber">VFF/CDL-BF-11-BT</span></td><td>Basic motor control is marked as tested in the related issue history.</td><td>Pairing, position feedback, and memory behavior remain incomplete or inconsistent.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/162">#162</a><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/207">#207</a><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/403">#403</a></div></td></tr>
+            <tr data-category="partial"><td>Amada adjustable bed<br><span class="status-line amber">Okin RF 267.19.33</span></td><td>One user reported all buttons working in v2.4.0 and another later reported v2.4.7 working well.</td><td>Other reports in the same long thread show preset and feature regressions between versions.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/185">#185</a></div></td></tr>
+            <tr data-category="partial"><td>Sleep Electric Elite Hi-Lo<br><span class="status-line amber">Okin CB1542 / CB.15.42.24A H</span></td><td>Back, legs, and both tilt directions were confirmed moving correctly.</td><td>Height adjustment did not work in the user test.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/244">#244</a></div></td></tr>
+            <tr data-category="partial"><td>Octo Actuators Ultra Move<br><span class="status-line amber">Betronic MC2 / RC2</span></td><td>The user first reported ignored commands, then later posted “Works” after the thread's troubleshooting.</td><td>The final confirmation has no detail about which controls were tested, so confidence is medium.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/499">#499</a></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="unknown-heading">
+      <h2 id="unknown-heading" class="blue">Not confirmed by a user</h2>
+      <p class="section-note">The issue contains a model, implementation work, connection evidence, or a maintainer claim, but no reliable user confirmation that the model can be controlled end to end.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Model / variant</th><th>Issue state</th><th>Why it stays unconfirmed</th><th>Source</th></tr></thead>
+          <tbody>
+            <tr data-category="unknown"><td>Mattress Firm NORA_CON / IDT base</td><td>Maintainer said detection was fixed in 3.0.</td><td>No post-fix user report confirms movement.</td><td><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/370">#370</a></td></tr>
+            <tr data-category="unknown"><td>Leggett &amp; Platt Prodigy CE<br><span class="status-line blue">RF-Touch 89845</span></td><td>Support bundle shows successful connections.</td><td>No command execution or motor response was confirmed.</td><td><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/368">#368</a></td></tr>
+            <tr data-category="unknown"><td>Serta Motion Essentials VI</td><td>New-bed issue closed.</td><td>The maintainer noted there was not enough information to validate it.</td><td><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/337">#337</a></td></tr>
+            <tr data-category="unknown"><td>Mulin MLKZWX018-C1<br><span class="status-line blue">MLSK28/-D3</span></td><td>Controller and product details were supplied.</td><td>No successful HA control report appears in the thread.</td><td><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/331">#331</a></td></tr>
+            <tr data-category="unknown"><td>Sleep Number i8 FlexFit</td><td>Discovery and protocol work were discussed.</td><td>The issue has connection failures and no end-state control confirmation.</td><td><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/322">#322</a></td></tr>
+            <tr data-category="unknown"><td>Sleep Number Climate 360</td><td>Support was implemented and presence polling was reverse-engineered.</td><td>Pairing failed in the reported setup; no successful motor-control report was found.</td><td><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/318">#318</a></td></tr>
+            <tr data-category="unknown"><td>Elda Treppen MEGAMAT MBZ<br><span class="status-line blue">OKIN smart remote</span></td><td>BLE connection and GATT discovery succeeded.</td><td>No bed-control command response was demonstrated.</td><td><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/344">#344</a></td></tr>
+            <tr data-category="unknown"><td>Germany Motion / T5-BLACK</td><td>Richmat WiLinke identification was discussed.</td><td>The reported T5-BLACK hardware was RF-only, and no working HA model confirmation was recorded.</td><td><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/163">#163</a></td></tr>
+            <tr data-category="unknown"><td>Okin AH / Enliven AH<br><span class="status-line blue">RF Topline 90882</span></td><td>Official app and remote worked.</td><td>Home Assistant pairing and authentication remained the blocker in the issue.</td><td><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/338">#338</a></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="failed-heading">
+      <h2 id="failed-heading" class="red">Explicitly not working or unsupported</h2>
+      <p class="section-note">The issue contains a direct failure report or establishes that the device is not a compatible BLE bed for this integration.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Model / variant</th><th>Observed failure</th><th>Interpretation</th><th>Source</th></tr></thead>
+          <tbody>
+            <tr data-category="failed"><td>Mattress Firm MFirm 900-O<br><span class="status-line red">Okin CB3633A</span></td><td>Lights, lumbar, and flat controls were reported incorrect or nonfunctional. A related 900-O issue reports only partial motor control and no presets.</td><td>Do not list this exact CB3633A variant as confirmed working.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/501">#501</a><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/365">#365</a></div></td></tr>
+            <tr data-category="failed"><td>Swissflex slat base<br><span class="status-line red">DewertOkin</span></td><td>Official app and manual GATT writes work, but every integration command fails with insufficient authorization.</td><td>Protocol may be compatible, but this installation is not working through the integration as reported.</td><td><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/394">#394</a></td></tr>
+            <tr data-category="failed"><td>SUTA-B202B<br><span class="status-line red">WLT8016_S106</span></td><td>Physical remote works, but the integration connects without getting an AT-command response or movement.</td><td>Not confirmed as supported by the current protocol path.</td><td><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/345">#345</a></td></tr>
+            <tr data-category="failed"><td>BoxPower iExclusive electrical boxspring<br><span class="status-line red">RF HJA1RF</span></td><td>The thread concludes the bed does not actually expose usable Bluetooth control, and the detected device was likely unrelated.</td><td>Unsupported for this BLE integration.</td><td><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/332">#332</a></td></tr>
+            <tr data-category="failed"><td>BedJet PowerLayer BT</td><td>The device appears in scans, but the app cannot control it and no protocol path was available.</td><td>Unsupported until a controlling app or protocol is available.</td><td><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/343">#343</a></td></tr>
+            <tr data-category="failed"><td>Swiss Sense Octo receivers<br><span class="status-line red">RC2 / TV lift set</span></td><td>Phone control works, but Home Assistant cannot see or connect to the receivers through the Bluetooth proxy.</td><td>Installation transport failure, not proof that every Octo RC2 is unsupported.</td><td><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/440">#440</a></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="protocol-heading">
+      <h2 id="protocol-heading">Protocol-level evidence, not exact model certification</h2>
+      <p class="section-note">These issues establish that a protocol or controller family is implemented, but they do not identify a specific physical model that was validated end to end.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Family</th><th>Evidence</th><th>Why it is separate</th><th>Source</th></tr></thead>
+          <tbody>
+            <tr><td>Octo Smart Control</td><td>The issue history documents motor control, PIN keep-alive, light discovery, and related capability work.</td><td>Exact hardware still matters. Split-bed switching and real two-address validation remain separate concerns.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/21">#21</a><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/327">#327</a><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/329">#329</a></div></td></tr>
+            <tr><td>Okin / Okimat protocol families</td><td>Many issue threads establish protocol variants and fixes, including OKIN UUID, CST, CB24, and 7-byte paths.</td><td>Remote code, firmware, pairing, and packet variant determine whether a specific model works.</td><td><div class="issue-links"><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/92">#92</a><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/265">#265</a><a href="https://github.com/kristofferR/ha-adjustable-bed/issues/263">#263</a></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer>
+      This report is an evidence index, not a replacement for the README supported-bed table. It intentionally favors false negatives over false positives: a model stays out of “confirmed working” when the issue only proves detection, connection, APK compatibility, or a maintainer-side code change.
+    </footer>
+  </main>
+  <script>
+    const search = document.querySelector("#model-search");
+    const filter = document.querySelector("#category-filter");
+    const rows = [...document.querySelectorAll("tbody tr[data-category]")];
+    const resultCount = document.querySelector(".result-count");
+    function updateRows() {
+      const needle = (search?.value || "").trim().toLowerCase();
+      const category = filter?.value || "all";
+      let visible = 0;
+      for (const row of rows) {
+        const matchesText = !needle || row.textContent.toLowerCase().includes(needle);
+        const matchesCategory = category === "all" || row.dataset.category === category;
+        const show = matchesText && matchesCategory;
+        row.classList.toggle("hidden", !show);
+        if (show) visible += 1;
+      }
+      if (resultCount) resultCount.textContent = `${visible} matching model records`;
+    }
+    search?.addEventListener("input", updateRows);
+    filter?.addEventListener("change", updateRows);
+    updateRows();
+  </script>
+</body>
+</html>

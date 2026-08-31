@@ -1,0 +1,8 @@
+member	size	sha256	disposition
+com.linak.linakbed.ble.memory.apk	6805329	ce6243f21def3745241fa11ae366be26ed5ca1ce57a1738c48fd5b1c7c88f6b3	base APK; application DEX/resources
+icon.png	36948	0e94d55da25636e77f0f066903e2abbd86a125820ab780300abcd122a8d1fb77	XAPK wrapper icon metadata; not installed APK logic
+config.arm64_v8a.apk	98831	1bd24fdc45995d236ec339535869f86593c305f354fd533c927cc8ca4dd60314	arm64 native-library split
+config.en.apk	53657	ac99a5999936199fcf9e44b5c3b5819c231d9ba42973efad092673ef4251add7	English resource split
+config.mdpi.apk	45489	49090815ec1ca6d447c52a42182ba69727a5ba86a9a090dedbe970af2059066b	mdpi resource split
+config.zh.apk	37273	8ce0e1c009ae54875e794f88c32c1a50176eae113067cecd17983dbe92f0f5d3	Chinese resource split
+manifest.json	1267	060f757a8f4bac92019494d7c8ff152b1f8b6f58b8f6aa22611c727cd8d8bad3	XAPK wrapper install metadata; inspected and reconciled

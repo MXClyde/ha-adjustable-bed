@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adjustable Bed v4 Multi-Command Architecture: Fable Plan</title>
+<style>
+  :root{
+    --bg:#000; --fg:#fff; --dim:#b8b8b8; --faint:#8a8a8a;
+    --surface:#141414; --surface2:#1c1c1c; --line:#2c2c2c;
+    --accent:#7fd4ff; --good:#8ce99a; --warn:#ffd479; --bad:#ff8787;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{background:var(--bg)}
+  body{
+    background:var(--bg); color:var(--fg);
+    font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    margin:0; padding:0 16px 96px;
+  }
+  main{max-width:980px;margin:0 auto}
+  h1{font-size:1.7rem;line-height:1.25;margin:40px 0 4px}
+  h2{font-size:1.25rem;margin:44px 0 10px;border-bottom:1px solid var(--line);padding-bottom:6px}
+  h3{font-size:1.05rem;margin:26px 0 6px;color:var(--accent)}
+  h4{font-size:.95rem;margin:20px 0 4px}
+  p{margin:8px 0}
+  .sub{color:var(--dim);margin:0 0 24px}
+  .k{color:var(--accent)} .g{color:var(--good)} .w{color:var(--warn)} .b{color:var(--bad)}
+  code{font-family:var(--mono);font-size:.86em;background:var(--surface);padding:1px 5px;border-radius:3px;white-space:nowrap}
+  pre{background:var(--surface);border:1px solid var(--line);padding:12px 14px;overflow-x:auto;border-radius:4px;margin:12px 0}
+  pre code{background:none;padding:0;white-space:pre;font-size:.82rem;line-height:1.5}
+  table{border-collapse:collapse;width:100%;margin:12px 0;font-size:.88rem}
+  th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}
+  th{background:var(--surface2);font-weight:600}
+  td{background:var(--surface)}
+  ul,ol{margin:8px 0;padding-left:24px}
+  li{margin:4px 0}
+  .ref{font-family:var(--mono);font-size:.78em;color:var(--faint);white-space:nowrap}
+  .note{border-left:3px solid var(--accent);background:var(--surface);padding:8px 12px;margin:12px 0}
+  .warnbox{border-left:3px solid var(--warn);background:var(--surface);padding:8px 12px;margin:12px 0}
+  .tablewrap{overflow-x:auto}
+  nav{background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:12px 16px;margin:20px 0;font-size:.9rem}
+  nav a{color:var(--accent);text-decoration:none;display:inline-block;margin:2px 14px 2px 0}
+  nav a:hover{text-decoration:underline}
+  figure{margin:16px 0}
+  figcaption{color:var(--faint);font-size:.82rem;margin-top:4px}
+  svg text{font-family:var(--mono)}
+  @media (max-width:640px){
+    body{font-size:15px}
+    h1{font-size:1.4rem}
+    th,td{padding:5px 6px}
+  }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Adjustable Bed v4 Multi-Command Architecture: Fable Plan</h1>
+<p class="sub">Independent architecture plan derived from the released v4.0.0b3 tree (commit <code>998b52c</code>). Design only, no implementation. All file:line anchors were checked against that commit. Every protocol without authoritative concurrency evidence uses strict serial execution with queue-not-cancel semantics.</p>
+
+<nav>
+  <a href="#tldr">TLDR</a>
+  <a href="#baseline">b3 baseline</a>
+  <a href="#defects">Defects</a>
+  <a href="#principles">Principles</a>
+  <a href="#core">Core design</a>
+  <a href="#protocol">Protocol declarations</a>
+  <a href="#semantics">Semantics matrix</a>
+  <a href="#pair">Pair layer</a>
+  <a href="#seek">Position orchestration</a>
+  <a href="#lifecycle">Lifecycle</a>
+  <a href="#types">Typed interfaces</a>
+  <a href="#migration">Migration</a>
+  <a href="#diag">Diagnostics</a>
+  <a href="#tests">Tests</a>
+  <a href="#phases">Phases + gates</a>
+  <a href="#rejected">Rejected</a>
+  <a href="#risks">Risks</a>
+  <a href="#evidence">Evidence rules</a>
+</nav>
+
+<h2 id="tldr">TLDR</h2>
+<p>In b3, every per-device coordinator has exactly one command lock and one <em>global</em> cancel token. Any motion command bumps <code>_cancel_counter</code> and sets <code>_cancel_command</code> <span class="ref">coordinator.py:4292-4293</span>, so a legs command kills a running back seek; and the 60-second seek loop holds <code>_command_lock</code> for its whole lifetime <span class="ref">coordinator.py:4931, const.py:2247</span>, so even a non-cancelling command (a light toggle uses <code>cancel_running=False</code> <span class="ref">light.py:277</span>) waits up to a minute. The pair layer repeats the pattern one level up: <code>_pair_command_lock</code> serializes even non-overlapping side commands <span class="ref">paired_coordinator.py:296</span>.</p>
+<p>The fix is a <strong>per-physical-device command scheduler</strong> built from scoped tickets, a wire gate, and an optional motion-intent registry. Each ticket declares resource scope, lifetime, physical completion policy, priority, and a private cancel token. Cancellation becomes scope-intersection instead of global. A monotonic STOP generation prevents work admitted during a stop race from starting afterward. The BLE wire remains strictly serialized per device at the existing <code>_ble_lock</code> boundary.</p>
+<p>The default execution model for <strong>every</strong> protocol is <strong>serial with queue-not-cancel semantics</strong>: a request on a different axis queues after the active ticket, never cancelling or interleaving with it. That fixes the reported bug without promising simultaneous movement. Interleaved bursts, combined multi-axis frames, and direct-target coexistence each require protocol-specific authoritative evidence. Separate-address concurrent pairs are the evidence-free exception because two physical BLE links can overlap while each link still sees serial traffic, subject to v4's existing connection mode <span class="ref">const.py:149-158</span>. The pair parent becomes a router: single-side pass-through, linked two-phase reservation for <code>both</code>, and the unchanged sequential lane for one-link pairs.</p>
+
+<h2 id="baseline">1. What v4.0.0b3 already solves, and which boundaries to extend</h2>
+<p>b3 is a sound base. The redesign composes with these invariants rather than replacing them:</p>
+<div class="tablewrap"><table>
+<tr><th>b3 mechanism</th><th>Where</th><th>Verdict</th></tr>
+<tr><td>Per-write GATT serialization: every write/notify/read takes the controller's <code>_ble_lock</code></td><td class="ref">beds/base.py:241, 569</td><td class="g">Keep unchanged. This is the wire-safety boundary; logical scheduling happens above it. b3 already proves position reads coexist with movement writes over this lock on feedback protocols (polling during movement, <span class="ref">coordinator.py:5034-5040</span>), which is the only mid-motion coexistence this design treats as established.</td></tr>
+<tr><td>STOP always completes: bump-then-lock, no early return, connect-if-needed, controller <code>stop_all()</code></td><td class="ref">coordinator.py:4126-4179</td><td class="g">Keep the contract verbatim; extend with a priority lane so STOP never queues behind other admitted commands.</td></tr>
+<tr><td>Cancel-checked write bursts: <code>_write_gatt_with_retry</code> checks a cancel event between repeats</td><td class="ref">beds/base.py:557-560</td><td class="g">Keep. The event it reads (<code>coordinator.cancel_command</code>, <span class="ref">base.py:516, coordinator.py:1631</span>) becomes context-local, which migrates every controller with zero edits.</td></tr>
+<tr><td>Paired fan-out with partial-failure contract: FIRST_EXCEPTION, stop-the-other, merged stop errors</td><td class="ref">paired_coordinator.py:336-371, 55-64</td><td class="g">Keep. The barrier for <code>both</code> commands wraps this logic unchanged.</td></tr>
+<tr><td>Sequential (Octo) profile: one link at a time, dead-man halt on disconnect, per-side cancel re-checks mid-cycle</td><td class="ref">paired_coordinator.py:373-478; const.py:426</td><td class="g">Keep as a total-order lane. Physical constraint, not a scheduling choice.</td></tr>
+<tr><td>Pair connection mode (auto / concurrent / sequential) resolving how many links may be open at once</td><td class="ref">const.py:149-158, paired_coordinator.py:119, 305</td><td class="g">Keep as the authority on link-level concurrency. Concurrent mode already holds both links open simultaneously in b3; the router only exploits what this mode already grants.</td></tr>
+<tr><td>Scoped preemption <em>directionally</em> exists at the pair: per-side cancel counters, overlap-only preemption</td><td class="ref">paired_coordinator.py:126, 275-289</td><td class="g">Extend. The pair already distinguishes "overlapping" from "independent" commands; the child layer should too, and per (side, scope) rather than per side.</td></tr>
+<tr><td>Service preflight: validate every targeted side before commanding any; release preflighted links on failure</td><td class="ref">services.py:390-447, 355-364</td><td class="g">Keep shape; execution slots in beneath it.</td></tr>
+<tr><td>Capability snapshot / offline controller, <code>ChildEntryView</code>, <code>PairedSideProxy</code>, always-available entities</td><td class="ref">coordinator.py:229-291, paired_coordinator.py:1115-1170, entity.py:32-41</td><td class="g">Keep untouched.</td></tr>
+<tr><td>Frontend hold: awaited pulse train, generation-invalidated loop, stop on release</td><td class="ref">custom_components/adjustable_bed/frontend/src/hold.ts</td><td class="g">Keep the pacing model; it composes with same-axis replacement. Only the release-stop <em>scope</em> changes (see 7.4).</td></tr>
+<tr><td>One coordinator-global cancel token + counter</td><td class="ref">coordinator.py:405-406, 4116-4124</td><td class="b">Replace with per-ticket scoped tokens. This is the root cause.</td></tr>
+<tr><td>One command lock held for a whole seek</td><td class="ref">coordinator.py:400, 4931</td><td class="b">Replace with the wire gate + per-step acquisition for long operations.</td></tr>
+<tr><td>Pair lock serializing non-overlapping side commands ("just waits its turn on the lock")</td><td class="ref">paired_coordinator.py:285-296</td><td class="b">Replace with routing: pass-through when sides are disjoint <em>and</em> the links are physically separate in concurrent mode.</td></tr>
+</table></div>
+
+<h2 id="defects">2. Defect enumeration, and what the serial default does about each</h2>
+<ol>
+<li><strong>Cross-axis cancellation.</strong> A back seek's loop breaks on the global event <span class="ref">coordinator.py:5091</span>. Any cover open/close (<span class="ref">cover.py:408</span>), motor button (<code>cancel_movement=True</code>, <span class="ref">button.py:534</span>), or new seek on any other axis sets it. The reported bug. <span class="g">Fixed for all protocols by queue-not-cancel: disjoint scopes never touch each other's tokens.</span></li>
+<li><strong>Cross-axis blocking.</strong> A non-cancelling command queues behind the seek's 60-second lock hold: light writes (<span class="ref">light.py:277</span>), <code>save_preset</code> (<code>cancel_running=False</code>, <span class="ref">services.py:504</span>), background position reads (<span class="ref">coordinator.py:4558</span>). <span class="w">Only partially addressed by default. Queued waits remain (they are the safe behavior), but they become bounded by the active ticket's own deadline, visible in diagnostics, and warned about in the log. Reads that b3 already performs mid-motion move to the QUERY lane and stop queueing. Full unblocking of aux writes during motion requires per-protocol interleave evidence (section 5).</span></li>
+<li><strong>Cross-child blocking in a pair.</strong> Concurrent-mode children are independent BLE devices, yet a right-side command waits for a left-only seek to finish because everything takes <code>_pair_command_lock</code> <span class="ref">paired_coordinator.py:296</span>. <code>async_run_child_operation</code> (used by set_position) rides the same lock, so left and right seeks cannot overlap even across two physical links. <span class="g">Fixed for separate-address pairs in concurrent connection mode: two links, two schedulers, no protocol sees new traffic on its own link.</span></li>
+<li><strong>Over-broad hold release.</strong> Releasing a held button-backed motor calls the bed-wide stop (<span class="ref">hold.ts:110-123</span> via the stop button, <span class="ref">button.py:855</span> <code>async_stop_command</code>), which cancels every axis, including an unrelated seek. <span class="g">Fixed by ticket-scoped release stop (section 6.4): a queued-never-started hold is dropped with zero wire writes; only an actually-running hold gets a stop write.</span></li>
+<li><strong>Global preemption races.</strong> The preemptible wait races an operation against the one shared event <span class="ref">coordinator.py:4237-4275</span>; any command's cancel aborts any other preemptible operation, including queries. <span class="g">Fixed by per-ticket tokens.</span></li>
+<li><strong>Global mutable pulse settings.</strong> <code>timed_move</code> temporarily rewrites <code>coordinator._motor_pulse_count</code> "safe because we're inside the command lock" <span class="ref">services.py:874-885</span>. Safe only while the lock is global; the redesign threads overrides through the ticket instead. <span class="g">Fixed.</span></li>
+</ol>
+
+<h2 id="principles">3. Design principles</h2>
+<ul>
+<li><strong>One wire, one owner.</strong> BLE serialization stays per physical device at the GATT-operation level. No design element ever issues concurrent GATT operations on one link.</li>
+<li><strong>Cancellation is scoped, never global.</strong> A command may only cancel what it conflicts with. STOP is the only actor that may cancel everything, and it always completes.</li>
+<li><strong>Declared, never guessed.</strong> This repository forbids guessing or extrapolating protocol timing and behavior. Any wire pattern a protocol has not been proven to receive today is off by default: interleaved cross-axis bursts, combined multi-axis frames, concurrent direct targets, and simultaneous streaming each require a per-protocol declaration backed by written authoritative evidence (fresh APK decompile finding, vendor documentation, or a dated bench test). There is no "safe by construction" tier for new wire timing.</li>
+<li><strong>Queueing is the only evidence-free improvement on one link.</strong> Running command B after command A finishes produces bytes the bed already receives when a user issues B after A. Reordering in time needs no protocol knowledge; changing the wire pattern does. Hence the universal default: different-axis requests queue, never cancel, never interleave.</li>
+<li><strong>Link-level concurrency is not protocol concurrency.</strong> Two separate BLE devices in an already-supported concurrent pair mode may run at once because each device still sees strictly serial traffic on its own link. This is the one form of simultaneity that requires no protocol evidence.</li>
+<li><strong>Unannotated equals b3.</strong> Every existing call site, unmodified, must behave byte-identically on the wire. Improvements are opt-in per call site (scope annotation) and, where evidence is required, per protocol (concurrency declaration).</li>
+<li><strong>Children own scheduling; the parent owns routing.</strong> The scheduler lives where the link lives. The pair parent holds no BleakClient (b3 invariant) and therefore holds no scheduler, only admission routing and the <code>both</code> barrier.</li>
+</ul>
+
+<h2 id="core">4. Core design: the per-child command scheduler</h2>
+
+<figure>
+<svg viewBox="0 0 900 470" width="100%" role="img" aria-label="Architecture diagram: entities and services route through the pair router to per-child schedulers, which own tickets, a wire gate and an intent registry above the controller and BLE link">
+<rect x="0" y="0" width="900" height="470" fill="#000"/>
+<rect x="20" y="14" width="860" height="52" fill="#141414" stroke="#2c2c2c"/>
+<text x="450" y="36" fill="#fff" font-size="15" text-anchor="middle">Entities (cover / button / number / light / switch)  +  Services (preflight then execute)</text>
+<text x="450" y="56" fill="#8a8a8a" font-size="12" text-anchor="middle">each call now carries a CommandScope (unannotated = exclusive legacy scope)</text>
+<line x1="450" y1="66" x2="450" y2="96" stroke="#7fd4ff"/>
+<rect x="150" y="96" width="600" height="72" fill="#141414" stroke="#2c2c2c"/>
+<text x="450" y="120" fill="#7fd4ff" font-size="14" text-anchor="middle">PairRouter (was PairedBedCoordinator locking layer)</text>
+<text x="450" y="140" fill="#b8b8b8" font-size="12" text-anchor="middle">single side: pass-through | both: reserve all, then activate linked group</text>
+<text x="450" y="158" fill="#b8b8b8" font-size="12" text-anchor="middle">sequential (Octo): unchanged total-order lane | single bed: identity route</text>
+<line x1="270" y1="168" x2="270" y2="200" stroke="#7fd4ff"/>
+<line x1="630" y1="168" x2="630" y2="200" stroke="#7fd4ff"/>
+<rect x="60" y="200" width="380" height="180" fill="#141414" stroke="#2c2c2c"/>
+<text x="250" y="224" fill="#fff" font-size="14" text-anchor="middle">ChildCommandScheduler (left / single)</text>
+<rect x="80" y="238" width="160" height="58" fill="#1c1c1c" stroke="#2c2c2c"/>
+<text x="160" y="260" fill="#8ce99a" font-size="12" text-anchor="middle">Tickets</text>
+<text x="160" y="278" fill="#8a8a8a" font-size="11" text-anchor="middle">scope + cancel token</text>
+<rect x="260" y="238" width="160" height="58" fill="#1c1c1c" stroke="#2c2c2c"/>
+<text x="340" y="260" fill="#ffd479" font-size="12" text-anchor="middle">WireGate</text>
+<text x="340" y="278" fill="#8a8a8a" font-size="11" text-anchor="middle">FIFO + STOP priority</text>
+<rect x="80" y="308" width="340" height="56" fill="#1c1c1c" stroke="#2c2c2c"/>
+<text x="250" y="330" fill="#7fd4ff" font-size="12" text-anchor="middle">MotionIntentRegistry + FrameStreamer</text>
+<text x="250" y="348" fill="#8a8a8a" font-size="11" text-anchor="middle">only for evidence-declared COMBINED_FRAME beds</text>
+<rect x="460" y="200" width="380" height="180" fill="#141414" stroke="#2c2c2c"/>
+<text x="650" y="224" fill="#fff" font-size="14" text-anchor="middle">ChildCommandScheduler (right)</text>
+<text x="650" y="290" fill="#8a8a8a" font-size="12" text-anchor="middle">same structure, own tickets,</text>
+<text x="650" y="308" fill="#8a8a8a" font-size="12" text-anchor="middle">own wire gate, own BLE link</text>
+<line x1="250" y1="380" x2="250" y2="408" stroke="#7fd4ff"/>
+<line x1="650" y1="380" x2="650" y2="408" stroke="#7fd4ff"/>
+<rect x="60" y="408" width="380" height="46" fill="#141414" stroke="#2c2c2c"/>
+<text x="250" y="436" fill="#b8b8b8" font-size="12" text-anchor="middle">BedController + _ble_lock + BleakClient (unchanged)</text>
+<rect x="460" y="408" width="380" height="46" fill="#141414" stroke="#2c2c2c"/>
+<text x="650" y="436" fill="#b8b8b8" font-size="12" text-anchor="middle">BedController + _ble_lock + BleakClient (unchanged)</text>
+</svg>
+<figcaption>Scheduler placement: one scheduler per physical BLE device, routing above, wire safety below, both unchanged.</figcaption>
+</figure>
+
+<h3>4.1 Command scopes and tickets</h3>
+<p>Every operation the coordinator runs is admitted as a <strong>ticket</strong> with a typed scope:</p>
+<ul>
+<li><code>MOTION</code> with an axis set, e.g. <code>{"back"}</code>. Covers, motor buttons, seeks, timed moves.</li>
+<li><code>PRESET</code>, exclusive over all motion axes of the child (recalls and streaming presets drive several motors; <code>preset_flat</code>, <code>preset_memory</code>, streaming <code>_preset_with_stop</code>, <span class="ref">base.py:698-719</span>).</li>
+<li><code>AUX</code> with a channel, e.g. <code>lights</code>, <code>massage</code>, <code>firmness</code>. Conflicts only with the same channel.</li>
+<li><code>QUERY</code>: position reads, state refreshes, hydration, passive reconciliation. Conflicts with nothing; ordering is provided by the wire gate alone. The QUERY lane introduces no new mid-motion traffic: only reads b3 already performs during motion (feedback-protocol polling, <span class="ref">coordinator.py:5034-5040</span>) run while a motion ticket is active; on other protocols queries simply queue as today.</li>
+<li><code>STOP</code>: never conflicts, never queues, always runs (priority lane).</li>
+</ul>
+<p>Scope answers <em>what</em> the operation owns. Two separate fields answer questions a lock cannot:</p>
+<ul>
+<li><strong>Lifetime:</strong> <code>DURABLE</code> intents (position targets, presets, automation commands) stay queued until completion or explicit replacement. <code>RELEASE_BOUND</code> intents (pointer or keyboard holds) live only while their input owner remains active. Releasing a queued hold drops it with zero BLE traffic; it never replays after the user lets go.</li>
+<li><strong>Completion:</strong> <code>OPERATION_RETURN</code>, <code>POSITION_FEEDBACK</code>, <code>PROTOCOL_NOTIFICATION</code>, or <code>DEADLINE</code>. A direct-target write returning is not proof the motor stopped. Where coexistence is unverified, its ticket keeps a motion lease until the declared completion signal or conservative deadline.</li>
+</ul>
+<p>Conflict rule: <code>MOTION</code> vs <code>MOTION</code> conflict iff axis sets intersect; anything vs an exclusive <code>PRESET</code> conflicts if it is <code>MOTION</code> or <code>PRESET</code>; <code>AUX</code> conflicts with same-channel <code>AUX</code>. Admission with <code>replace_conflicting=True</code> (the default for motion, matching b3's <code>cancel_running=True</code>) sets the cancel token of every <em>conflicting</em> active or queued ticket, then waits for them to drain. A <em>non-conflicting</em> ticket is queued behind the active one and starts when the scheduler reaches it; it never touches the active ticket's token. A queued ticket whose own token was set before it starts is dropped, which is b3's counter check <span class="ref">coordinator.py:4300</span> made scope-local.</p>
+<p>Each ticket owns a private <code>asyncio.Event</code>. The scheduler sets a ContextVar while running a ticket's coroutine, and <code>coordinator.cancel_command</code> <span class="ref">coordinator.py:1631</span> resolves through it. Since <code>_write_gatt_with_retry</code> already falls back to that property <span class="ref">base.py:516</span>, existing controller loops become scoped without a mass edit. This is a migration bridge, not a forever-hidden API: new scheduler-aware controller hooks receive the ticket token explicitly, and any controller-created background task must be audited so copied context cannot outlive its ticket.</p>
+
+<h3>4.2 The wire gate</h3>
+<p>The wire gate replaces <code>_command_lock</code> at the same call sites. Differences from a plain lock:</p>
+<ul>
+<li><strong>STOP priority and generation.</strong> A pending STOP acquires ahead of the FIFO. Before waiting, it increments a monotonic stop generation and invalidates every covered queued ticket. Admission snapshots that generation and rechecks it before activation, so a movement racing STOP cannot start afterward. b3's "stop waits for the in-flight GATT write" property remains because a step never releases mid-write.</li>
+<li><strong>Per-step acquisition for long operations.</strong> Short commands (one movement burst including its internal repeats, one aux write, one preset stream) hold the gate for their whole body, exactly like b3. Long operations (the seek loop) acquire per step and release at yield points. Under the serial default those yield points serve exactly three things: STOP responsiveness, same-axis replacement, and the QUERY lane. They do <em>not</em> admit other-axis motion or aux tickets; those stay queued until the long operation's ticket completes. Only a protocol with a declared, evidence-backed <code>interleave_bursts</code> profile (section 5) admits queued non-conflicting tickets at yield points. A step is atomic: one burst or one read; nothing ever splits a burst.</li>
+<li><strong>Idle callback.</strong> The gate/scheduler reports when the last ticket completes, which is where disconnect-after-command and the idle timer re-arm move to (section 9).</li>
+</ul>
+
+<h3>4.3 The motion intent registry (declared combined-frame protocols only)</h3>
+<p>Protocols whose frames are <em>proven</em> to encode the whole desired motion state (a button bitmask) do not need interleaving: the correct wire behavior when back and legs are both commanded is one frame stream with both bits set. For those, motion tickets do not write directly. They register an <em>intent</em> (axis, direction or target) and a single <code>FrameStreamer</code> task, owner of the gate while streaming, composes union frames via a new controller hook and emits them at protocol cadence. Removing the last intent emits the protocol's release/stop and ends the stream. A ticket's cancel removes its intent; STOP clears the registry and sends <code>stop_all</code>. With exactly one intent, the composed frame must be byte-identical to today's single-axis frame (regression-gated, section 14). This machinery is inert unless a bed carries a <code>COMBINED_FRAME</code> declaration with evidence; undeclared beds, including current combined-frame <em>candidates</em>, run the plain serial queue.</p>
+
+<h2 id="protocol">5. Protocol-declared concurrency: serial default, evidence-gated everything else</h2>
+<p>A single declaration on <code>BedController</code>, defaulting to the most conservative value so no controller changes wire behavior until someone writes down evidence:</p>
+<div class="tablewrap"><table>
+<tr><th>Motion model</th><th>Meaning</th><th>Cross-axis capability</th><th>Notes</th></tr>
+<tr><td><code>SERIAL</code> <span class="g">(default, all beds)</span></td><td>No assumption about multi-axis behavior at all. One motion or preset ticket runs at a time per physical device; a different-axis request queues and runs afterwards, never cancelling and never interleaving.</td><td>None claimed. Sequential completion only.</td><td>Every one of the 50+ controllers starts here, including beds we <em>suspect</em> could do more. Suspicion is not evidence.</td></tr>
+<tr><td><code>DEAD_MAN_INTERLEAVE</code></td><td>Dead-man pulse protocol (b3's pulse model, <span class="ref">base.py:679-696</span>) proven to tolerate a different motor's bounded burst between two bursts of an ongoing operation, resuming the first motor when its bursts resume.</td><td>Alternating bursts at yield points; each motor pauses while the other's burst runs. Still not simultaneous.</td><td>Requires evidence that the specific firmware treats interleaved codes as independent per-motor streams (see the warning below). Per bed, never family-wide.</td></tr>
+<tr><td><code>COMBINED_FRAME</code></td><td>Each frame carries the full motion state for all axes.</td><td>Native simultaneity via intent registry union frames.</td><td>Candidates (Keeson, Ergomotion) require fresh APK re-verification before declaring (repo rule: always re-decompile; legacy writeups are diff-baseline only). Until declared, they run <code>SERIAL</code>.</td></tr>
+<tr><td><code>DIRECT_TARGET</code></td><td>One write sets a firmware-seek target; firmware moves the motor autonomously (<code>supports_direct_position_control</code> beds: Reverie, Kaidi direct variants, Sleepys BOX25 percentages, <span class="ref">services.py:598-658, coordinator.py:5028-5039</span>).</td><td><em>Unknown without evidence.</em> Whether a second axis's target write aborts, queues, or parallelizes an in-progress firmware seek is a firmware property nobody has verified. Default: the seek ticket stays active until feedback confirms arrival (or timeout), so a different-axis request queues behind real motion. With per-bed evidence of coexistence, the ticket completes at write time and axes parallelize.</td><td>b3 happens to allow back-to-back target writes because it returns right after the write; that is an untested reachable state, not evidence of correct coexistence.</td></tr>
+<tr><td><code>SIMULTANEOUS_STREAM</code></td><td>Dead-man protocol proven to keep N motors moving on interleaved or merged frames.</td><td>True simultaneity.</td><td>Strongest claim, strongest evidence bar: dated bench test on the specific bed model. Terminal tier of section 15's phase M5.</td></tr>
+</table></div>
+<pre><code>@dataclass(frozen=True, slots=True)
+class MotionConcurrencyProfile:
+    model: MotionModel = MotionModel.SERIAL
+    # Mandatory citation whenever model != SERIAL: APK path + finding,
+    # vendor doc reference, or dated bench test (bed model + firmware).
+    # A unit test fails CI if a non-SERIAL profile has an empty evidence string.
+    evidence: str = ""</code></pre>
+<div class="warnbox"><strong>Why burst interleaving is not assumed safe.</strong> Inserting one bounded other-axis burst between seek steps may resemble two sequential button presses, but that analogy extrapolates timing, which this repository forbids. Human presses arrive with human-scale gaps; a scheduler could alternate motor codes at sub-second cadence inside what firmware treats as one continuous session. A dead-man state machine keyed on the last-seen motor code could halt the first motor, treat alternation as a stop, or fault. Whether stall re-issue <span class="ref">coordinator.py:5214-5229</span> recovers is itself an untested timing assumption. Interleaving is therefore a per-protocol capability to prove, not a default. The universal default is queue-not-cancel.</div>
+
+<h2 id="semantics">6. Command semantics matrix</h2>
+<div class="tablewrap"><table>
+<tr><th>Situation (one child)</th><th>b3 behavior</th><th>New default (SERIAL, no evidence)</th><th>With declared evidence</th></tr>
+<tr><td>Back seek running; new back command (cover, button, seek)</td><td>Seek cancelled, new command runs</td><td class="g">Same: same-axis conflict, replacement. Hold responsiveness preserved.</td><td>Same.</td></tr>
+<tr><td>Back seek running; legs command arrives</td><td class="b">Seek cancelled (the reported bug)</td><td class="g">No conflict, no cancel. Legs ticket queues and runs after the seek completes; the seek runs to target. Nothing moves simultaneously.</td><td><code>DEAD_MAN_INTERLEAVE</code>: legs burst at a yield point. <code>COMBINED_FRAME</code>: merged intent. <code>DIRECT_TARGET</code> w/ coexistence: immediate second write.</td></tr>
+<tr><td>Back seek running; light toggle / firmness write</td><td class="b">Blocks up to 60 s, silently</td><td class="w">Still queues (safe default; an aux write mid-motion is an unverified pattern on most protocols). Improvement is honesty, not speed: bounded by the seek's deadline, warned in the log after 15 s, visible in diagnostics as QUEUED with age.</td><td><code>DEAD_MAN_INTERLEAVE</code> beds may admit AUX at a yield point (typically under ~2 s).</td></tr>
+<tr><td>Back seek running; preset recall</td><td>Seek cancelled</td><td class="g">Same: PRESET is exclusive, replaces all motion. Deliberate: a preset is a whole-bed statement of intent.</td><td>Same.</td></tr>
+<tr><td>Preset streaming; any motion command</td><td>Preset cancelled</td><td class="g">Same (motion conflicts with exclusive preset). The user grabbing a motor wins.</td><td>Same.</td></tr>
+<tr><td>Preset streaming; light toggle</td><td class="b">Blocks until stream ends (up to ~30 s)</td><td class="w">Still waits. Interleaving into a preset stream is unverified everywhere (evidence question 6).</td><td>Only after stream-specific evidence; out of scope for the first phases.</td></tr>
+<tr><td>Two seeks, different axes</td><td class="b">Second cancels first; first never reaches its target</td><td class="g">Second queues; first completes, then second runs. Both targets are reached, sequentially. Total time is the sum, which is the honest cost of no evidence.</td><td>Coexist per model: alternating steps, merged intents, or parallel firmware targets.</td></tr>
+<tr><td>Query (position read, hydration) during any motion</td><td>Mixed: some inside lock, some queued behind it</td><td class="g">QUERY lane: ordered by the wire gate only, cancelled by nothing except shutdown. Mid-motion reads occur only on protocols where b3 already performs them.</td><td>Same.</td></tr>
+<tr><td>STOP / stop_all</td><td>Cancels everything, always completes</td><td class="g">Identical contract, plus priority: never waits behind queued commands, drains the queue (queued motion tickets are dropped).</td><td>Same.</td></tr>
+</table></div>
+
+<h3>6.4 STOP taxonomy</h3>
+<ol>
+<li><strong>Ticket-scoped release stop</strong> (new): the implicit stop issued when a held motor is released. Semantics: drop any <em>queued</em> ticket intersecting the held axis without writing anything to the wire (a command that never started needs no stop); if the intersecting ticket is <em>active</em>, cancel it and run the b3 bed-wide stop write path. Under the serial default this is safe without protocol knowledge: at most one motion ticket is active per device, so the stop write can only ever stop the motion the user just released. If the active ticket does not intersect the released axis (back seek active, legs hold released before its ticket started), nothing is written and the seek continues. This alone removes defect 4 on every protocol. Known b3-parity limitation: on <code>DIRECT_TARGET</code> beds, firmware-autonomous motion from an already-completed write is still stopped bed-wide, exactly as b3 does today; narrowing that requires per-axis stop opcodes declared with evidence (phase M3), because writing a single-axis stop while another axis's firmware seek runs is itself an unverified pattern.</li>
+<li><strong>Child stop</strong> (<code>stop_all</code>): b3's contract, unchanged, plus priority lane and queue drain.</li>
+<li><strong>Pair stop</strong> (side or both): parent fans out via <code>_stop_children</code>, gather with per-side error capture, never skips a side <span class="ref">paired_coordinator.py:511-548</span>. Unchanged, now also drains that side's scheduler queue.</li>
+<li><strong>Emergency stop</strong> = pair stop on both sides. No separate mechanism; it is the same path exercised with everything active, which is what the tests simulate.</li>
+</ol>
+<p>The visible per-side and per-bed Stop buttons keep bed-wide semantics (safety: a user hammering Stop means everything). Only the <em>implicit</em> stop on hold release narrows to the released ticket, which is precisely the case that causes the reported bug (release legs, kill back seek).</p>
+
+<h2 id="pair">7. Pair layer: routing, barrier, sequential lane</h2>
+
+<h3>7.1 Concurrent mode (separate-address two-device pairs)</h3>
+<p>This is the one concurrency improvement that needs no protocol evidence: two children with distinct BLE addresses are two physical links, and in the existing v4 concurrent connection mode (<code>PAIR_CONNECTION_MODE_CONCURRENT</code>, or auto resolving to it, <span class="ref">const.py:149-158</span>) b3 already holds both links open at once. Each link continues to see strictly serial traffic from its own scheduler, so no protocol receives any new wire pattern.</p>
+<ul>
+<li><strong>Single-side command: pass-through.</strong> The <code>PairedSideProxy</code> keeps routing writes through the parent (b3 shape), but for a single-side target in concurrent mode the parent forwards straight to that child's scheduler without any pair-wide lock. A left seek and a right burst now overlap because they touch two physical links and two schedulers. This deletes the "waits its turn" comment at <span class="ref">paired_coordinator.py:285-296</span> for the disjoint case. Within each child, the serial queue-not-cancel default of section 5 still governs that child's own axes.</li>
+<li><strong>Both-command: linked two-phase barrier.</strong> The router creates one reservation per distinct child <code>operation_identity</code> and acquires reservations in deterministic physical-identity order. A reservation owns queue position but cannot run controller code. Only after every child reports READY does the router atomically activate the linked group and enter b3's fan-out. If any reservation is cancelled or fails, all release with zero movement. This closes an asymmetry in a simple left-then-right lock acquisition, where left could begin while right was still queued. After activation, FIRST_EXCEPTION, stop-the-other, merged stop errors, and task cleanup remain unchanged <span class="ref">paired_coordinator.py:336-371</span>.</li>
+<li><strong>Reservation fairness.</strong> A ready reservation may temporarily block new work on an idle child while the other child drains a conflicting ticket. It has the active ticket's bounded deadline, exposes <code>RESERVING</code> and blocker identity in diagnostics, and yields to STOP. It never cancels disjoint work merely to synchronize a group.</li>
+<li><strong>Side command conflicting with an active both-command:</strong> keep b3's rule <span class="ref">paired_coordinator.py:280-289</span>: preempt the <em>whole</em> both-command on both sides, never half of it, so the sides cannot desync. Implemented by linking the two barrier tickets: cancelling either cancels both.</li>
+</ul>
+
+<h3>7.2 Sequential mode (Octo)</h3>
+<p>The one-link-at-a-time constraint makes cross-child coexistence physically impossible, so the sequential path keeps b3's total order: the whole pair is one lane, the connect/op/disconnect cycle with mid-cycle cancel re-checks stays as written <span class="ref">paired_coordinator.py:373-478</span>. Two-phase child reservation does not apply because the connection lane itself is the reservation. Within the connected side, a disjoint command queues rather than cancelling active work. Octo gets no interleaving without evidence. Its reactive PIN push and keepalive hooks remain connection lifecycle outside the command gate <span class="ref">coordinator.py:3001, 3269-3276</span>.</p>
+
+<h3>7.3 Single-address pairs</h3>
+<p>One physical device, one link, one scheduler, so the separate-address concurrency of 7.1 does <em>not</em> apply here. The left/right/native-both views (<code>SingleAddressSideCoordinator</code>, <span class="ref">paired_coordinator.py:656</span>) map onto the scope machinery by prefixing axes with the side: a left back seek is <code>MOTION {"left:back"}</code>, a right back burst is <code>MOTION {"right:back"}</code>. Disjoint scopes mean queue-not-cancel: a right command no longer kills a left seek, but it runs <em>after</em> it, because sending one device interleaved left/right codes is exactly the unverified pattern section 5 gates. A protocol whose app is proven to drive both sides at once may declare it (these are natural <code>COMBINED_FRAME</code> or interleave candidates). Native-both commands (the protocol's own both-sides opcode) scope <code>{"left:back","right:back"}</code> and are unchanged single writes. The <code>SideBoundController</code> ContextVar binding <span class="ref">beds/base.py:38-83</span> is untouched. The serialized non-native both (Sleep Number left-then-right, <span class="ref">paired_coordinator.py:899-933</span>) becomes one exclusive-per-targeted-axes ticket so its two halves cannot be split by preemption, preserving b3's stop-the-other on failure.</p>
+
+<h3>7.4 Frontend</h3>
+<p><code>hold.ts</code> keeps its awaited pulse loop, but the backend request is explicitly <code>RELEASE_BOUND</code>. The release path (<code>stopBed</code>, <span class="ref">hold.ts:110-123</span>) releases that ticket: queued pulses disappear with zero wire traffic; an active pulse follows its proven cleanup path. The visible Stop button remains bed-wide. Multi-hold UI stays disabled until the resolved profile can make observable progress on both resources; SERIAL beds must not imply simultaneous motion.</p>
+<p>The card's b3 synchronization path builds several <code>set_position</code> calls and runs them through <code>settleSequentially</code>. That makes the browser own ordering and gives the backend no atomic preflight or group identity. Replace it with one additive composite service whose targets are all <code>DURABLE</code>. The service validates the complete plan, resolves shared <code>operation_identity</code> values, and submits one linked group. Existing <code>set_position</code> remains a one-target compatibility wrapper.</p>
+<pre><code>adjustable_bed.set_positions
+device_id: paired-bed
+targets:
+  - { side: right, motor: back, position: 42 }
+  - { side: right, motor: legs, position: 18 }
+
+# One all-target preflight and one group result.
+# SERIAL devices execute in order; capable profiles may overlap safely.</code></pre>
+<div class="warnbox"><strong>Do not make the browser a scheduler.</strong> The card may render <code>QUEUED</code>, <code>RUNNING</code>, and group failure from backend state. It never fans out a combined command, guesses whether a motor is moving, or retries a released hold.</div>
+
+<h2 id="seek">8. Position orchestration</h2>
+<h3>8.1 The seek loop, restructured</h3>
+<p>The b3 loop <span class="ref">coordinator.py:4901-5257</span> keeps its logic (tolerance, overshoot reversal, stall re-issue, chaining, timeout, guaranteed final stop). Structural changes:</p>
+<ul>
+<li>Admitted as a <code>MOTION {axis}</code> ticket; every cancel check reads the ticket token instead of the global event (<span class="ref">coordinator.py:5091, 5163, 5184</span> equivalents). The overshoot-reversal "clear cancel to allow reversal" dance <span class="ref">coordinator.py:5168</span> simplifies: reversal is the same ticket, nothing external set its token, nothing to clear; a genuinely new stop or same-axis command set the token and the reversal correctly aborts.</li>
+<li>Yield points: the gate is held only across (burst) and (read) steps; the <code>position_check_interval</code> sleep and the stall-wait windows release it. Under the serial default the only things that run there are STOP, same-axis replacement, and QUERY-lane reads; queued other-axis or aux tickets wait for the ticket to finish. On a declared <code>DEAD_MAN_INTERLEAVE</code> bed, queued non-conflicting bursts also run there.</li>
+<li>Interleaved refreshes: the mid-seek position reads stay inside the seek's step (a read is one step), so feedback pacing is unchanged.</li>
+<li><code>DIRECT_TARGET</code> beds: b3 writes the target and returns immediately <span class="ref">coordinator.py:5028-5039</span>. Under the scoped model without coexistence evidence, the write is one step but the ticket then <em>tracks</em> firmware motion via the existing feedback stream until the position is within tolerance or the seek timeout elapses, holding the axis scope (not the gate) so a different-axis request queues behind real motion instead of racing unverified firmware. With per-bed coexistence evidence (M3), the ticket completes at write time and per-axis targets parallelize.</li>
+<li>Declared combined-frame beds: <code>issue_seek_step</code> registers/updates a motion intent instead of writing, and the shared streamer carries it, merging with any other active axis.</li>
+<li>Timeout unchanged: 60 s wall clock per ticket <span class="ref">const.py:2247</span>. Under the serial default nothing interleaves into a seek, so no runnable-time accounting is needed; a declared-interleave bed counts only time the ticket was runnable, hard-capped at 2x wall clock.</li>
+</ul>
+<h3>8.2 Fairness</h3>
+<ul>
+<li>Gate and queue waiters are FIFO within a priority class: STOP, then MOTION/PRESET/AUX, then QUERY. On declared-interleave beds, a long operation re-acquiring at a yield point goes to the back of its class so a queued burst gets the next slot.</li>
+<li><strong>Queued waits are bounded and visible, not failed.</strong> A queued ticket waits at most the active ticket's own deadline (the 60 s seek timeout is the worst case, the same implicit bound b3 has). It is never silently infinite: after 15 s in QUEUED the scheduler logs a warning naming the blocking ticket, and diagnostics expose queue age (section 12). No arbitrary admission-failure deadline: turning a safe wait into an error would punish the serial default this design mandates. STOP never queues at all.</li>
+<li><strong>Same-scope coalescing.</strong> A newly queued motion ticket replaces an earlier <em>queued</em> (not yet started) ticket with an identical scope. Hold pulses arriving during a seek collapse to at most one pending ticket per axis instead of piling up a pulse backlog that would replay after the seek.</li>
+<li>Per-command pulse overrides (timed_move) move from mutating coordinator fields to a ticket-carried override consumed by <code>motor_pulse_settings()</code> via the same ContextVar, removing defect 6.</li>
+</ul>
+
+<h2 id="lifecycle">9. Lifecycle: disconnects, setup, unload, availability</h2>
+<ul>
+<li><strong>Disconnect ownership.</strong> disconnect-after-command and idle-timer re-arm currently run in each operation's finalizer <span class="ref">coordinator.py:4197-4227</span>; with a queue of tickets they move to the scheduler's idle transition (active + queued count reaches zero), preserving the b3 rule that a pending newer command suppresses the disconnect <span class="ref">coordinator.py:4208-4213</span> because a queued ticket keeps the count nonzero. The transport-operation gate (<code>async_transport_operation</code>) and diagnostics pause/resume plumbing admit as exclusive tickets, giving them the same "hold the link still" guarantee they get from the lock today.</li>
+<li><strong>Unexpected disconnect.</strong> <code>_on_disconnect</code> sets every active ticket's token (all motion is dead with the link on pulse protocols) and clears any intent registry; queued tickets fail fast with the existing connection error path. Reconnect/hydration scheduling is unchanged.</li>
+<li><strong>Setup / unload.</strong> <code>async_shutdown</code> drains: cancel all tickets, run one final child stop if any motion ticket was active (today's behavior via the cancel event, made explicit), stop any streamer, await the pump, then the existing disconnect path. Paired unload keeps b3's per-child shutdown gather <span class="ref">paired_coordinator.py:602-609</span>.</li>
+<li><strong>Child availability.</strong> Unchanged: entities stay always-available <span class="ref">entity.py:32-41</span>; a disconnected side fails at connect time inside its own ticket; snapshot-driven capabilities untouched. Half-available pair setup (<span class="ref">paired_coordinator.py:551-594</span>) untouched.</li>
+</ul>
+
+<h2 id="types">10. Typed interfaces (fit to b3 shapes)</h2>
+<pre><code>> custom_components/adjustable_bed/scheduling.py  (new module, no HA imports beyond asyncio)
+
+class CommandKind(StrEnum):
+    MOTION = "motion"; PRESET = "preset"; AUX = "aux"; QUERY = "query"; STOP = "stop"
+
+class CommandLifetime(StrEnum):
+    DURABLE = "durable"; RELEASE_BOUND = "release_bound"
+
+class CompletionPolicy(StrEnum):
+    OPERATION_RETURN = "operation_return"; POSITION_FEEDBACK = "position_feedback"
+    PROTOCOL_NOTIFICATION = "protocol_notification"; DEADLINE = "deadline"
+
+@dataclass(frozen=True, slots=True)
+class CommandScope:
+    kind: CommandKind
+    axes: frozenset[str] = frozenset()      # "back", "legs", "left:back", ...
+    aux_channel: str | None = None          # "lights", "massage", "firmness"
+    exclusive: bool = False                 # presets, transport ops, legacy default
+
+    def conflicts_with(self, other: CommandScope) -> bool: ...
+
+LEGACY_EXCLUSIVE = CommandScope(kind=CommandKind.MOTION, exclusive=True)
+
+@dataclass(slots=True)
+class CommandTicket:
+    ticket_id: int
+    scope: CommandScope
+    lifetime: CommandLifetime
+    completion: CompletionPolicy
+    owner_id: str | None                    # pointer/key owner for RELEASE_BOUND work
+    cancel: asyncio.Event                   # what coordinator.cancel_command resolves to
+    stop_generation: int                   # snapshot, rechecked immediately before activation
+    admitted_at: float
+    deadline: float | None                  # the op's own timeout (e.g. seek 60 s)
+    pulse_override: tuple[int, int] | None  # timed_move, replaces field mutation
+    state: TicketState                      # QUEUED | RESERVING | RUNNING | DONE | ...
+
+class WireGate:
+    async def step(self, ticket: CommandTicket) -> AsyncIterator[None]: ...  # ctx manager, one atomic step
+    def stop_pending(self) -> bool: ...
+
+class ChildCommandScheduler:
+    def __init__(self, profile_fn: Callable[[], MotionConcurrencyProfile]) -> None: ...
+    async def run(self, scope: CommandScope,
+                  op: Callable[[CommandTicket], Coroutine[Any, Any, T]],
+                  *, replace_conflicting: bool = True) -> T: ...
+    def request_cancel(self, scope: CommandScope) -> None: ...   # scoped; ALL via exclusive scope
+    async def run_stop(self, op: Coroutine[Any, Any, None]) -> None: ...  # priority, always completes
+    def release_scope(self, scope: CommandScope) -> None: ...    # hold release: drop queued,
+                                                                 # cancel-and-stop only if active
+    async def reserve(self, ticket: CommandTicket) -> Reservation: ...
+    async def activate(self, reservation: Reservation) -> None: ...
+    def on_idle(self, cb: Callable[[], None]) -> Callable[[], None]: ...
+    @property
+    def active_scopes(self) -> tuple[CommandScope, ...]: ...     # diagnostics + pair router
+
+class MotionIntentRegistry:                  # instantiated only for declared COMBINED_FRAME beds
+    def set_intent(self, ticket: CommandTicket, axis: str, direction: MotionDirection) -> None: ...
+    def clear_intent(self, ticket: CommandTicket, axis: str) -> None: ...
+
+class LinkedCommandGroup:
+    group_id: str
+    reservations: tuple[Reservation, ...]   # one per distinct operation_identity
+    async def reserve_all(self) -> None: ... # canonical identity order, no controller code
+    async def activate_all(self) -> None: ...
+    async def stop_started(self) -> None: ...
+
+> beds/base.py additions (defaults keep every controller byte-identical)
+
+class BedController:
+    @property
+    def motion_concurrency(self) -> MotionConcurrencyProfile:
+        return MotionConcurrencyProfile()               # SERIAL, no evidence, no claims
+    def build_motion_frame(self, intents: Mapping[str, MotionDirection]) -> bytes:
+        raise NotImplementedError                        # declared COMBINED_FRAME only
+
+> coordinator.py surface (public API unchanged; scope optional)
+
+async def async_execute_controller_command(
+    self, command_fn, cancel_running: bool = True,
+    skip_disconnect: bool = False,
+    scope: CommandScope | None = None,       # None -> LEGACY_EXCLUSIVE (b3 semantics)
+) -> None: ...
+async def async_seek_position(self, position_key, target_angle,
+    move_up_fn, move_down_fn, move_stop_fn) -> None: ...   # scopes itself to {position_key}
+def request_command_cancel(self, scope: CommandScope | None = None) -> None: ...
+@property
+def cancel_command(self) -> asyncio.Event: ...  # current ticket's token via ContextVar;
+                                                # outside any ticket returns an inert event</code></pre>
+<p>The pair router keeps <code>PairedBedCoordinator</code>'s public surface (<code>async_execute_controller_command(side=...)</code>, <code>async_seek_position(side=...)</code>, <code>async_run_child_operation</code>, <code>async_stop_command(side=...)</code>) so entities, proxies and services need no signature changes; only its internals swap the pair lock for pass-through / barrier / sequential-lane admission.</p>
+
+<h2 id="migration">11. Migration from b3, minimal churn</h2>
+<div class="tablewrap"><table>
+<tr><th>b3 primitive</th><th>Becomes</th><th>Churn</th></tr>
+<tr><td><code>_command_lock</code> <span class="ref">coordinator.py:400</span></td><td><code>WireGate</code>, same acquisition sites for short ops</td><td>coordinator.py only</td></tr>
+<tr><td><code>_cancel_command</code> / <code>_cancel_counter</code> <span class="ref">coordinator.py:405-406</span></td><td>Per-ticket token + ContextVar-backed <code>cancel_command</code> property</td><td>coordinator.py only; zero edits in 50+ controllers (they read the property, <span class="ref">base.py:516</span>)</td></tr>
+<tr><td><code>request_command_cancel()</code> <span class="ref">coordinator.py:4116</span></td><td><code>request_cancel(LEGACY_EXCLUSIVE)</code> when called with no scope; pair preemption <span class="ref">paired_coordinator.py:289</span> keeps working unmodified</td><td>none at call sites</td></tr>
+<tr><td><code>cancel_running=True</code> without scope</td><td><code>LEGACY_EXCLUSIVE</code> scope: conflicts with everything, i.e. exactly b3</td><td>none until a call site is annotated</td></tr>
+<tr><td><code>_pair_command_lock</code> <span class="ref">paired_coordinator.py:121</span></td><td>Pair router (pass-through / barrier / sequential lane)</td><td>paired_coordinator.py only</td></tr>
+<tr><td>timed_move field mutation <span class="ref">services.py:874-885</span></td><td><code>pulse_override</code> on the ticket, read by <code>motor_pulse_settings()</code></td><td>services.py + base.py, small</td></tr>
+<tr><td>Entity call sites (cover, button, number, light, switch, select, climate)</td><td>Annotated with their natural scope (axis, AUX channel, PRESET)</td><td>Mechanical, one kwarg per site, phased</td></tr>
+<tr><td>Hold pulse and position-target intent</td><td>Explicit <code>RELEASE_BOUND</code> or <code>DURABLE</code> lifetime plus completion policy</td><td>button/cover/frontend + service plans</td></tr>
+<tr><td>Card position synchronization</td><td>One additive composite <code>set_positions</code> request instead of browser-side <code>settleSequentially</code></td><td>services schema + card source + rebuilt bundle</td></tr>
+<tr><td>Controller concurrency behavior</td><td><code>MotionConcurrencyProfile()</code> default: SERIAL, zero claims</td><td>none; declarations land one bed at a time with evidence, M3+</td></tr>
+</table></div>
+<p>Because unannotated call sites map to <code>LEGACY_EXCLUSIVE</code> and the default concurrency profile is SERIAL, the first shipped phase is a pure refactor whose observable behavior differences are limited to the things being fixed on purpose in later phases; the refactor phase itself must produce identical wire traces for the whole existing test suite (2000+ tests) plus a new trace-identity fixture. M1's only wire-visible change is <em>ordering</em>: sequences that b3 would have mutually cancelled now run one after another, and each individual sequence is byte-identical to what b3 sends for that command in isolation.</p>
+
+<h2 id="diag">12. Diagnostics</h2>
+<ul>
+<li><code>record_command_trace</code> entries gain <code>ticket_id</code>, <code>scope</code>, <code>lifetime</code>, <code>completion_policy</code>, <code>queued_ms</code>, and terminal <code>outcome</code> (<code>completed</code> / <code>replaced_by</code> / <code>stopped</code> / <code>timed_out</code> / <code>disconnected</code> / <code>dropped_on_release</code>).</li>
+<li>New <code>scheduler</code> section in the diagnostics payload per child: concurrency profile (model + evidence string), active tickets with age and state, queue depth and per-ticket queue age, last 20 admission decisions (admitted / replaced X / queued behind Y / coalesced with Z / dropped stale).</li>
+<li>Pair diagnostics add route (<code>pass_through</code> / <code>two_phase</code> / <code>sequential</code>), group ID, reservation state per physical identity, blocker ticket, and resolved connection mode.</li>
+</ul>
+
+<h2 id="tests">13. Focused tests</h2>
+<ol>
+<li><strong>Scope algebra unit tests:</strong> conflict matrix, replacement, queue-not-cancel for disjoint scopes, stale-queued drop, same-scope coalescing, exclusive vs axis vs aux vs query, side-prefixed axes.</li>
+<li><strong>WireGate:</strong> STOP overtakes FIFO; step atomicity (a burst is never split); idle callback fires only at zero active and queued tickets; queued-wait warning emitted at threshold without failing the ticket.</li>
+<li><strong>Seek interruption matrix</strong> (time-virtualized clock, recording controller double asserting ordered writes, per the repo's anti-self-fulfilling-mock rule): under the default SERIAL profile, a cross-axis command mid-seek produces <em>zero</em> writes until the seek's final stop, then runs to completion, and the seek reaches its target; under a declared <code>DEAD_MAN_INTERLEAVE</code> fixture profile, the same command's burst lands only at a yield boundary and never splits a seek burst; same-axis command replaces; STOP halts with final stop write; disconnect mid-seek cancels the ticket and skips further writes.</li>
+<li><strong>Legacy identity:</strong> replay the b3 command sequences through unannotated call sites and assert wire-trace byte identity, including cancel timing (a second exclusive command still preempts the first mid-burst).</li>
+<li><strong>Pair routing:</strong> separate-address concurrent mode overlaps independent child activity while each child trace stays serial; a linked both group reserves in canonical <code>operation_identity</code> order and neither child writes until every reservation is READY; cancellation during reservation writes nothing; failure after activation still stops every possibly-started side; Octo sequential tests remain byte-identical.</li>
+<li><strong>Hold release scoping:</strong> release of a hold whose ticket is still queued emits no wire traffic, drops the ticket, and leaves the concurrent-axis seek running; release of an active hold cancels it and writes the stop; bed-wide Stop button still stops everything.</li>
+<li><strong>Composite target service:</strong> all targets preflight before admission; single-address targets deduplicate by <code>operation_identity</code>; SERIAL ordering is deterministic; group cancellation prevents unstarted targets; result attributes errors to target and side.</li>
+<li><strong>Direct-target tracking:</strong> without coexistence evidence the seek ticket stays active until feedback reaches tolerance or timeout, and a second-axis request queues behind it; with a coexistence fixture profile the ticket completes at write time and both writes land back-to-back.</li>
+<li><strong>Evidence enforcement:</strong> a unit test walks every registered controller and fails if <code>motion_concurrency.model != SERIAL</code> with an empty <code>evidence</code> string.</li>
+<li><strong>Combined-frame streamer</strong> (lands with M4): single intent frame bytes identical to today's single-axis command; union frame asserted against the declared builder; last-intent-removed emits release; STOP clears registry then writes stop_all.</li>
+<li><strong>Lifecycle:</strong> disconnect-after-command fires only when active and queued counts reach zero; idle timer not re-armed while tickets are queued; shutdown drains queue and sends final stop when motion was active; unload during an active barrier stops both sides.</li>
+</ol>
+
+<h2 id="phases">14. Phased implementation (v4, after b3) and rollout gates</h2>
+<div class="tablewrap"><table>
+<tr><th>Phase</th><th>Content</th><th>Gate to proceed</th></tr>
+<tr><td><strong>M0</strong> scheduler core</td><td><code>scheduling.py</code> (scopes, tickets, gate, ContextVar cancel), coordinator internals swapped, everything on <code>LEGACY_EXCLUSIVE</code>, timed_move override threading. No behavior change intended.</td><td>Full suite green; wire-trace identity fixture green; no new coordinator public API consumed anywhere yet. Ships silently in a beta.</td></tr>
+<tr><td><strong>M1</strong> queue-not-cancel semantics</td><td>Scope, lifetime, and completion annotations; seek axis tickets; direct-target motion leases; monotonic STOP generation; release-bound hold cleanup; queue coalescing and visibility. <strong>Different-axis work queues instead of cancelling, without adding simultaneous movement.</strong></td><td>Wire identity, seek interruption, hold release, direct-target completion, and admit-during-STOP races green. One beta cycle of queue-latency feedback.</td></tr>
+<tr><td><strong>M2</strong> pair routing + composite targets</td><td>Separate-address pass-through, linked two-phase reservation, unchanged sequential lane, and additive <code>set_positions</code>. Card synchronization submits one durable group.</td><td>Neither-side-starts-before-ready proof; partial-failure contract green; Octo harness unchanged; frontend service tests green; user report from a separate-address pair.</td></tr>
+<tr><td><strong>M3</strong> per-bed evidence declarations, wave 1</td><td><code>DIRECT_TARGET</code> coexistence for candidate beds (Reverie, Kaidi direct, BOX25) and any <code>DEAD_MAN_INTERLEAVE</code> bed someone can actually evidence; per-axis stop opcodes where evidenced. Every declaration cites its evidence; CI enforces non-empty strings.</td><td>Per-bed wire-identity for single-axis unchanged; per bed: authoritative evidence documented (fresh decompile finding, vendor doc, or dated bench test) plus a hardware confirmation, or the bed is explicitly flagged beta in release notes.</td></tr>
+<tr><td><strong>M4</strong> combined-frame streamer</td><td>Fresh APK re-verification of Keeson/Ergomotion frame semantics (repo rule: never trust legacy writeups), then <code>build_motion_frame</code> + intent registry for verified beds.</td><td>Union-frame evidence documented; single-intent byte identity green; hardware report from at least one user device before default-on.</td></tr>
+<tr><td><strong>M5</strong> simultaneous streaming + card multi-hold</td><td>Per-bed <code>SIMULTANEOUS_STREAM</code> for dead-man protocols proven to keep two axes moving; card multi-hold for declared beds.</td><td>Strictly per-bed, each with a dated bench/user test in the evidence string. Never a family-wide flip.</td></tr>
+</table></div>
+
+<h2 id="rejected">15. Rejected alternatives</h2>
+<ul>
+<li><strong>"Safe by construction" burst interleaving.</strong> Rejected because byte similarity does not prove timing or firmware session behavior. No unverified protocol receives alternating motor bursts. SERIAL queue-not-cancel is the default; <code>DEAD_MAN_INTERLEAVE</code> requires evidence.</li>
+<li><strong>A map of per-axis asyncio locks.</strong> No model for exclusive presets or aux/query lanes, deadlock-prone for multi-axis operations, no stop priority, no replacement semantics. Scopes + one gate express all of it.</li>
+<li><strong>Keep the global lock, only scope the cancellation.</strong> Nearly M1, but without the queue model there is no coalescing, no queue visibility, no idle accounting for disconnect-after-command, and the seek still monopolizes the lock against QUERY reads. The scheduler gives the same safety with an honest queue.</li>
+<li><strong>Run seeks as detached background tasks outside the lock.</strong> Loses the STOP ordering guarantee (a stop could land between a detached task's writes with no ordering), races the disconnect path, and breaks the disconnect-after-command accounting. The scheduler keeps long ops inside the ordered world.</li>
+<li><strong>Put the scheduler in the pair parent.</strong> The parent has no BleakClient and single beds have no parent; scheduling would need a synthetic parent everywhere, violating b3's composition-over-rewrite invariant and re-deriving the reconnect-storm-sensitive child lifecycle.</li>
+<li><strong>Per-axis command characteristics / one BleakClient per axis.</strong> No protocol in the tree exposes independent per-axis GATT endpoints, and a second client per device breaks the one-link invariants and adapter slot budgeting.</li>
+<li><strong>Optimistic simultaneity with runtime probing.</strong> Probing means moving a user's bed to find out what their firmware does. Violates the no-guessing rule; declarations with evidence are the only acceptable source.</li>
+<li><strong>Frontend-side fan-out or client-side queueing.</strong> The card must never own safety semantics (existing rule for paired both; same reasoning here).</li>
+</ul>
+
+<h2 id="risks">16. Risks</h2>
+<div class="tablewrap"><table>
+<tr><th>Sev</th><th>Risk</th><th>Mitigation</th></tr>
+<tr><td class="b">high</td><td>M0 refactor subtly changes preemption timing for some of the ~30 command entry points, breaking a protocol that depends on b3's exact cancel window.</td><td><code>LEGACY_EXCLUSIVE</code> default reproduces conflict-with-everything; wire-trace identity fixture covers command, query, seek, stop and preempted-while-queued sequences; M0 ships alone in a beta.</td></tr>
+<tr><td class="b">high</td><td>STOP regression: with a ticket queue, a stop drains the queue but misses a ticket admitted concurrently.</td><td>Stop sets a monotonic stop-generation; admission of MOTION/PRESET compares generations (b3's counter pattern, kept), and the stop test matrix includes admit-during-stop races.</td></tr>
+<tr><td class="w">med</td><td>Users read queued-behind-a-seek latency (a legs press doing nothing for up to a minute) as a hang and file bugs.</td><td>This is the price of the no-guessing rule and strictly better than b3, where the same press silently killed the seek. Mitigate with the 15 s queued warning log, queue age in diagnostics, release notes stating "commands now finish in order", and demand-prioritized M3 evidence work for the most-reported beds.</td></tr>
+<tr><td class="w">med</td><td>Direct-target feedback tracking (ticket active until arrival) changes post-write behavior for annotated call sites vs b3's immediate return, e.g. delaying a follow-up same-bed automation step.</td><td>Bound is the existing seek timeout; the tracked interval matches what the bed is physically doing; per-bed M3 coexistence evidence restores write-and-complete. Called out explicitly in release notes.</td></tr>
+<tr><td class="w">med</td><td>A linked both command starts one side while the other remains queued, or ready reservations starve independent work.</td><td>Two-phase reservation forbids controller code before every child is READY; canonical physical-identity order prevents deadlock; reservations have deadlines, expose blockers, and yield to STOP. Fairness tests cover a continuous stream of side commands.</td></tr>
+<tr><td class="w">med</td><td>A <code>RELEASE_BOUND</code> ticket loses its owner event and replays a motor pulse after pointer release or card teardown.</td><td>Owner generation is part of activation preflight; queued pulses coalesce; release and <code>abandon()</code> invalidate the generation; a wire-negative test proves no later write.</td></tr>
+<tr><td class="w">med</td><td>Disconnect-after-command moving to the idle transition changes link hold times for disconnect-after-command beds (remote handset contention), especially with queued tickets keeping the link open longer.</td><td>Semantics defined as "last active or queued ticket done", which for the single-command case is the b3 finalizer moment; a regression test pins the single-command timing; queued-command link holds are the direct consequence of running the commands the user asked for.</td></tr>
+<tr><td class="w">med</td><td>An evidence declaration is added on weak grounds, such as an old writeup or an analogy from a sibling bed.</td><td>CI-enforced non-empty evidence strings naming the artifact; repo rule that legacy writeups are diff-baseline only; review checklist requires the fresh decompile path or dated bench log; declarations are per bed model, never per family.</td></tr>
+<tr><td class="w">med</td><td>Combined-frame builder diverges from the single-axis bytes and breaks existing users of that bed.</td><td>Byte-identity test is a merge gate for every COMBINED_FRAME declaration; feature is per-bed, never family-wide.</td></tr>
+<tr><td class="w">med</td><td>Octo: any accidental widening of concurrency into the sequential lane holds two links or streams during a switch.</td><td>Sequential lane stays a total order by construction (pair-level exclusive ticket); Octo test harness must pass byte-identical; Octo stays SERIAL with no interleave declaration before dedicated hardware evidence (#327 track).</td></tr>
+<tr><td class="w">low</td><td>Scheduler diagnostics bloat support bundles.</td><td>Bounded deques (existing pattern, <span class="ref">coordinator.py:502-505</span>).</td></tr>
+</table></div>
+
+<h2 id="evidence">17. Evidence rules and open hardware questions</h2>
+<p><strong>What counts as authoritative evidence</strong> for any non-SERIAL declaration, per the repository's standing rules:</p>
+<ul>
+<li>A <em>fresh</em> APK decompile (jadx/blutter) of the vendor app showing the app itself emitting the claimed pattern, cited by artifact path and finding. Legacy protocol writeups are diff-baseline only and never qualify on their own.</li>
+<li>Vendor protocol documentation for the specific module.</li>
+<li>A dated bench test on real hardware, recording bed model, module, firmware where visible, and the exact wire trace exercised.</li>
+</ul>
+<p>Analogy to a sibling protocol, b3 happening to permit a byte sequence, or "it should be fine" reasoning about timing are explicitly not evidence. The questions below block declarations (M3 to M5); none of them blocks M1 or M2, which introduce no new wire patterns on any single link.</p>
+<ol>
+<li><strong>Linak:</strong> does the control point keep both actuators moving when per-actuator run commands alternate at burst cadence, or does each write cancel the other actuator? Needs a bench test on a real Linak unit, or a decompile showing the vendor app emitting alternating actuator commands. Also: does Linak have a documented dual-actuator opcode that makes interleaving moot? (Separate question from the separate-address pair case, which needs no evidence: two Linak devices on two links already work concurrently under M2.)</li>
+<li><strong>Keeson / Ergomotion:</strong> fresh decompile: is the motion frame a held-button bitmask, and does firmware accept a frame with two motor bits set from the app path (not just the physical remote)? What cadence does the app stream at?</li>
+<li><strong>Reverie / Kaidi direct / BOX25:</strong> does writing a second axis target abort an in-progress firmware seek on the first axis, or do targets queue/parallelize? Does the position feedback stream stay coherent with two motors moving? Until answered per bed, direct-target seeks hold their axis scope to arrival (section 8.1).</li>
+<li><strong>Octo:</strong> does the dead-man stream tolerate interleaved per-motor codes within one connection (does the app ever emit two motor codes in one stream when Both Up runs), and what is the minimum frame rate before a motor halts?</li>
+<li><strong>Dead-man duty cycle generally:</strong> for each pulse protocol family, the maximum inter-burst gap before firmware halts the motor, and whether a different motor's code mid-session resets, stops, or faults the first motor. This unknown blocks any generic interleaving claim.</li>
+<li><strong>Preset streams:</strong> for streaming recalls (BOX25 star codes, Octo preset streams), does an unrelated single write (light toggle) mid-stream abort the recall? Determines whether AUX may ever interleave into a PRESET.</li>
+</ol>
+
+<p class="sub" style="margin-top:48px">End of plan. Derived solely from the v4.0.0b3 source tree at commit <code>998b52c</code>; every cited anchor was read in that tree while writing this document.</p>
+
+</main>
+</body>
+</html>
