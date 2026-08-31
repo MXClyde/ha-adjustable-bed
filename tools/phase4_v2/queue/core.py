@@ -7,6 +7,7 @@ an expired worker from publishing after another worker recovers its unit.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -102,6 +103,66 @@ class FinishResult:
     unit_id: str
     attempt_id: str
     output_digest: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkUnitSnapshot:
+    """Deterministic tracker state for one immutable work unit."""
+
+    unit_id: str
+    kind: str
+    cluster_id: str | None
+    priority: int
+    ordinal: int
+    execution_mode: ExecutionMode
+    status: WorkUnitStatus
+    input_digest: str
+    attempt_count: int
+    latest_outcome: TerminalOutcome | None
+    completion_revision: str | None
+    output_digest: str | None
+    dependency_count: int
+    capability_count: int
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the canonical public representation."""
+        return {
+            "unit_id": self.unit_id,
+            "kind": self.kind,
+            "cluster_id": self.cluster_id,
+            "priority": self.priority,
+            "ordinal": self.ordinal,
+            "execution_mode": self.execution_mode,
+            "status": self.status,
+            "input_digest": self.input_digest,
+            "attempt_count": self.attempt_count,
+            "latest_outcome": self.latest_outcome,
+            "completion_revision": self.completion_revision,
+            "output_digest": self.output_digest,
+            "dependency_count": self.dependency_count,
+            "capability_count": self.capability_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class QueueSnapshot:
+    """One consistent SQLite read watermark for tracker generation."""
+
+    schema_revision: int
+    event_watermark: int
+    scheduler_state_digest: str
+    generation_id: str
+    units: tuple[WorkUnitSnapshot, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the canonical public representation."""
+        return {
+            "schema_revision": self.schema_revision,
+            "event_watermark": self.event_watermark,
+            "scheduler_state_digest": self.scheduler_state_digest,
+            "generation_id": self.generation_id,
+            "units": [unit.as_dict() for unit in self.units],
+        }
 
 
 _SCHEMA = """
@@ -812,6 +873,146 @@ class Queue:
             raise QueueError(f"unknown work unit: {unit_id}")
         return WorkUnitStatus(row["status"])
 
+    def recover(self) -> int:
+        """Fence expired leases and return the number of recovered attempts."""
+        with self._immediate() as connection:
+            return self._recover_expired(connection)
+
+    def snapshot(self) -> QueueSnapshot:
+        """Read deterministic tracker state in one consistent transaction."""
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN")
+            metadata = connection.execute(
+                "SELECT revision FROM schema_meta WHERE singleton = 1"
+            ).fetchone()
+            if metadata is None:
+                raise QueueError("queue is not initialized")
+            watermark_row = connection.execute(
+                "SELECT COALESCE(MAX(event_id), 0) AS watermark FROM events"
+            ).fetchone()
+            scheduler_state = {
+                "capabilities": [
+                    tuple(row)
+                    for row in connection.execute(
+                        """
+                        SELECT capability, revision, digest
+                        FROM pipeline_capabilities
+                        ORDER BY capability, revision
+                        """
+                    ).fetchall()
+                ],
+                "requirements": [
+                    tuple(row)
+                    for row in connection.execute(
+                        """
+                        SELECT unit_id, capability, required_revision, required_digest
+                        FROM capability_requirements
+                        ORDER BY unit_id, capability
+                        """
+                    ).fetchall()
+                ],
+                "dependencies": [
+                    tuple(row)
+                    for row in connection.execute(
+                        """
+                        SELECT unit_id, parent_unit_id, required_revision, required_digest
+                        FROM dependencies
+                        ORDER BY unit_id, parent_unit_id
+                        """
+                    ).fetchall()
+                ],
+            }
+            scheduler_state_digest = hashlib.sha256(
+                json.dumps(scheduler_state, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            rows = connection.execute(
+                """
+                SELECT
+                    unit.unit_id,
+                    unit.kind,
+                    unit.cluster_id,
+                    unit.priority,
+                    unit.ordinal,
+                    unit.execution_mode,
+                    unit.status,
+                    unit.input_digest,
+                    (SELECT COUNT(*) FROM attempts AS attempt
+                     WHERE attempt.unit_id = unit.unit_id) AS attempt_count,
+                    terminal.outcome AS latest_outcome,
+                    completion.completion_revision,
+                    completion.output_digest,
+                    (SELECT COUNT(*) FROM dependencies AS dependency
+                     WHERE dependency.unit_id = unit.unit_id) AS dependency_count,
+                    (SELECT COUNT(*) FROM capability_requirements AS requirement
+                     WHERE requirement.unit_id = unit.unit_id) AS capability_count
+                FROM work_units AS unit
+                LEFT JOIN attempts AS latest
+                  ON latest.unit_id = unit.unit_id
+                 AND latest.fencing_token = (
+                    SELECT MAX(candidate.fencing_token)
+                    FROM attempts AS candidate
+                    WHERE candidate.unit_id = unit.unit_id
+                 )
+                LEFT JOIN attempt_terminals AS terminal
+                  ON terminal.attempt_id = latest.attempt_id
+                LEFT JOIN formal_completions AS completion
+                  ON completion.unit_id = unit.unit_id
+                ORDER BY unit.ordinal, unit.unit_id
+                """
+            ).fetchall()
+            units = tuple(
+                WorkUnitSnapshot(
+                    unit_id=str(row["unit_id"]),
+                    kind=str(row["kind"]),
+                    cluster_id=(str(row["cluster_id"]) if row["cluster_id"] is not None else None),
+                    priority=int(row["priority"]),
+                    ordinal=int(row["ordinal"]),
+                    execution_mode=ExecutionMode(row["execution_mode"]),
+                    status=WorkUnitStatus(row["status"]),
+                    input_digest=str(row["input_digest"]),
+                    attempt_count=int(row["attempt_count"]),
+                    latest_outcome=(
+                        TerminalOutcome(row["latest_outcome"])
+                        if row["latest_outcome"] is not None
+                        else None
+                    ),
+                    completion_revision=(
+                        str(row["completion_revision"])
+                        if row["completion_revision"] is not None
+                        else None
+                    ),
+                    output_digest=(
+                        str(row["output_digest"]) if row["output_digest"] is not None else None
+                    ),
+                    dependency_count=int(row["dependency_count"]),
+                    capability_count=int(row["capability_count"]),
+                )
+                for row in rows
+            )
+            payload = {
+                "schema_revision": int(metadata["revision"]),
+                "event_watermark": int(watermark_row["watermark"]),
+                "scheduler_state_digest": scheduler_state_digest,
+                "units": [unit.as_dict() for unit in units],
+            }
+            generation_id = hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return QueueSnapshot(
+            schema_revision=int(metadata["revision"]),
+            event_watermark=int(watermark_row["watermark"]),
+            scheduler_state_digest=scheduler_state_digest,
+            generation_id=generation_id,
+            units=units,
+        )
+
     def _repeat_finish(
         self,
         connection: sqlite3.Connection,
@@ -860,7 +1061,7 @@ class Queue:
             output_digest=output_digest,
         )
 
-    def _recover_expired(self, connection: sqlite3.Connection) -> None:
+    def _recover_expired(self, connection: sqlite3.Connection) -> int:
         expired = connection.execute(
             """
             SELECT unit_id, attempt_id FROM leases
@@ -886,6 +1087,7 @@ class Queue:
                 """,
                 (row["unit_id"],),
             )
+        return len(expired)
 
     def _record_workspace_failure(self, lease: Lease) -> None:
         with self._immediate() as connection:

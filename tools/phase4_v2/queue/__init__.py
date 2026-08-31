@@ -10,10 +10,13 @@ from .core import (
     Queue,
     QueueConflictError,
     QueueError,
+    QueueSnapshot,
     StaleLeaseError,
     TerminalOutcome,
+    WorkUnitSnapshot,
     WorkUnitStatus,
 )
+from .tracker import managed_block_sha256, render_html, render_markdown, replace_managed_block
 
 __all__ = [
     "CompletionConflictError",
@@ -25,7 +28,13 @@ __all__ = [
     "Queue",
     "QueueConflictError",
     "QueueError",
+    "QueueSnapshot",
     "StaleLeaseError",
     "TerminalOutcome",
     "WorkUnitStatus",
+    "WorkUnitSnapshot",
+    "managed_block_sha256",
+    "render_html",
+    "render_markdown",
+    "replace_managed_block",
 ]
