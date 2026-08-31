@@ -1,5 +1,6 @@
 """Deterministic integrity validation for frozen Phase 4 report bundles."""
 
+from .binding import CONTRACT_REVISION, VALIDATION_INPUT, DependencyPins
 from .bundle import (
     VALIDATOR_REVISION,
     Diagnostic,
@@ -12,8 +13,11 @@ from .bundle import (
 __all__ = [
     "VALIDATOR_REVISION",
     "Diagnostic",
+    "DependencyPins",
+    "CONTRACT_REVISION",
     "StrictJsonError",
     "ValidationReceipt",
+    "VALIDATION_INPUT",
     "load_json_strict",
     "validate_report_bundle",
 ]
