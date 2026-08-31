@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -309,7 +310,7 @@ class Queue:
             os.close(root_fd)
         connection = self._connect()
         try:
-            connection.execute("PRAGMA journal_mode = WAL")
+            self._enable_wal(connection)
             connection.executescript(_SCHEMA)
         finally:
             connection.close()
@@ -1149,6 +1150,24 @@ class Queue:
         connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
         connection.execute("PRAGMA synchronous = FULL")
         return connection
+
+    def _enable_wal(self, connection: sqlite3.Connection) -> None:
+        """Establish WAL mode despite concurrent first-time initializers."""
+        deadline = time.monotonic() + self.busy_timeout_ms / 1_000
+        while True:
+            try:
+                row = connection.execute("PRAGMA journal_mode = WAL").fetchone()
+            except sqlite3.OperationalError as error:
+                if "locked" not in str(error).casefold():
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise QueueError("timed out establishing SQLite WAL mode") from error
+                time.sleep(min(0.05, remaining))
+                continue
+            if row is None or str(row[0]).casefold() != "wal":
+                raise QueueError("SQLite refused WAL journal mode")
+            return
 
 
 def _validate_identifier(value: str, label: str) -> None:
