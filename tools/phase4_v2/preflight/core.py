@@ -12,6 +12,7 @@ import re
 import shutil
 import stat
 import struct
+import subprocess
 import tempfile
 import zipfile
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -20,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import IO, Literal, TypedDict, cast
 
-PREFLIGHT_SCHEMA = "phase4-v2-preflight-v1"
+PREFLIGHT_SCHEMA = "phase4-v2-preflight-v2"
 CACHE_SCHEMA = "phase4-v2-artifact-cache-v1"
 _DELIVERY_ARCHIVES = frozenset({".apks", ".xapk", ".zip"})
 _APK_SUFFIX = ".apk"
@@ -30,6 +31,11 @@ _MAX_ZIP_COMMENT_BYTES = 65_535
 _ZIP_EOCD_BYTES = 22
 _ZIP_EOCD_SIGNATURE = b"PK\x05\x06"
 _STATUS_REVISION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
+_BADGING_PACKAGE = re.compile(r"^package:(?: [A-Za-z][A-Za-z0-9]*='[^']*')+$")
+_BADGING_ATTRIBUTE = re.compile(r" ([A-Za-z][A-Za-z0-9]*)='([^']*)'")
+_BADGING_SPLIT = re.compile(r"^split='([^']+)'$")
+_BADGING_USES_SPLIT = re.compile(r"^uses-split(?:-not-required)?:'([^']+)'$")
+_SIGNER_DIGEST = re.compile(r"^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]{64})$")
 _AT_FDCWD = -100
 _RENAME_NOREPLACE = 1
 _READ_FLAGS = (
@@ -124,6 +130,21 @@ class ArtifactMember:
 
 
 @dataclass(frozen=True, slots=True)
+class PackageIdentity:
+    """Identity shared by one cryptographically coherent install set."""
+
+    package_name: str
+    version_code: str
+    version_name: str
+    signer_sha256: tuple[str, ...]
+    base_member: str
+    split_members: tuple[tuple[str, str], ...]
+
+    def public_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
 class StackDecision:
     stacks: tuple[str, ...]
     routes: tuple[str, ...]
@@ -137,6 +158,7 @@ class PreflightResult:
     artifact_digest: str
     delivery_files: tuple[DeliveryFile, ...]
     artifact_members: tuple[ArtifactMember, ...]
+    package_identity: PackageIdentity | None
     decision: StackDecision
     _owner: _SealedOwner = field(repr=False, compare=False)
 
@@ -147,6 +169,9 @@ class PreflightResult:
             "artifact_digest": self.artifact_digest,
             "delivery_files": [asdict(item) for item in self.delivery_files],
             "artifact_members": [item.public_dict() for item in self.artifact_members],
+            "package_identity": (
+                self.package_identity.public_dict() if self.package_identity is not None else None
+            ),
             "classification": asdict(self.decision),
         }
 
@@ -164,6 +189,17 @@ class PreflightResult:
 class _ArchiveEntry:
     name: str
     info: zipfile.ZipInfo
+
+
+@dataclass(frozen=True, slots=True)
+class _ApkIdentity:
+    member: str
+    package_name: str
+    version_code: str
+    version_name: str
+    split_name: str | None
+    required_splits: tuple[str, ...]
+    signer_sha256: tuple[str, ...]
 
 
 def _canonical_json(value: object) -> bytes:
@@ -426,6 +462,150 @@ def _classify_apk(path: Path, label: str, limits: PreflightLimits) -> set[str]:
     return stacks
 
 
+def _run_identity_tool(arguments: Sequence[str], *, label: str) -> tuple[str | None, str | None]:
+    executable = shutil.which(arguments[0])
+    if executable is None:
+        return None, f"identity_tool_unavailable:{arguments[0]}"
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed executable and sealed private path
+            [executable, *arguments[1:]],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=60,
+        )
+    except OSError, subprocess.TimeoutExpired:
+        return None, f"identity_tool_failed:{arguments[0]}:{label}"
+    if len(completed.stdout) > 4 * 1024**2:
+        return None, f"identity_tool_output_limit:{arguments[0]}:{label}"
+    if completed.returncode != 0:
+        return None, f"identity_verification_failed:{arguments[0]}:{label}"
+    try:
+        return completed.stdout.decode("utf-8", errors="strict"), None
+    except UnicodeDecodeError:
+        return None, f"identity_tool_non_utf8:{arguments[0]}:{label}"
+
+
+def _inspect_apk_identity(member: ArtifactMember) -> tuple[_ApkIdentity | None, tuple[str, ...]]:
+    badging, badging_error = _run_identity_tool(
+        ("aapt2", "dump", "badging", os.fspath(member._sealed_path)), label=member.name
+    )
+    signer, signer_error = _run_identity_tool(
+        ("apksigner", "verify", "--print-certs", os.fspath(member._sealed_path)),
+        label=member.name,
+    )
+    blockers = tuple(error for error in (badging_error, signer_error) if error is not None)
+    if badging is None or signer is None:
+        return None, blockers
+    package_lines = [line for line in badging.splitlines() if _BADGING_PACKAGE.fullmatch(line)]
+    package_attributes = [dict(_BADGING_ATTRIBUTE.findall(line)) for line in package_lines]
+    split_matches = [
+        match.group(1) for line in badging.splitlines() if (match := _BADGING_SPLIT.fullmatch(line))
+    ]
+    split_matches.extend(
+        attributes["split"] for attributes in package_attributes if "split" in attributes
+    )
+    signer_digests = tuple(
+        sorted(
+            {
+                match.group(1).lower()
+                for line in signer.splitlines()
+                if (match := _SIGNER_DIGEST.fullmatch(line))
+            }
+        )
+    )
+    parse_blockers: list[str] = []
+    if len(package_attributes) != 1 or not {
+        "name",
+        "versionCode",
+        "versionName",
+    }.issubset(package_attributes[0]):
+        parse_blockers.append(f"package_identity_ambiguous:{member.name}")
+    if len(split_matches) > 1:
+        parse_blockers.append(f"split_identity_ambiguous:{member.name}")
+    if not signer_digests:
+        parse_blockers.append(f"signer_identity_missing:{member.name}")
+    if parse_blockers:
+        return None, tuple(parse_blockers)
+    package = package_attributes[0]
+    required_splits = tuple(
+        sorted(
+            {
+                match.group(1)
+                for line in badging.splitlines()
+                if (match := _BADGING_USES_SPLIT.fullmatch(line))
+                and not line.startswith("uses-split-not-required")
+            }
+        )
+    )
+    return (
+        _ApkIdentity(
+            member.name,
+            package["name"],
+            package["versionCode"],
+            package["versionName"],
+            split_matches[0] if split_matches else None,
+            required_splits,
+            signer_digests,
+        ),
+        (),
+    )
+
+
+def _derive_package_identity(
+    members: Sequence[ArtifactMember],
+) -> tuple[PackageIdentity | None, tuple[str, ...]]:
+    inspected: list[_ApkIdentity] = []
+    blockers: list[str] = []
+    for member in members:
+        identity, member_blockers = _inspect_apk_identity(member)
+        blockers.extend(member_blockers)
+        if identity is not None:
+            inspected.append(identity)
+    if blockers or len(inspected) != len(members):
+        return None, tuple(sorted(set(blockers)))
+    packages = {item.package_name for item in inspected}
+    versions = {(item.version_code, item.version_name) for item in inspected}
+    signers = {item.signer_sha256 for item in inspected}
+    bases = [item for item in inspected if item.split_name is None]
+    split_names = [item.split_name for item in inspected if item.split_name is not None]
+    if len(packages) != 1:
+        blockers.append("package_identity_mismatch")
+    if len(versions) != 1:
+        blockers.append("version_identity_mismatch")
+    if len(signers) != 1:
+        blockers.append("signer_identity_mismatch")
+    if len(bases) != 1:
+        blockers.append("split_base_ambiguous")
+    if len(split_names) != len(set(split_names)):
+        blockers.append("split_identity_duplicate")
+    present_splits = {name for name in split_names if name is not None}
+    required_splits = {name for item in inspected for name in item.required_splits}
+    missing = sorted(required_splits - present_splits)
+    blockers.extend(f"required_split_missing:{name}" for name in missing)
+    if blockers:
+        return None, tuple(sorted(set(blockers)))
+    package_name = next(iter(packages))
+    version_code, version_name = next(iter(versions))
+    signer_sha256 = next(iter(signers))
+    return (
+        PackageIdentity(
+            package_name,
+            version_code,
+            version_name,
+            signer_sha256,
+            bases[0].member,
+            tuple(
+                sorted(
+                    (item.split_name or "", item.member) for item in inspected if item.split_name
+                )
+            ),
+        ),
+        (),
+    )
+
+
 def _suggested_routes(stacks: Iterable[str]) -> tuple[str, ...]:
     observed = set(stacks)
     routes = {"apktool", "jadx"} if observed else set()
@@ -444,16 +624,22 @@ def _decision(
     stacks: Iterable[str],
     unknown_members: Iterable[str],
     *,
+    identity_verified: bool = False,
     extra_blockers: Iterable[str] = (),
 ) -> StackDecision:
     observed = tuple(sorted(set(stacks)))
     blockers = {
-        "package_identity_not_verified",
-        "version_identity_not_verified",
-        "signer_coherence_not_verified",
-        "split_coherence_not_verified",
         "stack_detection_not_exhaustive",
     }
+    if not identity_verified:
+        blockers.update(
+            {
+                "package_identity_not_verified",
+                "version_identity_not_verified",
+                "signer_coherence_not_verified",
+                "split_coherence_not_verified",
+            }
+        )
     blockers.update(f"unknown_application_stack:{name}" for name in unknown_members)
     blockers.update(extra_blockers)
     return StackDecision(observed, _suggested_routes(observed), "BLOCKED", tuple(sorted(blockers)))
@@ -549,6 +735,7 @@ def preflight_delivery(
             raise SafetyError("artifact set contains duplicate logical APK names")
         artifacts.sort(key=lambda item: item.name.casefold())
         deliveries.sort(key=lambda item: item.name.casefold())
+        package_identity, identity_blockers = _derive_package_identity(artifacts)
         delivery_public = [asdict(item) for item in deliveries]
         artifact_public = [item.public_dict() for item in artifacts]
         return PreflightResult(
@@ -556,7 +743,13 @@ def preflight_delivery(
             _digest_manifest("artifact", artifact_public),
             tuple(deliveries),
             tuple(artifacts),
-            _decision(stacks, unknown, extra_blockers=extra_blockers),
+            package_identity,
+            _decision(
+                stacks,
+                unknown,
+                identity_verified=package_identity is not None,
+                extra_blockers=(*extra_blockers, *identity_blockers),
+            ),
             owner,
         )
     except BaseException:

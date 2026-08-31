@@ -52,6 +52,138 @@ def _snapshot(paths: list[Path]) -> dict[str, tuple[int, int, int, str]]:
     }
 
 
+def _mock_identity_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    identities: Mapping[str, tuple[str, str, str, str | None, tuple[str, ...], str]],
+    *,
+    split_as_package_attribute: bool = False,
+) -> None:
+    def run(arguments: Sequence[str], *, label: str) -> tuple[str | None, str | None]:
+        package, code, version, split, required, signer = identities[label]
+        if arguments[0] == "apksigner":
+            return f"Signer #1 certificate SHA-256 digest: {signer}\n", None
+        package_line = f"package: name='{package}' versionCode='{code}' versionName='{version}'"
+        if split is not None and split_as_package_attribute:
+            package_line += f" split='{split}'"
+        lines = [package_line]
+        if split is not None and not split_as_package_attribute:
+            lines.append(f"split='{split}'")
+        lines.extend(f"uses-split:'{name}'" for name in required)
+        return "\n".join(lines) + "\n", None
+
+    monkeypatch.setattr(legacy_preflight, "_run_identity_tool", run)
+
+
+def test_authoritative_identity_is_deterministic_for_coherent_complete_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    base = tmp_path / "base.apk"
+    split = tmp_path / "config.apk"
+    _native_apk(base)
+    _native_apk(split)
+    signer = "a" * 64
+    _mock_identity_tools(
+        monkeypatch,
+        {
+            "base.apk": ("org.example.bed", "42", "4.2", None, ("config.arm64",), signer),
+            "config.apk": ("org.example.bed", "42", "4.2", "config.arm64", (), signer),
+        },
+        split_as_package_attribute=True,
+    )
+
+    result = preflight_delivery([split, base])
+
+    assert result.package_identity is not None
+    assert result.package_identity.package_name == "org.example.bed"
+    assert result.package_identity.split_members == (("config.arm64", "config.apk"),)
+    assert result.manifest()["schema"] == "phase4-v2-preflight-v2"
+    assert not {
+        "package_identity_not_verified",
+        "version_identity_not_verified",
+        "signer_coherence_not_verified",
+        "split_coherence_not_verified",
+    }.intersection(result.decision.blockers)
+    assert result.decision.blockers == ("stack_detection_not_exhaustive",)
+
+
+@pytest.mark.parametrize(
+    ("changed", "expected"),
+    [
+        (("org.other", "42", "4.2", "config.arm64", (), "a" * 64), "package_identity_mismatch"),
+        (
+            ("org.example.bed", "43", "4.3", "config.arm64", (), "a" * 64),
+            "version_identity_mismatch",
+        ),
+        (
+            ("org.example.bed", "42", "4.2", "config.arm64", (), "b" * 64),
+            "signer_identity_mismatch",
+        ),
+    ],
+)
+def test_identity_mismatch_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    changed: tuple[str, str, str, str | None, tuple[str, ...], str],
+    expected: str,
+) -> None:
+    base = tmp_path / "base.apk"
+    split = tmp_path / "config.apk"
+    _native_apk(base)
+    _native_apk(split)
+    _mock_identity_tools(
+        monkeypatch,
+        {
+            "base.apk": ("org.example.bed", "42", "4.2", None, (), "a" * 64),
+            "config.apk": changed,
+        },
+    )
+
+    result = preflight_delivery([base, split])
+
+    assert result.package_identity is None
+    assert expected in result.decision.blockers
+    assert result.decision.status == "BLOCKED"
+
+
+def test_missing_declared_split_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    base = tmp_path / "base.apk"
+    _native_apk(base)
+    _mock_identity_tools(
+        monkeypatch,
+        {"base.apk": ("org.example.bed", "42", "4.2", None, ("feature",), "a" * 64)},
+    )
+
+    result = preflight_delivery([base])
+
+    assert result.package_identity is None
+    assert "required_split_missing:feature" in result.decision.blockers
+
+
+def test_ambiguous_base_and_duplicate_split_identities_fail_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    first = tmp_path / "first.apk"
+    second = tmp_path / "second.apk"
+    _native_apk(first)
+    _native_apk(second)
+    common = ("org.example.bed", "42", "4.2")
+    _mock_identity_tools(
+        monkeypatch,
+        {
+            "first.apk": (*common, "config.arm64", (), "a" * 64),
+            "second.apk": (*common, "config.arm64", (), "a" * 64),
+        },
+    )
+
+    result = preflight_delivery([first, second])
+
+    assert result.package_identity is None
+    assert "split_base_ambiguous" in result.decision.blockers
+    assert "split_identity_duplicate" in result.decision.blockers
+
+
 def test_split_delivery_identity_is_order_independent_and_read_only(tmp_path: Path) -> None:
     base = tmp_path / "base.apk"
     split = tmp_path / "split_config.arm64_v8a.apk"

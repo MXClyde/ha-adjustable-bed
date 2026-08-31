@@ -6,12 +6,18 @@ It produces two identities:
 - `delivery_digest` identifies the exact caller-supplied files.
 - `artifact_digest` identifies the logical APK member set, independent of XAPK/APKS packaging.
 
-This first slice always returns a fail-closed `BLOCKED` decision because package, version, signer,
-split-set, and exhaustive stack verification are not implemented yet. Recognized markers provide
-suggested analysis routes only. Cache objects contain APK bytes and byte identity only, are addressed
-by cache-schema revision plus `artifact_digest`, and never retain classification output. Mutable
-processing status is separately namespaced by pipeline revision. Materialization always copies
-verified bytes and never hardlinks.
+Package identity is derived from the sealed APKs with `aapt2 dump badging`; `apksigner verify`
+cryptographically verifies each APK and supplies its signer-certificate digests. A verified install
+set has exactly one base, unique split names, identical package/version/signer identity, and every
+required `uses-split` present. Missing tools, malformed or unsigned APKs, ambiguity, and any mismatch
+remain precise fail-closed blockers. The overall decision remains `BLOCKED` until exhaustive
+specialized/native stack detection is implemented. Recognized markers provide suggested analysis
+routes only.
+
+Cache objects contain APK bytes and byte identity only, are addressed by cache-schema revision plus
+`artifact_digest`, and never retain package identity or classification output. Mutable processing
+status is separately namespaced by pipeline revision. Materialization always copies verified bytes
+and never hardlinks.
 
 This slice requires Linux interfaces including `fcntl.flock` and `renameat2`; it also uses
 `O_NOATIME` where the filesystem permits it. ZIP64 deliveries are rejected because the bounded
