@@ -322,6 +322,18 @@ class RichmatController(BedController):
         return bool(self._features & RichmatFeatures.MOTOR_PILLOW)
 
     @property
+    def has_head_feet_support(self) -> bool:
+        """Return True when both head and feet motors are present.
+
+        The combined command drives both actuators at once, so it only makes
+        sense when the remote profile exposes both of them.
+        """
+        return bool(
+            self._features & RichmatFeatures.MOTOR_HEAD
+            and self._features & RichmatFeatures.MOTOR_FEET
+        )
+
+    @property
     def motor_control_specs(self) -> tuple[MotorControlSpec, ...]:
         """Expose the native Richmat layout without back/legs alias duplicates."""
         specs = [
@@ -341,6 +353,21 @@ class RichmatController(BedController):
                 max_angle=45,
             ),
         ]
+
+        if self.has_head_feet_support:
+            # Richmat drives head and feet together as one hardware step
+            # (MOTOR_HEAD_FEET_UP/DOWN), which is what the combined button on
+            # the physical remote sends. This is not the same as opening the
+            # head and feet covers one after the other.
+            specs.append(
+                MotorControlSpec(
+                    key="head_feet",
+                    translation_key="head_feet",
+                    open_fn=lambda ctrl: ctrl.move_head_feet_up(),
+                    close_fn=lambda ctrl: ctrl.move_head_feet_down(),
+                    stop_fn=lambda ctrl: ctrl.move_head_feet_stop(),
+                )
+            )
 
         if self.has_pillow_support:
             specs.append(
@@ -683,6 +710,24 @@ class RichmatController(BedController):
 
     async def move_feet_stop(self) -> None:
         """Stop feet motor."""
+        await self.move_head_stop()
+
+    async def move_head_feet_up(self) -> None:
+        """Move head and feet up together.
+
+        Richmat exposes this as a single combined command, which is what the
+        physical remote sends. Driving the two motors one after the other is
+        not equivalent: each motor command ends with its own STOP frame, so a
+        second concurrent command would cut the first one short.
+        """
+        await self._move_with_stop(RichmatCommands.MOTOR_HEAD_FEET_UP)
+
+    async def move_head_feet_down(self) -> None:
+        """Move head and feet down together."""
+        await self._move_with_stop(RichmatCommands.MOTOR_HEAD_FEET_DOWN)
+
+    async def move_head_feet_stop(self) -> None:
+        """Stop the combined head and feet movement."""
         await self.move_head_stop()
 
     async def move_lumbar_up(self) -> None:
