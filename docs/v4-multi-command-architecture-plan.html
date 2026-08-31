@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Adjustable Bed v4 Multi-Command Architecture</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #000;
+      --fg: #fff;
+      --muted: #aaa;
+      --dim: #d0d0d0;
+      --line: #292929;
+      --line2: #484848;
+      --green: #69f28d;
+      --blue: #79aaff;
+      --amber: #ffc857;
+      --red: #ff7474;
+      --max: 1260px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+    .shell { width: min(var(--max), calc(100% - 36px)); margin: 0 auto; }
+    code, pre, .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    code { color: #dbe8ff; }
+    header { padding: 62px 0 38px; border-bottom: 1px solid var(--line); }
+    .eyebrow {
+      color: var(--green);
+      font: 700 11px/1.35 "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .11em;
+      text-transform: uppercase;
+    }
+    h1 {
+      max-width: 980px;
+      margin: 13px 0 16px;
+      font-size: clamp(38px, 5.8vw, 74px);
+      line-height: .99;
+      letter-spacing: -.052em;
+    }
+    .lede { max-width: 900px; margin: 0; color: #d7d7d7; font-size: clamp(17px, 2vw, 22px); }
+    .baseline {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      margin-top: 30px;
+      border-top: 1px solid var(--line2);
+      border-bottom: 1px solid var(--line2);
+    }
+    .baseline > div { padding: 14px 16px 14px 0; }
+    .baseline > div + div { padding-left: 16px; border-left: 1px solid var(--line); }
+    .label { display: block; color: var(--muted); font: 600 10px/1.4 "SFMono-Regular", Consolas, monospace; letter-spacing: .08em; text-transform: uppercase; }
+    .value { display: block; margin-top: 5px; font-weight: 730; }
+    nav { position: sticky; top: 0; z-index: 2; background: rgba(0,0,0,.95); border-bottom: 1px solid var(--line); backdrop-filter: blur(8px); }
+    nav .shell { display: flex; gap: 21px; overflow-x: auto; }
+    nav a { padding: 13px 0; color: var(--muted); text-decoration: none; white-space: nowrap; font-size: 12px; }
+    nav a:hover { color: var(--fg); }
+    main { padding: 18px 0 76px; }
+    section { padding: 56px 0 20px; scroll-margin-top: 40px; }
+    section.rule { border-top: 1px solid var(--line); }
+    h2 { margin: 0 0 12px; font-size: clamp(28px, 3.2vw, 43px); line-height: 1.08; letter-spacing: -.034em; }
+    h3 { margin: 26px 0 8px; font-size: 19px; }
+    p { margin: 0 0 14px; }
+    .intro { max-width: 850px; color: #c8c8c8; font-size: 17px; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; }
+    .block { padding: 17px 0; border-top: 1px solid var(--line); }
+    .block h3 { margin: 0 0 7px; }
+    .block p { color: #c7c7c7; }
+    .callout { margin: 23px 0 0; padding: 17px 19px; border-left: 3px solid var(--green); background: #071009; font-size: 16px; }
+    .warn { border-left-color: var(--amber); background: #120e05; }
+    .danger { border-left-color: var(--red); background: #130707; }
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px; }
+    th, td { padding: 12px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font: 700 10px/1.4 "SFMono-Regular", Consolas, monospace; letter-spacing: .07em; text-transform: uppercase; }
+    tbody tr:hover { background: #050505; }
+    ul, ol { margin: 10px 0 0; padding-left: 21px; }
+    li { margin: 7px 0; color: #d2d2d2; }
+    pre { margin: 19px 0 0; padding: 18px; overflow-x: auto; background: #060606; border: 1px solid var(--line); color: #dce8ff; font-size: 13px; line-height: 1.55; }
+    .diagram { margin: 27px 0 8px; padding: 22px 0; overflow-x: auto; border-top: 1px solid var(--line2); border-bottom: 1px solid var(--line2); }
+    .diagram svg { display: block; width: 100%; min-width: 860px; height: auto; }
+    .diagram .box { fill: #070707; stroke: #494949; stroke-width: 1.4; }
+    .diagram .router { fill: #080c14; stroke: var(--blue); }
+    .diagram .scheduler { fill: #071109; stroke: var(--green); }
+    .diagram .strategy { fill: #120e06; stroke: var(--amber); }
+    .diagram text { fill: #fff; font-family: Inter, system-ui, sans-serif; }
+    .diagram .title { font-size: 15px; font-weight: 720; }
+    .diagram .small { fill: #aaa; font-size: 11px; }
+    .diagram line, .diagram path { fill: none; stroke: #777; stroke-width: 1.4; }
+    .steps { counter-reset: phase; margin-top: 22px; border-top: 1px solid var(--line2); }
+    .step { counter-increment: phase; display: grid; grid-template-columns: 56px 175px minmax(0,1fr) 195px; gap: 17px; padding: 19px 0; border-bottom: 1px solid var(--line); }
+    .step::before { content: "0" counter(phase); color: var(--green); font: 700 17px/1.4 "SFMono-Regular", Consolas, monospace; }
+    .step strong { font-size: 15px; }
+    .step p { margin: 0; color: #c7c7c7; }
+    .gate { color: var(--amber); font-size: 12px; }
+    .good { color: var(--green); }
+    .conditional { color: var(--amber); }
+    .bad { color: var(--red); }
+    footer { padding: 28px 0 54px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    @media (max-width: 840px) {
+      .baseline, .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .baseline > div + div { padding-left: 0; border-left: 0; border-top: 1px solid var(--line); }
+      table { display: block; max-width: 100%; overflow-x: auto; }
+      .step { grid-template-columns: 42px 1fr; }
+      .step p, .step .gate { grid-column: 2; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="shell">
+      <div class="eyebrow">Architecture specification · v4.0.0b3 baseline</div>
+      <h1>Scoped command scheduling for every bed topology</h1>
+      <p class="lede">Unrelated commands must stop cancelling one another. The universal behavior is safe ordering. Physical overlap is enabled only when the topology or protocol proves it can support it.</p>
+      <div class="baseline" aria-label="Specification baseline">
+        <div><span class="label">Foundation</span><span class="value">v4.0.0b3</span></div>
+        <div><span class="label">Commit</span><span class="value mono">998b52c</span></div>
+        <div><span class="label">Universal default</span><span class="value">Serial queue, no cross-resource cancel</span></div>
+        <div><span class="label">Configuration</span><span class="value">No user concurrency switch</span></div>
+      </div>
+    </div>
+  </header>
+
+  <nav aria-label="Specification sections"><div class="shell">
+    <a href="#decision">Decision</a><a href="#baseline">b3 failure</a><a href="#invariants">Invariants</a><a href="#architecture">Architecture</a><a href="#intent">Intent model</a><a href="#scheduler">Scheduler</a><a href="#pair">Pairs</a><a href="#strategies">Strategies</a><a href="#lifecycle">Lifecycle</a><a href="#surface">Services + card</a><a href="#delivery">Delivery</a><a href="#verification">Verification</a><a href="#non-goals">Non-goals</a>
+  </div></nav>
+
+  <main class="shell">
+    <section id="decision">
+      <div class="eyebrow">01 · Decision</div>
+      <h2>Schedule per physical command channel</h2>
+      <p class="intro">Keep v4's coordinator topology. Add one <code>DeviceCommandScheduler</code> for every distinct <code>operation_identity</code>. Convert <code>PairedBedCoordinator</code> from a long-held pair lock into a topology router and linked-group coordinator.</p>
+      <div class="grid-3">
+        <div class="block"><h3>All protocols</h3><p>Same resource replaces. Different resource queues. STOP preempts. No queued movement survives caller cancellation, release, disconnect, unload, or restart.</p></div>
+        <div class="block"><h3>Separate physical links</h3><p>Independent schedulers run concurrently when the existing v4 connection mode permits both links. Each device still receives a serial wire trace.</p></div>
+        <div class="block"><h3>One physical link</h3><p>Only a protocol-owned execution strategy may combine, interleave, or overlap resources. Unknown protocols remain serial.</p></div>
+      </div>
+      <div class="callout"><strong>User-visible contract:</strong> sending legs while back is moving never cancels back merely because it is a different resource. On an unverified bed, legs waits. On a verified capable bed, both may progress.</div>
+    </section>
+
+    <section id="baseline" class="rule">
+      <div class="eyebrow">02 · b3 failure map</div>
+      <h2>Three concerns share two locks</h2>
+      <p class="intro">b3 safely serializes operations, but it also represents logical ownership and cancellation at device and pair scope. That is broader than the hardware boundary.</p>
+      <table>
+        <thead><tr><th>Current b3 mechanism</th><th>Useful property</th><th>Problem to remove</th></tr></thead>
+        <tbody>
+          <tr><td><code>AdjustableBedCoordinator._command_lock</code></td><td>Protects connection lifecycle and prevents concurrent BLE operations.</td><td>Held across complete pulses and position seeks, so unrelated work waits behind the whole operation.</td></tr>
+          <tr><td><code>_cancel_command</code> + <code>_cancel_counter</code></td><td>Makes replacement and STOP responsive; drops stale queued work.</td><td>One token covers the entire child. Any new motion can cancel any active motion or preemptible query.</td></tr>
+          <tr><td><code>PairedBedCoordinator._pair_command_lock</code></td><td>Orders both-side commands and protects the stop-the-other contract.</td><td>Serializes left-only and right-only work even when they are separate devices in concurrent mode.</td></tr>
+          <tr><td><code>async_seek_position()</code></td><td>Provides tolerance, stall, overshoot, timeout, and final STOP behavior.</td><td>Owns the device lock for up to 60 seconds and uses the device-global cancel token.</td></tr>
+          <tr><td><code>timed_move</code> pulse field mutation</td><td>Reuses existing controller movement methods.</td><td>Temporarily changes coordinator-wide fields, which is safe only while one global command lock exists.</td></tr>
+          <tr><td>Frontend <code>MotorHold</code> + <code>settleSequentially</code></td><td>Prevents pulse backlog and keeps current sync behavior deterministic.</td><td>One held key blocks multi-input; release uses broad STOP; browser-side position fan-out cannot be preflighted as one backend group.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="invariants" class="rule">
+      <div class="eyebrow">03 · Safety invariants</div>
+      <h2>Rules no strategy may weaken</h2>
+      <table>
+        <thead><tr><th>Invariant</th><th>Required behavior</th></tr></thead>
+        <tbody>
+          <tr><td>One physical transport owner</td><td>One scheduler exists per distinct BLE command channel. The controller's existing BLE lock continues to serialize individual GATT operations.</td></tr>
+          <tr><td>No guessed timing</td><td>Unknown controllers receive one complete legacy operation at a time. Generic scheduler code never alternates frames or slices opaque controller coroutines.</td></tr>
+          <tr><td>No stale motion</td><td>A queued command cannot start after its caller is cancelled, a hold is released, STOP lands, the link disconnects, the entry unloads, or Home Assistant restarts.</td></tr>
+          <tr><td>Cleanup before replacement</td><td>Same-resource replacement sets only that ticket's token, waits for its protocol cleanup, then starts the newer intent.</td></tr>
+          <tr><td>STOP always wins</td><td>STOP invalidates covered active and queued work before waiting for the current GATT operation, attempts every required target, and never returns early because a newer request appeared.</td></tr>
+          <tr><td>Physical completion is modeled</td><td>A successful write is not assumed to mean movement finished. The execution strategy owns the completion signal and motion lease.</td></tr>
+          <tr><td>Pair failure remains fail-safe</td><td>A linked both-side operation starts only after all members are ready. First failure stops every member that may have started and preserves side-specific cleanup errors.</td></tr>
+          <tr><td>Existing query evidence only</td><td>Position reads already issued inside b3 movement may remain there. External queries and auxiliary writes queue unless the specific strategy proves safe admission.</td></tr>
+          <tr><td>No reconnect replay</td><td>Disconnect fails active and queued movement. Reconnect hydrates state only; it never resumes an earlier command.</td></tr>
+          <tr><td>No user safety toggle</td><td>Concurrency capability is integration-owned, controller-specific, variant-aware, and evidence-backed.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="architecture" class="rule">
+      <div class="eyebrow">04 · Structure</div>
+      <h2>Routing, scheduling, strategy, transport</h2>
+      <div class="diagram" role="img" aria-label="Final multi-command architecture">
+        <svg viewBox="0 0 1180 650" xmlns="http://www.w3.org/2000/svg">
+          <defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#777" stroke="none"/></marker></defs>
+          <rect class="box" x="30" y="24" width="1120" height="72" rx="3"/><text class="title" x="55" y="54">Entities · services · Lovelace card</text><text class="small" x="55" y="76">Create typed CommandIntent: resources, lifetime, replacement key, completion, group, operation</text>
+          <line x1="590" y1="96" x2="590" y2="132" marker-end="url(#arr)"/>
+          <rect class="router" x="250" y="138" width="680" height="104" rx="3"/><text class="title" x="275" y="170">PairCommandRouter</text><text class="small" x="275" y="194">Resolve side and operation_identity · preflight · select connection mode</text><text class="small" x="275" y="215">Independent pass-through · linked prepare/commit · partial-failure cleanup</text>
+          <line x1="430" y1="242" x2="300" y2="286" marker-end="url(#arr)"/><line x1="750" y1="242" x2="880" y2="286" marker-end="url(#arr)"/>
+          <rect class="scheduler" x="35" y="292" width="535" height="138" rx="3"/><text class="title" x="60" y="324">DeviceCommandScheduler · physical identity A</text><text class="small" x="60" y="348">Intent queue · resource replacement · ticket cancel tokens · stop epoch</text><text class="small" x="60" y="370">Caller and hold liveness · connection + motion leases · command trace</text><text class="small" x="60" y="392">Safety ordering only: STOP, cleanup, then FIFO</text>
+          <rect class="scheduler" x="610" y="292" width="535" height="138" rx="3"/><text class="title" x="635" y="324">DeviceCommandScheduler · physical identity B</text><text class="small" x="635" y="348">Exists only for a second physical command channel</text><text class="small" x="635" y="370">Single-address side views resolve to scheduler A</text><text class="small" x="635" y="392">Sequential pairs share the parent connection lane</text>
+          <line x1="302" y1="430" x2="302" y2="470" marker-end="url(#arr)"/><line x1="878" y1="430" x2="878" y2="470" marker-end="url(#arr)"/>
+          <rect class="strategy" x="35" y="478" width="535" height="92" rx="3"/><text class="title" x="60" y="510">ProtocolExecutionStrategy A</text><text class="small" x="60" y="534">SerialOpaque default · DirectTarget · CombinedState · InterleavedRefresh</text><text class="small" x="60" y="554">Owns completion, STOP scope, cleanup, cadence, and resource coexistence</text>
+          <rect class="strategy" x="610" y="478" width="535" height="92" rx="3"/><text class="title" x="635" y="510">ProtocolExecutionStrategy B</text><text class="small" x="635" y="534">Resolved by controller + variant + verified runtime capability</text><text class="small" x="635" y="554">Non-default strategy cannot exist without evidence metadata</text>
+          <line x1="302" y1="570" x2="302" y2="605" marker-end="url(#arr)"/><line x1="878" y1="570" x2="878" y2="605" marker-end="url(#arr)"/>
+          <text class="title" x="302" y="632" text-anchor="middle">Existing child connection/auth/notify lifecycle + serialized GATT</text>
+          <text class="title" x="878" y="632" text-anchor="middle">Existing child connection/auth/notify lifecycle + serialized GATT</text>
+        </svg>
+      </div>
+      <div class="grid-2">
+        <div class="block"><h3>Keep public coordinator shapes</h3><p>Existing entities and services still call coordinator entry points. Compatibility wrappers create a default intent around the existing controller coroutine. Migration can be incremental.</p></div>
+        <div class="block"><h3>Do not put scheduling in BLE transport</h3><p>The transport owns connection and GATT safety. It should not know motors, sides, presets, replacement, or user intent.</p></div>
+      </div>
+    </section>
+
+    <section id="intent" class="rule">
+      <div class="eyebrow">05 · Command model</div>
+      <h2>Intent owns meaning; context owns execution</h2>
+      <pre><code>@dataclass(frozen=True, slots=True)
+class CommandIntent:
+    intent_id: str
+    group_id: str | None
+    resources: frozenset[ResourceKey]       # physical identity + logical side + axis/group
+    kind: CommandKind                      # MOTION, PRESET, AUX, QUERY, MAINTENANCE
+    lifetime: IntentLifetime               # ONE_SHOT or HELD
+    replacement_key: ReplacementKey
+    completion: CompletionPolicy
+    operation: ControllerOperation         # opaque legacy coroutine or strategy-native plan
+
+@dataclass(slots=True)
+class CommandContext:
+    cancel_event: asyncio.Event
+    admission_stop_epoch: int
+    pulse_override: PulseSettings | None
+    caller_alive: Callable[[], bool]
+    hold_owner: HoldOwner | None
+
+class CommandHandle:
+    state: QUEUED | PREPARED | ACTIVE | CLEANING | TERMINAL
+    outcome: COMPLETED | REPLACED | RELEASED | STOPPED | CANCELLED | FAILED</code></pre>
+      <div class="grid-2">
+        <div class="block"><h3><code>ONE_SHOT</code></h3><p>A target, preset, or timed move stays valid while its service or entity call is alive. If that caller is cancelled before activation, the queued intent drops. It is never persistent across unload, disconnect, or restart.</p></div>
+        <div class="block"><h3><code>HELD</code></h3><p>A live input has a stable owner ID and generation. Release or card teardown invalidates the owner. Queued work drops with zero BLE traffic; active work follows strategy cleanup.</p></div>
+      </div>
+      <h3>Compatibility context</h3>
+      <p class="intro">Existing controller movement methods do not accept a command context. During migration, the scheduler binds <code>CommandContext</code> through task-local context so <code>coordinator.cancel_command</code> and pulse-setting accessors resolve to the active ticket. New strategy-native code receives context explicitly. Controller-created background tasks must be audited because task-local context is copied when a task is created.</p>
+      <div class="callout warn"><strong>Important simplification:</strong> resource groups such as a preset, native both command, or stop-all are intent scopes, not separate execution strategies. This avoids multiplying strategy types for commands that merely own more resources.</div>
+    </section>
+
+    <section id="scheduler" class="rule">
+      <div class="eyebrow">06 · Scheduler contract</div>
+      <h2>Small policy, explicit state</h2>
+      <p class="intro">The default scheduler is a resource-aware FIFO. It does not attempt general fairness classes or deadline optimization. Safety actions are the only priority exception.</p>
+      <table>
+        <thead><tr><th>Incoming event</th><th>Scheduler action</th><th>Wire consequence</th></tr></thead>
+        <tbody>
+          <tr><td>Same replacement key</td><td>Invalidate older queued intents; cancel the active matching ticket; wait for CLEANING; activate newest if still live.</td><td>Required cleanup separates old and new operations.</td></tr>
+          <tr><td>Different resource, serial strategy</td><td>Append FIFO without touching the active ticket.</td><td>Current operation completes, then the new operation runs unchanged.</td></tr>
+          <tr><td>Different resource, capable strategy</td><td>Ask the strategy whether the exact resource set is admissible.</td><td>Strategy may combine, interleave, or issue independent targets.</td></tr>
+          <tr><td>HELD owner released while queued</td><td>Mark RELEASED and remove every queued renewal for that owner.</td><td>No movement and no STOP write.</td></tr>
+          <tr><td>HELD owner released while active</td><td>Set its ticket token and invoke strategy resource release.</td><td>Serial strategy uses existing cleanup; richer strategies preserve other resources only when proven.</td></tr>
+          <tr><td>Caller cancelled</td><td>Drop queued ONE_SHOT or cancel active ticket and finish cleanup.</td><td>No delayed action after caller disappearance.</td></tr>
+          <tr><td>STOP</td><td>Increment stop epoch synchronously; invalidate covered queues and active tokens; enter safety lane.</td><td>After current atomic GATT operation, send the required STOP or release to every target.</td></tr>
+          <tr><td>Disconnect or unload</td><td>Fail active and queued tickets, invalidate owners, clear strategy intent state.</td><td>No replay after reconnect.</td></tr>
+        </tbody>
+      </table>
+      <h3>Stop epoch closes the admission race</h3>
+      <p>Every ticket snapshots the device's monotonic stop epoch on admission and rechecks it immediately before activation. STOP increments the epoch before awaiting anything. A movement admitted just before or during STOP therefore cannot start after the safety command.</p>
+      <h3>Held renewals do not become a backlog</h3>
+      <p>At most one queued renewal exists per held owner and replacement key. A later renewal coalesces into it. A durable position target may replace an older target for the same axis, but never silently merges with another axis.</p>
+      <h3>Opaque commands remain opaque</h3>
+      <p><code>SerialOpaqueStrategy</code> holds the device execution lane for the whole existing command or seek. The scheduler does not release the lane during arbitrary sleeps and does not insert auxiliary writes between controller frames. That universal path fixes cross-resource cancellation by ordering, without changing protocol timing.</p>
+    </section>
+
+    <section id="pair" class="rule">
+      <div class="eyebrow">07 · v4 topology and groups</div>
+      <h2>One router, three physical realities</h2>
+      <table>
+        <thead><tr><th>Topology</th><th>Routing behavior</th><th>Concurrency result</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Separate addresses, concurrent mode</strong></td><td>Single-side work passes directly to that child scheduler. Linked both work is prepared on both schedulers, then committed as a group.</td><td>Left and right may overlap. Each child remains serial unless its own strategy proves more.</td></tr>
+          <tr><td><strong>Separate addresses, sequential mode</strong></td><td>Keep b3's parent connection lane and connect, operate, disconnect order. The lane is the reservation.</td><td>Never more than one link. Other-side work queues. No generic time slicing.</td></tr>
+          <tr><td><strong>Single address</strong></td><td>Deduplicate by <code>operation_identity</code> and submit one multi-resource intent to the shared scheduler. Use native both routing where b3 already does.</td><td>One physical lane. Same-link overlap requires that controller's strategy.</td></tr>
+        </tbody>
+      </table>
+      <h3>Linked prepare and commit</h3>
+      <ol>
+        <li>Preflight every logical target before admission, preserving b3's all-target validation.</li>
+        <li>Under a short pair metadata mutex, synchronously enqueue one <code>GroupMember</code> per distinct physical identity. This mutex is never held across connect, controller, sleep, or GATT work.</li>
+        <li>A member becomes READY when its scheduler can activate it without violating its local strategy. READY does not execute controller code.</li>
+        <li>When every member is READY, the router commits the group and starts all concurrent-mode members. If cancellation or failure occurs before commit, every member releases with zero movement.</li>
+        <li>After commit, first failure cancels the linked group, attempts cleanup on every member that may have started, and raises side-attributed errors including cleanup failures.</li>
+      </ol>
+      <div class="callout warn"><strong>Why prepare/commit matters:</strong> merely acquiring left before right can let one side move while the other is still queued. Queue entries plus an explicit commit point preserve the b3 whole-bed intent without holding a global operation lock.</div>
+      <h3>Independent requests stay independent</h3>
+      <p>A left-only request and a separately issued right-only request do not become one failure group. Failure on one does not stop the other. Safety coupling exists only when the caller submitted a linked both or composite group.</p>
+    </section>
+
+    <section id="strategies" class="rule">
+      <div class="eyebrow">08 · Protocol execution</div>
+      <h2>Four strategies, one conservative default</h2>
+      <table>
+        <thead><tr><th>Strategy</th><th>Behavior</th><th>Required evidence</th><th>Completion + release</th></tr></thead>
+        <tbody>
+          <tr><td><strong>SerialOpaque</strong></td><td>Run one existing controller operation or seek to completion. Different resources queue.</td><td>None. Default for every controller and variant.</td><td>Existing operation return, seek feedback, timeout, and protocol cleanup.</td></tr>
+          <tr><td><strong>DirectTarget</strong></td><td>Serialize target writes. Permit multiple outstanding resource leases only when firmware coexistence is proven.</td><td>Specific second-target behavior, coherent feedback, completion signal, and STOP scope.</td><td>Feedback, protocol notification, or conservative deadline. Never write-return alone unless evidence says movement is complete.</td></tr>
+          <tr><td><strong>CombinedState</strong></td><td>Maintain desired resource intents and emit one aggregate frame stream. A single owner composes all frames.</td><td>Frame fields, legal simultaneous combinations, cadence, single-intent byte identity, release behavior.</td><td>Intent removal plus verified aggregate release or STOP semantics.</td></tr>
+          <tr><td><strong>InterleavedRefresh</strong></td><td>Deadline-aware strategy alternates verified refresh frames without splitting an atomic protocol burst.</td><td>Maximum refresh gap, resource coexistence, admission limit, latency budget, per-resource or device release behavior.</td><td>Strategy-owned refresh deadlines and explicit resource cleanup.</td></tr>
+        </tbody>
+      </table>
+      <h3>Strategy interface</h3>
+      <pre><code>class ProtocolExecutionStrategy(Protocol):
+    profile: ExecutionProfile
+
+    def can_admit(self, active: ActiveIntentSet, incoming: CommandIntent) -> bool: ...
+    async def execute(self, intent: CommandIntent, context: CommandContext) -> None: ...
+    async def release(self, intent: CommandIntent, context: CommandContext) -> None: ...
+    async def stop(self, resources: frozenset[ResourceKey]) -> None: ...
+    def completion(self, intent: CommandIntent) -> CompletionPolicy: ...
+
+@dataclass(frozen=True, slots=True)
+class ExecutionProfile:
+    strategy: StrategyKind = StrategyKind.SERIAL_OPAQUE
+    admissible_resource_sets: tuple[frozenset[str], ...] = ()
+    stop_scope: StopScope = StopScope.DEVICE
+    evidence: EvidenceRecord | None = None</code></pre>
+      <h3>Evidence gate</h3>
+      <ul>
+        <li>Any non-default profile must name the exact controller and variant and carry structured evidence metadata.</li>
+        <li>Accepted evidence is a clean-room vendor-app analysis showing the claimed path, vendor protocol documentation, or a dated hardware trace with model and firmware where available.</li>
+        <li>APK work must follow the repository's Phase 4 clean-room workflow and frozen-report gates. Existing historical notes are comparison material, not proof by themselves.</li>
+        <li>Tests fail registration when a non-default profile has no evidence or lacks the fields its strategy requires.</li>
+        <li>User configuration cannot override the resolved profile.</li>
+      </ul>
+      <div class="callout danger"><strong>Not evidence:</strong> a controller has two motor methods, a packet contains several fields, direct-position control exists, another brand looks similar, or the current lock happens to prevent a combination from being tested.</div>
+    </section>
+
+    <section id="lifecycle" class="rule">
+      <div class="eyebrow">09 · STOP, connection, completion</div>
+      <h2>Scheduler state owns lifecycle boundaries</h2>
+      <div class="grid-3">
+        <div class="block"><h3>Connection lease</h3><p>Queueing alone does not seize a BLE link. Activation ensures connection and auth. If a successor is already ready, keep the connection as b3 does for a pending newer command; otherwise apply disconnect-after-command or reset the idle timer.</p></div>
+        <div class="block"><h3>Motion lease</h3><p>Tracks physical movement beyond a short write. Serial admission and disconnect decisions use the lease, not coroutine return. The strategy ends it from feedback, notification, release, STOP, timeout, or disconnect.</p></div>
+        <div class="block"><h3>Maintenance lease</h3><p>Diagnostics, transport operations, and hydration that require exclusive connection state enter as maintenance intents. They do not bypass movement ordering.</p></div>
+      </div>
+      <h3>STOP scopes</h3>
+      <table>
+        <thead><tr><th>Action</th><th>Scope</th><th>Rule</th></tr></thead>
+        <tbody>
+          <tr><td>Visible Stop button / <code>stop_all</code></td><td>Child, side, or pair</td><td>Keep b3's safety meaning. Drain covered queues and attempt all targets even if one fails.</td></tr>
+          <tr><td>Same-axis replacement</td><td>Matching resource or linked group</td><td>Cancel matching ticket. If it belongs to an active linked group, cancel the whole group to avoid desynchronization.</td></tr>
+          <tr><td>HELD release on SerialOpaque</td><td>Queued owner or sole active motion</td><td>Drop queued with no write. If active, use existing protocol cleanup; serial execution ensures there is no unrelated simultaneous motion to preserve.</td></tr>
+          <tr><td>HELD release on richer strategy</td><td>Declared resource scope</td><td>Strategy must prove how to remove one resource while preserving others. Otherwise multi-hold is not exposed.</td></tr>
+          <tr><td>Silence-only protocol</td><td>Refresh ownership</td><td>End the proven held-command refresh. Do not invent a STOP frame.</td></tr>
+        </tbody>
+      </table>
+      <h3>Fault outcomes</h3>
+      <p>Unexpected disconnect cancels active operations, fails queued intents, clears combined state, and marks completion uncertain where STOP could not be confirmed. Setup shutdown does the same before existing disconnect cleanup. Diagnostics record whether cleanup was attempted, confirmed, failed, or impossible because the link was gone.</p>
+    </section>
+
+    <section id="surface" class="rule">
+      <div class="eyebrow">10 · Services, entities, frontend</div>
+      <h2>Backend owns grouping and truth</h2>
+      <div class="grid-3">
+        <div class="block"><h3>Existing calls</h3><p>Keep existing entities and services. Each becomes a one-intent wrapper with an explicit resource and replacement key. No config migration.</p></div>
+        <div class="block"><h3>Composite targets</h3><p>Add one <code>set_positions</code> service after group scheduling is stable. Preflight every target, then submit one group. The strategy decides ordered or overlapping execution.</p></div>
+        <div class="block"><h3>Frontend truth</h3><p>Replace browser-side sequential synchronization with the composite service. Show queued state only from backend diagnostics or response state. Never optimistically claim movement.</p></div>
+      </div>
+      <pre><code>adjustable_bed.set_positions
+device_id: paired-bed
+targets:
+  - { side: right, motor: back, position: 42 }
+  - { side: right, motor: legs, position: 18 }
+
+# All-target preflight. One group result.
+# SerialOpaque runs these in order; a verified strategy may overlap them.</code></pre>
+      <h3>Held controls</h3>
+      <p>The current card remains single-hold until a backend held-intent API exists. That API gives start/renew/release calls one stable owner ID, moves pulse renewal into the scheduler, and lets release invalidate queued work. Resource-keyed multi-pointer UI is enabled only when the resolved profile can make progress on the requested resources and release them safely.</p>
+      <h3>Diagnostics, not entity spam</h3>
+      <p>Add bounded command-trace fields: intent ID, group ID, operation identity, resources, strategy, state, queue age, active age, blocker, stop epoch, completion policy, cleanup outcome, and terminal reason. Do not add one Home Assistant entity per queue or ticket.</p>
+    </section>
+
+    <section id="delivery" class="rule">
+      <div class="eyebrow">11 · Delivery sequence</div>
+      <h2>Prove equivalence before widening behavior</h2>
+      <div class="steps">
+        <div class="step"><strong>Observe b3</strong><p>Add trace IDs and freeze representative byte/order traces for command, seek, STOP, preemption, paired both, sequential switching, disconnect, and unload.</p><span class="gate">Gate: zero behavior change</span></div>
+        <div class="step"><strong>Compatibility scheduler</strong><p>Add intent, context, handle, queue, stop epoch, and connection lease. Route every current call through <code>SerialOpaque</code> with legacy exclusive replacement. Move timed pulse overrides into command context.</p><span class="gate">Gate: wire-trace identity</span></div>
+        <div class="step"><strong>Scoped serial semantics</strong><p>Annotate movement resources and ONE_SHOT liveness. Same resource replaces; different resources queue. Keep existing hold UI single-owner. Add direct-target motion leases where completion is observable.</p><span class="gate">Gate: reported bug fixed safely</span></div>
+        <div class="step"><strong>v4 pair routing</strong><p>Remove long pair serialization for separate-address concurrent mode. Add independent pass-through and linked prepare/commit. Preserve sequential and single-address behavior.</p><span class="gate">Gate: b3 pair safety green</span></div>
+        <div class="step"><strong>Composite targets</strong><p>Add <code>set_positions</code>, all-target preflight, group outcomes, and card synchronization migration. Serial devices execute deterministic order.</p><span class="gate">Gate: no partial validation start</span></div>
+        <div class="step"><strong>Protocol strategy pilots</strong><p>Enable DirectTarget, CombinedState, or InterleavedRefresh one controller and variant at a time. Each pilot includes evidence, single-command byte identity, STOP tests, and a hardware report before broad default-on.</p><span class="gate">Gate: per-profile proof</span></div>
+        <div class="step"><strong>Held-intent surface</strong><p>Move pulse renewal into backend-owned held intents. Add owner release and capability-gated multi-pointer card behavior.</p><span class="gate">Gate: no post-release writes</span></div>
+        <div class="step"><strong>RC hardening</strong><p>Fault-inject disconnect, Bluetooth proxy loss, caller cancellation, STOP races, group failure, auth refresh failure, unload, and repeated reversals. Document contributor evidence rules.</p><span class="gate">Gate: no orphan motion</span></div>
+      </div>
+      <div class="callout"><strong>Rollout rule:</strong> the universal queue-not-cancel improvement may ship while every controller remains SerialOpaque. Same-link physical concurrency is not required to land the root-cause fix.</div>
+    </section>
+
+    <section id="verification" class="rule">
+      <div class="eyebrow">12 · Verification</div>
+      <h2>Acceptance matrix</h2>
+      <table>
+        <thead><tr><th>Scenario</th><th>Required result</th><th>Proof</th></tr></thead>
+        <tbody>
+          <tr><td>Back target active; legs target arrives on default strategy</td><td>Back is not cancelled. Legs queues, then runs if its caller remains live.</td><td>Scheduler test + ordered wire trace</td></tr>
+          <tr><td>Back target active; newer back reverse arrives</td><td>Old ticket enters cleanup; reverse starts only after cleanup; no stale back write follows.</td><td>Deterministic replacement test</td></tr>
+          <tr><td>Queued request's caller is cancelled</td><td>Request disappears and never writes later.</td><td>Wire-negative test</td></tr>
+          <tr><td>Held input releases before activation</td><td>Every queued renewal drops; zero move and zero STOP writes.</td><td>Owner-generation test</td></tr>
+          <tr><td>STOP races admission</td><td>No pre-STOP epoch movement starts after STOP.</td><td>Barrier-controlled concurrency test</td></tr>
+          <tr><td>Timed moves overlap in queue</td><td>Each uses its own pulse settings; no coordinator field leaks between tickets.</td><td>Context isolation test</td></tr>
+          <tr><td>Separate-address left and right</td><td>Child activity overlaps in concurrent mode; each child trace remains serial.</td><td>Paired coordinator test</td></tr>
+          <tr><td>Linked both member blocked</td><td>Neither member writes before every member is READY.</td><td>Prepare/commit test</td></tr>
+          <tr><td>Linked both fails after commit</td><td>All possibly-started members receive cleanup; error includes side and cleanup failures.</td><td>Failure-injection test</td></tr>
+          <tr><td>Sequential pair</td><td>At most one link, current connect/operate/disconnect order, no cross-side replay.</td><td>Existing Octo harness + trace identity</td></tr>
+          <tr><td>Single-address left and right</td><td>One scheduler and one GATT lane; default queues; verified strategy owns any overlap.</td><td><code>operation_identity</code> test</td></tr>
+          <tr><td>Direct target write returns early</td><td>Motion lease remains until declared completion; unverified second target queues.</td><td>Feedback/timeout test</td></tr>
+          <tr><td>CombinedState single resource</td><td>Bytes match the current single-resource command exactly.</td><td>Protocol trace fixture</td></tr>
+          <tr><td>InterleavedRefresh under worst latency</td><td>All proven deadlines hold or admission rejects the resource set before motion.</td><td>Virtual-clock strategy test</td></tr>
+          <tr><td>Disconnect or unload with active and queued work</td><td>Cleanup attempts are recorded, queue fails, reconnect does not resume anything.</td><td>Lifecycle fault injection</td></tr>
+          <tr><td>Composite target preflight fails</td><td>No target starts; preflighted links return to normal idle handling.</td><td>Service integration test</td></tr>
+        </tbody>
+      </table>
+      <h3>Release acceptance</h3>
+      <ul>
+        <li>Full existing suite passes, plus focused scheduler, group, lifecycle, and frontend tests.</li>
+        <li>All unannotated controllers remain on SerialOpaque and keep single-command byte behavior.</li>
+        <li>No unresolved path calls controller movement outside a scheduler or maintenance intent.</li>
+        <li>Diagnostics can explain every dropped, replaced, queued, stopped, failed, and completed command.</li>
+        <li>Any enabled non-default strategy has evidence metadata and protocol-specific tests.</li>
+      </ul>
+    </section>
+
+    <section id="non-goals" class="rule">
+      <div class="eyebrow">13 · Rejected shortcuts and non-goals</div>
+      <h2>What this architecture deliberately avoids</h2>
+      <div class="grid-2">
+        <div class="block"><h3>Rejected</h3><ul><li>Per-axis locks without a group, STOP, completion, or lifecycle model.</li><li><code>asyncio.gather</code> on one controller and one BLE link.</li><li>Generic slicing of controller coroutines at sleeps.</li><li>Assuming direct targets, combined fields, or similar brands imply concurrency.</li><li>Runtime probing that moves a user's bed to discover behavior.</li><li>Frontend-owned queues, fan-out, retries, or partial-failure cleanup.</li><li>Replaying movement after reconnect.</li></ul></div>
+        <div class="block"><h3>Not required for the root fix</h3><ul><li>Simultaneous motion on every bed.</li><li>A user-selectable scheduling profile.</li><li>New queue entities in Home Assistant.</li><li>Rewriting every controller before the scheduler lands.</li><li>Fairness algorithms beyond safety ordering and FIFO.</li><li>One universal STOP opcode or timing model.</li><li>Immediate multi-pointer UI before backend-held intent exists.</li></ul></div>
+      </div>
+      <div class="callout"><strong>Final recommendation:</strong> land the scoped SerialOpaque scheduler first, then unlock concurrency at the two boundaries where it is actually knowable: independent physical links in v4 topology, and evidence-backed protocol execution strategies on a shared link.</div>
+    </section>
+  </main>
+
+  <footer><div class="shell">Prepared against Adjustable Bed <span class="mono">v4.0.0b3 · 998b52c77852142f466a8da86beb409dc022b5fc</span>. Planning artifact only. No integration code was changed.</div></footer>
+</body>
+</html>

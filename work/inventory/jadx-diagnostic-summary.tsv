@@ -1,0 +1,3 @@
+run	exit_code	hard_error_events	unique_hard_methods	warning_events	warning_nodes	explicit_bad_code_markers	explicit_bad_code_files
+normal	3	115	65	281	64	64	59
+deobfuscated	3	115	65	283	64	64	59
