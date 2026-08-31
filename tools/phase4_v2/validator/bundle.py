@@ -14,6 +14,7 @@ import os
 import re
 import stat
 from dataclasses import asdict, dataclass
+from errno import EFBIG, EIO
 from pathlib import Path, PurePosixPath
 from typing import cast
 
@@ -21,6 +22,12 @@ VALIDATOR_REVISION = "phase4-v2-bundle-validator-v1"
 REPORT_MANIFEST = "REPORT.SHA256"
 _MANIFEST_LINE = re.compile(r"^([0-9a-f]{64})  ([^\x00\r\n]+)$")
 _READ_SIZE = 1024 * 1024
+_MAX_MANIFEST_BYTES = 64 * 1024**2
+_MAX_JSON_BYTES = 256 * 1024**2
+_MAX_TREE_ENTRIES = 250_000
+_MAX_TREE_DEPTH = 128
+_MAX_REGULAR_FILE_BYTES = 2 * 1024**3
+_MAX_TREE_FILE_BYTES = 16 * 1024**3
 
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 
@@ -99,6 +106,8 @@ class _Node:
     uid: int
     gid: int
     size: int
+    link_count: int
+    atime_ns: int
     mtime_ns: int
     ctime_ns: int
     device: int
@@ -120,6 +129,24 @@ class _TreeSnapshot:
 class _ManifestEntry:
     path: str
     sha256: str
+
+
+@dataclass(slots=True)
+class _ScanBudget:
+    entries: int = 0
+    regular_file_bytes: int = 0
+
+    def observe(self, path: str, kind: str, size: int) -> None:
+        self.entries += 1
+        if self.entries > _MAX_TREE_ENTRIES:
+            raise _SnapshotError("entry_limit_exceeded", path)
+        if kind != "file":
+            return
+        if size > _MAX_REGULAR_FILE_BYTES:
+            raise _SnapshotError("file_size_limit_exceeded", path)
+        self.regular_file_bytes += size
+        if self.regular_file_bytes > _MAX_TREE_FILE_BYTES:
+            raise _SnapshotError("tree_size_limit_exceeded", path)
 
 
 def _duplicate_rejecting_object(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
@@ -149,7 +176,7 @@ def load_json_strict(data: bytes) -> JsonValue:
     except UnicodeDecodeError as error:
         raise StrictJsonError("invalid_utf8") from error
     try:
-        return cast(
+        parsed = cast(
             JsonValue,
             json.loads(
                 text,
@@ -158,10 +185,28 @@ def load_json_strict(data: bytes) -> JsonValue:
                 parse_float=_parse_finite_float,
             ),
         )
+        _validate_json_unicode(parsed)
+        return parsed
     except StrictJsonError:
         raise
-    except json.JSONDecodeError as error:
+    except (json.JSONDecodeError, RecursionError, ValueError) as error:
         raise StrictJsonError("invalid_json") from error
+
+
+def _validate_json_unicode(value: JsonValue) -> None:
+    pending: list[JsonValue] = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, str):
+            try:
+                current.encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise StrictJsonError("invalid_unicode") from error
+        elif isinstance(current, list):
+            pending.extend(current)
+        elif isinstance(current, dict):
+            pending.extend(current.values())
+            pending.extend(current.keys())
 
 
 def _kind(mode: int) -> str:
@@ -188,7 +233,11 @@ def _stat_identity(node_stat: os.stat_result) -> tuple[int, ...]:
         node_stat.st_ino,
         stat.S_IFMT(node_stat.st_mode),
         stat.S_IMODE(node_stat.st_mode),
+        node_stat.st_uid,
+        node_stat.st_gid,
         node_stat.st_size,
+        node_stat.st_nlink,
+        node_stat.st_atime_ns,
         node_stat.st_mtime_ns,
         node_stat.st_ctime_ns,
     )
@@ -208,6 +257,8 @@ def _node_from_stat(
         uid=node_stat.st_uid,
         gid=node_stat.st_gid,
         size=node_stat.st_size,
+        link_count=node_stat.st_nlink,
+        atime_ns=node_stat.st_atime_ns,
         mtime_ns=node_stat.st_mtime_ns,
         ctime_ns=node_stat.st_ctime_ns,
         device=node_stat.st_dev,
@@ -218,7 +269,7 @@ def _node_from_stat(
 
 
 def _open_root(root: Path) -> int:
-    flags = os.O_RDONLY | os.O_DIRECTORY
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOATIME", 0)
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
@@ -227,7 +278,7 @@ def _open_root(root: Path) -> int:
 
 
 def _hash_regular_at(directory_fd: int, name: str, expected: os.stat_result) -> str:
-    flags = os.O_RDONLY
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOATIME", 0)
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
@@ -248,7 +299,7 @@ def _hash_regular_at(directory_fd: int, name: str, expected: os.stat_result) -> 
         os.close(file_fd)
 
 
-def _scan_directory(directory_fd: int, prefix: PurePosixPath) -> list[_Node]:
+def _scan_directory(directory_fd: int, prefix: PurePosixPath, budget: _ScanBudget) -> list[_Node]:
     nodes: list[_Node] = []
     try:
         with os.scandir(directory_fd) as iterator:
@@ -265,6 +316,9 @@ def _scan_directory(directory_fd: int, prefix: PurePosixPath) -> list[_Node]:
         except OSError as error:
             raise _SnapshotError("stat_entry", relative, error) from error
         kind = _kind(node_stat.st_mode)
+        if len(relative_path.parts) > _MAX_TREE_DEPTH:
+            raise _SnapshotError("depth_limit_exceeded", relative)
+        budget.observe(relative, kind, node_stat.st_size)
         if kind == "file":
             try:
                 digest = _hash_regular_at(directory_fd, entry.name, node_stat)
@@ -272,14 +326,17 @@ def _scan_directory(directory_fd: int, prefix: PurePosixPath) -> list[_Node]:
                 raise _SnapshotError("read_file", relative, error) from error
             nodes.append(_node_from_stat(relative, node_stat, sha256=digest))
         elif kind == "symlink":
-            try:
-                target = os.readlink(entry.name, dir_fd=directory_fd)
-            except OSError as error:
-                raise _SnapshotError("read_symlink", relative, error) from error
-            nodes.append(_node_from_stat(relative, node_stat, link_target=target))
+            # Symlinks are forbidden, so reading their targets would add no evidence
+            # and can itself update symlink atime on Linux.
+            nodes.append(_node_from_stat(relative, node_stat))
         elif kind == "directory":
             nodes.append(_node_from_stat(relative, node_stat))
-            flags = os.O_RDONLY | os.O_DIRECTORY
+            flags = (
+                os.O_RDONLY
+                | os.O_DIRECTORY
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_NOATIME", 0)
+            )
             if hasattr(os, "O_CLOEXEC"):
                 flags |= os.O_CLOEXEC
             if hasattr(os, "O_NOFOLLOW"):
@@ -292,7 +349,7 @@ def _scan_directory(directory_fd: int, prefix: PurePosixPath) -> list[_Node]:
                 opened = os.fstat(child_fd)
                 if _stat_identity(opened) != _stat_identity(node_stat):
                     raise _SnapshotError("directory_changed_while_opening", relative)
-                nodes.extend(_scan_directory(child_fd, relative_path))
+                nodes.extend(_scan_directory(child_fd, relative_path, budget))
             finally:
                 os.close(child_fd)
         else:
@@ -308,8 +365,10 @@ def capture_tree_snapshot(root: Path) -> _TreeSnapshot:
         raise _SnapshotError("open_root", ".", error) from error
     try:
         root_stat = os.fstat(root_fd)
+        budget = _ScanBudget()
+        budget.observe(".", "directory", root_stat.st_size)
         nodes = [_node_from_stat(".", root_stat)]
-        nodes.extend(_scan_directory(root_fd, PurePosixPath()))
+        nodes.extend(_scan_directory(root_fd, PurePosixPath(), budget))
     finally:
         os.close(root_fd)
     ordered = tuple(sorted(nodes, key=lambda node: os.fsencode(node.path)))
@@ -330,12 +389,68 @@ def _safe_member_path(raw: str) -> PurePosixPath | None:
     return candidate
 
 
-def _read_member(root: Path, member: PurePosixPath) -> bytes:
+def _node_identity(node: _Node) -> tuple[int, ...]:
+    return (
+        node.device,
+        node.inode,
+        stat.S_IFMT(_mode_for_kind(node.kind)),
+        node.mode,
+        node.uid,
+        node.gid,
+        node.size,
+        node.link_count,
+        node.atime_ns,
+        node.mtime_ns,
+        node.ctime_ns,
+    )
+
+
+def _mode_for_kind(kind: str) -> int:
+    return {
+        "file": stat.S_IFREG,
+        "directory": stat.S_IFDIR,
+        "symlink": stat.S_IFLNK,
+        "fifo": stat.S_IFIFO,
+        "socket": stat.S_IFSOCK,
+        "character_device": stat.S_IFCHR,
+        "block_device": stat.S_IFBLK,
+    }.get(kind, 0)
+
+
+def _assert_opened_node(path: str, opened: os.stat_result, expected: _Node) -> None:
+    if _stat_identity(opened) != _node_identity(expected):
+        raise OSError(EIO, "member changed since initial snapshot", path)
+
+
+def _read_member(
+    root: Path,
+    member: PurePosixPath,
+    snapshot_nodes: dict[str, _Node],
+    *,
+    max_bytes: int,
+) -> bytes:
+    expected_root = snapshot_nodes["."]
+    expected_member = snapshot_nodes.get(member.as_posix())
+    if expected_member is None or expected_member.kind != "file":
+        raise OSError(EIO, "member is absent or not a snapshotted regular file", member.as_posix())
+    if expected_member.size > max_bytes:
+        raise OSError(EFBIG, "member exceeds validation read limit", member.as_posix())
     root_fd = _open_root(root)
     current_fd = root_fd
     try:
+        _assert_opened_node(".", os.fstat(root_fd), expected_root)
+        prefix = PurePosixPath()
         for part in member.parts[:-1]:
-            flags = os.O_RDONLY | os.O_DIRECTORY
+            prefix /= part
+            expected_directory = snapshot_nodes.get(prefix.as_posix())
+            if expected_directory is None or expected_directory.kind != "directory":
+                raise OSError(EIO, "directory changed since initial snapshot", prefix.as_posix())
+            flags = (
+                os.O_RDONLY
+                | os.O_DIRECTORY
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_NOATIME", 0)
+            )
             if hasattr(os, "O_CLOEXEC"):
                 flags |= os.O_CLOEXEC
             if hasattr(os, "O_NOFOLLOW"):
@@ -344,7 +459,8 @@ def _read_member(root: Path, member: PurePosixPath) -> bytes:
             if current_fd != root_fd:
                 os.close(current_fd)
             current_fd = next_fd
-        flags = os.O_RDONLY
+            _assert_opened_node(prefix.as_posix(), os.fstat(current_fd), expected_directory)
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOATIME", 0)
         if hasattr(os, "O_CLOEXEC"):
             flags |= os.O_CLOEXEC
         if hasattr(os, "O_NOFOLLOW"):
@@ -352,12 +468,25 @@ def _read_member(root: Path, member: PurePosixPath) -> bytes:
         file_fd = os.open(member.parts[-1], flags, dir_fd=current_fd)
         try:
             file_stat = os.fstat(file_fd)
-            if not stat.S_ISREG(file_stat.st_mode):
-                raise OSError("member is not a regular file")
-            chunks: list[bytes] = []
-            while chunk := os.read(file_fd, _READ_SIZE):
-                chunks.append(chunk)
-            return b"".join(chunks)
+            _assert_opened_node(member.as_posix(), file_stat, expected_member)
+            digest = hashlib.sha256()
+            data = bytearray()
+            remaining = expected_member.size
+            while remaining:
+                chunk = os.read(file_fd, min(_READ_SIZE, remaining))
+                if not chunk:
+                    raise OSError(EIO, "member ended before snapshotted size", member.as_posix())
+                digest.update(chunk)
+                data.extend(chunk)
+                remaining -= len(chunk)
+            if os.read(file_fd, 1):
+                raise OSError(EIO, "member exceeds snapshotted size", member.as_posix())
+            _assert_opened_node(member.as_posix(), os.fstat(file_fd), expected_member)
+            if digest.hexdigest() != expected_member.sha256:
+                raise OSError(
+                    EIO, "member digest changed since initial snapshot", member.as_posix()
+                )
+            return bytes(data)
         finally:
             os.close(file_fd)
     finally:
@@ -415,9 +544,25 @@ def _bundle_digest(nodes: dict[str, _Node]) -> str:
     digest = hashlib.sha256()
     for path in sorted(nodes, key=os.fsencode):
         node = nodes[path]
-        if node.kind != "file" or path == REPORT_MANIFEST:
-            continue
-        digest.update(f"{path}\x00{node.size}\x00{node.sha256}\n".encode())
+        encoded_path = os.fsencode(path)
+        payload = json.dumps(
+            {
+                "gid": node.gid,
+                "kind": node.kind,
+                "link_count": node.link_count,
+                "link_target": node.link_target,
+                "mode": node.mode,
+                "sha256": node.sha256,
+                "size": node.size,
+                "uid": node.uid,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        digest.update(len(encoded_path).to_bytes(8, "big"))
+        digest.update(encoded_path)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
     return digest.hexdigest()
 
 
@@ -448,7 +593,8 @@ def validate_report_bundle(report_root: Path) -> ValidationReceipt:
             diagnostics=(diagnostic,),
         )
 
-    nodes = {node.path: node for node in before.nodes if node.path != "."}
+    snapshot_nodes = {node.path: node for node in before.nodes}
+    nodes = {path: node for path, node in snapshot_nodes.items() if path != "."}
     regular_members = {
         path for path, node in nodes.items() if node.kind == "file" and path != REPORT_MANIFEST
     }
@@ -457,6 +603,10 @@ def validate_report_bundle(report_root: Path) -> ValidationReceipt:
             diagnostics.append(Diagnostic("SYMLINK_FORBIDDEN", path))
         elif node.kind not in {"file", "directory"}:
             diagnostics.append(Diagnostic("SPECIAL_NODE_FORBIDDEN", path, (("kind", node.kind),)))
+        elif node.kind == "file" and node.link_count != 1:
+            diagnostics.append(
+                Diagnostic("HARDLINK_FORBIDDEN", path, (("link_count", str(node.link_count)),))
+            )
 
     manifest_node = nodes.get(REPORT_MANIFEST)
     manifest_digest: str | None = None
@@ -474,7 +624,12 @@ def validate_report_bundle(report_root: Path) -> ValidationReceipt:
     else:
         manifest_digest = manifest_node.sha256
         try:
-            manifest_bytes = _read_member(report_root, PurePosixPath(REPORT_MANIFEST))
+            manifest_bytes = _read_member(
+                report_root,
+                PurePosixPath(REPORT_MANIFEST),
+                snapshot_nodes,
+                max_bytes=_MAX_MANIFEST_BYTES,
+            )
         except OSError as error:
             manifest_context = (("errno", str(error.errno)),) if error.errno is not None else ()
             diagnostics.append(Diagnostic("MANIFEST_UNREADABLE", REPORT_MANIFEST, manifest_context))
@@ -499,7 +654,12 @@ def validate_report_bundle(report_root: Path) -> ValidationReceipt:
         if not path.lower().endswith(".json"):
             continue
         try:
-            data = _read_member(report_root, PurePosixPath(path))
+            data = _read_member(
+                report_root,
+                PurePosixPath(path),
+                snapshot_nodes,
+                max_bytes=_MAX_JSON_BYTES,
+            )
             load_json_strict(data)
         except StrictJsonError as error:
             json_context: tuple[tuple[str, str], ...] = (("reason", error.reason),)
@@ -525,7 +685,7 @@ def validate_report_bundle(report_root: Path) -> ValidationReceipt:
         validator_revision=VALIDATOR_REVISION,
         accepted=not ordered_diagnostics,
         source_unchanged=source_unchanged,
-        bundle_sha256=_bundle_digest(nodes),
+        bundle_sha256=_bundle_digest(snapshot_nodes),
         report_manifest_sha256=manifest_digest,
         discovered_members=len(regular_members),
         declared_members=len(declared),

@@ -127,6 +127,18 @@ def test_non_finite_json_number_is_rejected(constant: bytes) -> None:
         load_json_strict(b'{"value":' + constant + b"}")
 
 
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (b'{"value":' + b"9" * 5_000 + b"}", "invalid_json"),
+        (b'{"value":"\\ud800"}', "invalid_unicode"),
+    ],
+)
+def test_hostile_json_values_are_deterministically_rejected(payload: bytes, reason: str) -> None:
+    with pytest.raises(validator_bundle.StrictJsonError, match=reason):
+        load_json_strict(payload)
+
+
 def test_validator_detects_concurrent_source_mutation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -161,3 +173,62 @@ def test_validator_never_executes_report_scripts(tmp_path: Path) -> None:
 
     assert validate_report_bundle(report).accepted is True
     assert marker.exists() is False
+
+
+def test_member_read_is_bound_to_initial_snapshot(tmp_path: Path) -> None:
+    report, members = _valid_bundle(tmp_path)
+    snapshot = validator_bundle.capture_tree_snapshot(report)
+    snapshot_nodes = {node.path: node for node in snapshot.nodes}
+    replacement = b'{"status":"different"}\n'
+    (report / "analysis.json").write_bytes(replacement)
+    members["analysis.json"] = replacement
+    _write_manifest(report, members)
+
+    with pytest.raises(OSError, match="changed since initial snapshot"):
+        validator_bundle._read_member(
+            report,
+            validator_bundle.PurePosixPath("analysis.json"),
+            snapshot_nodes,
+            max_bytes=1024,
+        )
+
+
+def test_non_utf8_member_name_is_rejected_without_receipt_crash(tmp_path: Path) -> None:
+    report, _ = _valid_bundle(tmp_path)
+    raw_path = os.fsencode(report) + b"/bad-\xff.txt"
+    descriptor = os.open(raw_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(descriptor, b"opaque")
+    finally:
+        os.close(descriptor)
+
+    receipt = validate_report_bundle(report)
+
+    assert receipt.accepted is False
+    assert "MEMBER_UNDECLARED" in tuple(item.code for item in receipt.diagnostics)
+    assert receipt.bundle_sha256 is not None
+
+
+def test_validation_reads_do_not_change_access_time(tmp_path: Path) -> None:
+    report, _ = _valid_bundle(tmp_path)
+    analysis = report / "analysis.json"
+    node = analysis.stat()
+    old_atime = 1_600_000_000_000_000_000
+    os.utime(analysis, ns=(old_atime, node.st_mtime_ns))
+
+    receipt = validate_report_bundle(report)
+
+    assert receipt.accepted is True
+    assert analysis.stat().st_atime_ns == old_atime
+
+
+def test_hardlinked_report_member_is_rejected(tmp_path: Path) -> None:
+    report, members = _valid_bundle(tmp_path)
+    os.link(report / "analysis.json", report / "analysis-copy.json")
+    members["analysis-copy.json"] = members["analysis.json"]
+    _write_manifest(report, members)
+
+    receipt = validate_report_bundle(report)
+
+    hardlinks = [item.path for item in receipt.diagnostics if item.code == "HARDLINK_FORBIDDEN"]
+    assert hardlinks == ["analysis-copy.json", "analysis.json"]
