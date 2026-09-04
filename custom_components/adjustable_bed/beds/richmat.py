@@ -326,10 +326,9 @@ class RichmatController(BedController):
     def _has_head_feet_support(self) -> bool:
         """Return True when this remote drives head and feet as one step.
 
-        Two conditions: the profile has both motors, and its official app
-        layout binds a button to the combined command pair. Only about a third
-        of the remote surfaces do, so the two motor flags alone would offer the
-        control on beds whose remote has no such button.
+        Two conditions: the profile has both motors, and the remote is one we
+        have confirmed sends the combined command. The motor flags alone are
+        not enough, since not every Richmat remote surface has this button.
 
         This stays a Richmat-local predicate rather than a `BedController`
         capability flag: no entity platform queries it, and the combined step

@@ -1204,6 +1204,12 @@ RICHMAT_WILINKE_STOP_COMPAT_REMOTE_CODES: Final[frozenset[str]] = frozenset(
     {"qrrm", "bt6500"}
 )
 
+# Richmat remotes confirmed to move head and feet as one combined step
+# (0x29/0x2A). Confirmed on two WLT / WLT825X_H35_S beds running the TWRM
+# profile (PR #552). Other remote surfaces are not assumed to have this
+# button, so add codes here as they are confirmed.
+RICHMAT_COMBINED_HEAD_FEET_REMOTE_CODES: Final[frozenset[str]] = frozenset({"twrm"})
+
 # Display names for remote selection
 RICHMAT_REMOTES: Final = {
     RICHMAT_REMOTE_AUTO: "Auto (all features enabled)",
@@ -1551,24 +1557,20 @@ def get_richmat_features(remote_code: str) -> RichmatFeatures:
 
 
 def richmat_remote_has_combined_head_feet(remote_code: str) -> bool:
-    """Return True when this remote surface has the combined head+feet button.
+    """Return True when this remote is known to drive head and feet as one step.
 
-    The combined command pair (0x29/0x2A) is not part of every Richmat remote:
-    only about a third of the official app layouts bind a button to it, so it
-    cannot be inferred from the head and feet motor flags. "auto" keeps the
-    same meaning it has for every other Richmat capability - unknown remote,
-    everything offered.
+    The combined command pair (0x29/0x2A) is not on every Richmat remote, and
+    the head and feet motor flags do not tell us whether a given surface has
+    it, so remotes are listed only once confirmed. "auto" keeps the meaning it
+    has for every other Richmat capability: unknown remote, everything offered.
 
     Args:
         remote_code: The remote code (e.g., "twrm", "qrrm"), case-insensitive.
     """
-    # Import here to avoid circular dependency
-    from .richmat_features import RICHMAT_COMBINED_HEAD_FEET_REMOTES
-
     code_lower = remote_code.lower() if remote_code else ""
     if code_lower in {"", RICHMAT_REMOTE_AUTO}:
         return True
-    return code_lower in RICHMAT_COMBINED_HEAD_FEET_REMOTES
+    return code_lower in RICHMAT_COMBINED_HEAD_FEET_REMOTE_CODES
 
 
 def get_richmat_motor_count(features: RichmatFeatures) -> int:
