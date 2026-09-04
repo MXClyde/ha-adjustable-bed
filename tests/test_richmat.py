@@ -648,12 +648,12 @@ class TestRichmatFeatureDetection:
 
         assert "head_feet" not in [spec.key for spec in controller.motor_control_specs]
 
-    def test_auto_remote_exposes_head_feet_control(self):
-        """An unidentified remote keeps offering everything, as it does elsewhere."""
+    def test_auto_remote_omits_head_feet_control(self):
+        """Auto is the fallback for unidentified beds, so it does not get the combined step."""
         coordinator = MagicMock()
         controller = RichmatController(coordinator, is_wilinke=True, remote_code="auto")
 
-        assert "head_feet" in [spec.key for spec in controller.motor_control_specs]
+        assert "head_feet" not in [spec.key for spec in controller.motor_control_specs]
 
     def test_qrrm_wilinke_supports_rgb_light_and_timer(self):
         """QRRM WiLinke remotes should expose RGB light and timer controls."""

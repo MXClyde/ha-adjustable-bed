@@ -1561,16 +1561,15 @@ def richmat_remote_has_combined_head_feet(remote_code: str) -> bool:
 
     The combined command pair (0x29/0x2A) is not on every Richmat remote, and
     the head and feet motor flags do not tell us whether a given surface has
-    it, so remotes are listed only once confirmed. "auto" keeps the meaning it
-    has for every other Richmat capability: unknown remote, everything offered.
+    it, so remotes are listed only once confirmed. Unlike other Richmat
+    capabilities, "auto" does not enable this one: it is the default whenever
+    detection cannot name the remote, so it would put the control on beds that
+    may not move both axes at all.
 
     Args:
         remote_code: The remote code (e.g., "twrm", "qrrm"), case-insensitive.
     """
-    code_lower = remote_code.lower() if remote_code else ""
-    if code_lower in {"", RICHMAT_REMOTE_AUTO}:
-        return True
-    return code_lower in RICHMAT_COMBINED_HEAD_FEET_REMOTE_CODES
+    return (remote_code or "").lower() in RICHMAT_COMBINED_HEAD_FEET_REMOTE_CODES
 
 
 def get_richmat_motor_count(features: RichmatFeatures) -> int:
