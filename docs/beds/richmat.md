@@ -140,6 +140,19 @@ Motors 5-7 are only present on select models (e.g., some table/lift actuators).
 | Head Up + Feet Down | `0x21` | Inverse: head up while feet down |
 | Head Down + Feet Up | `0x22` | Inverse: head down while feet up |
 
+`0x29`/`0x2A` are exposed as the `head_feet` cover on remote profiles that
+have both the head and feet motor flags. Confirmed on hardware (#552): on two
+`twrm` beds (`WLT` / `WLT825X_H35_S`) the command raises head and feet at the
+same time, which two sequential cover commands cannot do because each Richmat
+motor command ends with its own STOP frame.
+
+> [!NOTE]
+> The BedTech app calls the same byte pair `bothHeads` (see
+> [bedtech.md](bedtech.md)), which would mean two head actuators rather than
+> head plus feet. No dual-head Richmat bed has been tested, so on a flex-head
+> model this control may drive both head sections instead. Richmat's own
+> command map and the beds tested so far both say head plus feet.
+
 #### Presets
 
 | Command | Byte | Description |
