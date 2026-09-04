@@ -32,6 +32,7 @@ from ..const import (
     RICHMAT_WILINKE_W1_SERVICE_UUID,
     RichmatFeatures,
     get_richmat_features,
+    richmat_remote_has_combined_head_feet,
 )
 from .base import BedController, MotorControlSpec
 
@@ -323,17 +324,21 @@ class RichmatController(BedController):
 
     @property
     def _has_head_feet_support(self) -> bool:
-        """Return True when both head and feet motors are present.
+        """Return True when this remote drives head and feet as one step.
 
-        The combined command drives both actuators at once, so it only makes
-        sense when the remote profile exposes both of them. This stays a
-        Richmat-local predicate rather than a `BedController` capability flag:
-        no entity platform queries it, and the combined step is a protocol
-        detail of this remote family, not a shared motor axis.
+        Two conditions: the profile has both motors, and its official app
+        layout binds a button to the combined command pair. Only about a third
+        of the remote surfaces do, so the two motor flags alone would offer the
+        control on beds whose remote has no such button.
+
+        This stays a Richmat-local predicate rather than a `BedController`
+        capability flag: no entity platform queries it, and the combined step
+        is a protocol detail of this remote family, not a shared motor axis.
         """
         return bool(
             self._features & RichmatFeatures.MOTOR_HEAD
             and self._features & RichmatFeatures.MOTOR_FEET
+            and richmat_remote_has_combined_head_feet(self._remote_code)
         )
 
     @property

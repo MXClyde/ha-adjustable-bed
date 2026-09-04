@@ -1550,6 +1550,27 @@ def get_richmat_features(remote_code: str) -> RichmatFeatures:
     return RICHMAT_REMOTE_FEATURES[RICHMAT_REMOTE_AUTO]
 
 
+def richmat_remote_has_combined_head_feet(remote_code: str) -> bool:
+    """Return True when this remote surface has the combined head+feet button.
+
+    The combined command pair (0x29/0x2A) is not part of every Richmat remote:
+    only about a third of the official app layouts bind a button to it, so it
+    cannot be inferred from the head and feet motor flags. "auto" keeps the
+    same meaning it has for every other Richmat capability - unknown remote,
+    everything offered.
+
+    Args:
+        remote_code: The remote code (e.g., "twrm", "qrrm"), case-insensitive.
+    """
+    # Import here to avoid circular dependency
+    from .richmat_features import RICHMAT_COMBINED_HEAD_FEET_REMOTES
+
+    code_lower = remote_code.lower() if remote_code else ""
+    if code_lower in {"", RICHMAT_REMOTE_AUTO}:
+        return True
+    return code_lower in RICHMAT_COMBINED_HEAD_FEET_REMOTES
+
+
 def get_richmat_motor_count(features: RichmatFeatures) -> int:
     """Get motor count from Richmat feature flags.
 

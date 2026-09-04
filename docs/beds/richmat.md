@@ -140,18 +140,25 @@ Motors 5-7 are only present on select models (e.g., some table/lift actuators).
 | Head Up + Feet Down | `0x21` | Inverse: head up while feet down |
 | Head Down + Feet Up | `0x22` | Inverse: head down while feet up |
 
-`0x29`/`0x2A` are exposed as the `head_feet` cover on remote profiles that
-have both the head and feet motor flags. Confirmed on hardware (#552): on two
-`twrm` beds (`WLT` / `WLT825X_H35_S`) the command raises head and feet at the
-same time, which two sequential cover commands cannot do because each Richmat
-motor command ends with its own STOP frame.
+`0x29`/`0x2A` are exposed as the `head_feet` cover, but only on remote profiles
+listed in `RICHMAT_COMBINED_HEAD_FEET_REMOTES`. The official apps name these
+bytes `com_motor1_2_up` / `com_motor1_2_down`, and the same string tables give
+`k_motor1_up` = `0x24` (head) and `k_motor2_up` = `0x26` (feet), so motor 1 + 2
+is head + feet. Each app ships one `res/layout/f<code>.xml` button map per
+remote code, and only about a third of them bind a button to this pair: 202 of
+the 726 remote surfaces across 75 Richmat OEM apps. The two motor flags alone
+therefore do not imply the combined step exists on a given remote.
+
+Confirmed on hardware (#552): on two `twrm` beds (`WLT` / `WLT825X_H35_S`) the
+command raises head and feet at the same time, which two sequential cover
+commands cannot do because each Richmat motor command ends with its own STOP
+frame. All 31 apps that ship a `twrm` layout give it the combined button, while
+`qrrm` and the BedTech `bt6500` surface have it in none of them.
 
 > [!NOTE]
 > The BedTech app calls the same byte pair `bothHeads` (see
-> [bedtech.md](bedtech.md)), which would mean two head actuators rather than
-> head plus feet. No dual-head Richmat bed has been tested, so on a flex-head
-> model this control may drive both head sections instead. Richmat's own
-> command map and the beds tested so far both say head plus feet.
+> [bedtech.md](bedtech.md)). That is that vendor's own naming; Richmat's motor
+> numbering above is what the command actually addresses.
 
 #### Presets
 

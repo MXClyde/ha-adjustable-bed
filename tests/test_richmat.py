@@ -591,7 +591,7 @@ class TestRichmatFeatureDetection:
         mock_richmat_config_entry_data: dict,
         mock_coordinator_connected,
     ):
-        """Richmat BT6500 should expose head/feet/head+feet/pillow/lumbar only."""
+        """Richmat BT6500 should expose head/feet/pillow/lumbar only."""
         entry = MockConfigEntry(
             domain=DOMAIN,
             title="BedTech BT6500",
@@ -611,10 +611,11 @@ class TestRichmatFeatureDetection:
         controller = coordinator.controller
 
         assert coordinator.motor_count == 2
+        # The BT6500 remote surface has no combined head+feet button, so the
+        # combined step must not appear even though both motors are present.
         assert [spec.key for spec in controller.motor_control_specs] == [
             "head",
             "feet",
-            "head_feet",
             "pillow",
             "lumbar",
         ]
@@ -632,6 +633,27 @@ class TestRichmatFeatureDetection:
         controller = RichmatController(coordinator, is_wilinke=True, remote_code="aarn")
 
         assert "head_feet" not in [spec.key for spec in controller.motor_control_specs]
+
+    def test_remote_with_combined_button_exposes_head_feet_control(self):
+        """twrm binds a button to 0x29/0x2A, so it gets the combined cover."""
+        coordinator = MagicMock()
+        controller = RichmatController(coordinator, is_wilinke=True, remote_code="twrm")
+
+        assert "head_feet" in [spec.key for spec in controller.motor_control_specs]
+
+    def test_remote_without_combined_button_omits_head_feet_control(self):
+        """virm has both motors but no combined button on its remote surface."""
+        coordinator = MagicMock()
+        controller = RichmatController(coordinator, is_wilinke=True, remote_code="virm")
+
+        assert "head_feet" not in [spec.key for spec in controller.motor_control_specs]
+
+    def test_auto_remote_exposes_head_feet_control(self):
+        """An unidentified remote keeps offering everything, as it does elsewhere."""
+        coordinator = MagicMock()
+        controller = RichmatController(coordinator, is_wilinke=True, remote_code="auto")
+
+        assert "head_feet" in [spec.key for spec in controller.motor_control_specs]
 
     def test_qrrm_wilinke_supports_rgb_light_and_timer(self):
         """QRRM WiLinke remotes should expose RGB light and timer controls."""

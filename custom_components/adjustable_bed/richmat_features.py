@@ -6910,3 +6910,35 @@ RICHMAT_REMOTE_FEATURES_GENERATED: Final[dict[str, RichmatFeatures]] = {
     ),
     "zzrm": _F.PRESET_FLAT | _F.MOTOR_HEAD | _F.MOTOR_FEET,
 }
+
+
+# Remote codes whose official app layout binds a button to the combined
+# motor1+motor2 command pair (0x29 up / 0x2A down). Extracted from the
+# res/layout/f<code>.xml button maps of 75 Richmat OEM apps: each button
+# references the command byte through a string resource, so a code is listed
+# here only when the majority of apps that ship its layout give it both
+# directions. Roughly a third of the remote surfaces have this button, so it
+# cannot be inferred from the head and feet motor flags alone.
+RICHMAT_COMBINED_HEAD_FEET_REMOTES: Final[frozenset[str]] = frozenset(
+    {
+        "6brm", "a2rm", "a3rm", "a3rn", "ajrn", "aqrn", "atrm", "aurm", "avrm", "awrm", "axrn",
+        "ayrm", "azrn", "b2rn", "b5rn", "b6rm", "b7rm", "b7rn", "b8rn", "bfrm", "bgrm", "bhrm",
+        "bnrm", "bqrm", "burm", "c2rn", "c5rm", "c9rn", "carn", "cbrm", "ccrn", "cerm", "ckrm",
+        "cmrn", "corm", "corn", "cyrm", "d2rm", "d5rm", "dfrm", "dhrm", "dirm", "dmrm", "durm",
+        "dvrm", "e0rm", "e3rm", "e5rm", "efrm", "enrm", "eqrm", "esrm", "etrm", "f3rm", "f5rm",
+        "farm", "fbrm", "firm", "frrm", "fvrm", "fyrm", "g2rm", "g3rm", "g5rm", "g8rm", "g9rm",
+        "gcrm", "germ", "ghrm", "gmrm", "gorm", "gsrm", "gxrm", "gyrm", "h5rm", "h8rm", "harm",
+        "herm", "hkrm", "hmrm", "hnrm", "hqrm", "htrm", "hvrm", "hzrm", "i2rm", "i3rm", "iarm",
+        "idrm", "iirm", "iprm", "iqrm", "irrm", "j5rm", "jbrm", "jmrm", "jrrm", "k6rm", "k7rm",
+        "khrm", "kmrm", "knrm", "kurm", "kxrm", "kyrm", "m4rm", "m8rm", "marm", "mmrm", "o2rm",
+        "o3rm", "o9rm", "oarm", "oprm", "oqrm", "oxrm", "p0rm", "p2rm", "p3rm", "p4rm", "p5rm",
+        "r2rm", "r5rm", "r6rm", "t4rm", "t8rm", "tarm", "tcrm", "tdrm", "thrm", "tlrm", "twrm",
+        "u0rm", "u1rm", "u4rm", "ucrm", "ufrm", "ujrm", "ukrm", "ulrm", "uprm", "utrm", "uvrm",
+        "uwrm", "uxrm", "uyrm", "uzrm", "v3rm", "v4rm", "vxrm", "vyrm", "w0rm", "w2rm", "w5rm",
+        "w6rm", "w7rm", "werm", "wkrm", "wrrm", "wsrm", "wtrm", "wurm", "wvrm", "wzrm", "x4rm",
+        "x5rm", "x7rm", "x8rm", "xerm", "xhrm", "xirm", "xjrm", "xkrm", "xnrm", "xorm", "xwrm",
+        "y3rm", "yhrm", "yjrm", "ywrm", "yyrm", "yzrm", "z1rm", "z2rm", "z4rm", "z5rm", "z7rm",
+        "z8rm", "zbrm", "zdrm", "zerm", "zr10", "zr20", "zr30", "zr51", "zr70", "zr80", "zra0",
+        "zra1", "zra2", "zurm", "zzrm"
+    }
+)
