@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from bleak import BleakClient
 from bleak.exc import BleakError
@@ -366,9 +366,9 @@ class RichmatController(BedController):
                 MotorControlSpec(
                     key="head_feet",
                     translation_key="head_feet",
-                    open_fn=lambda ctrl: ctrl.move_head_feet_up(),
-                    close_fn=lambda ctrl: ctrl.move_head_feet_down(),
-                    stop_fn=lambda ctrl: ctrl.move_head_feet_stop(),
+                    open_fn=lambda ctrl: cast(RichmatController, ctrl).move_head_feet_up(),
+                    close_fn=lambda ctrl: cast(RichmatController, ctrl).move_head_feet_down(),
+                    stop_fn=lambda ctrl: cast(RichmatController, ctrl).move_head_feet_stop(),
                 )
             )
 
