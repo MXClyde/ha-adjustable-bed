@@ -296,6 +296,41 @@ class TestRichmatMovement:
         expected = coordinator.controller._build_command(RichmatCommands.MOTOR_FEET_UP)
         assert first_command == expected
 
+    async def test_move_head_feet_up_sends_combined_command(
+        self,
+        hass: HomeAssistant,
+        mock_richmat_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """Head+feet must send the single combined command, not two motor commands."""
+        coordinator = AdjustableBedCoordinator(hass, mock_richmat_config_entry)
+        await coordinator.async_connect()
+
+        await coordinator.controller.move_head_feet_up()
+
+        calls = mock_bleak_client.write_gatt_char.call_args_list
+        expected = coordinator.controller._build_command(RichmatCommands.MOTOR_HEAD_FEET_UP)
+        assert calls[0][0][1] == expected
+        assert calls[-1][0][1] == coordinator.controller._build_command(RichmatCommands.END)
+
+    async def test_move_head_feet_down_sends_combined_command(
+        self,
+        hass: HomeAssistant,
+        mock_richmat_config_entry,
+        mock_coordinator_connected,
+        mock_bleak_client: MagicMock,
+    ):
+        """Head+feet down uses the paired combined command byte."""
+        coordinator = AdjustableBedCoordinator(hass, mock_richmat_config_entry)
+        await coordinator.async_connect()
+
+        await coordinator.controller.move_head_feet_down()
+
+        calls = mock_bleak_client.write_gatt_char.call_args_list
+        expected = coordinator.controller._build_command(RichmatCommands.MOTOR_HEAD_FEET_DOWN)
+        assert calls[0][0][1] == expected
+
     async def test_stop_all(
         self,
         hass: HomeAssistant,
@@ -556,7 +591,7 @@ class TestRichmatFeatureDetection:
         mock_richmat_config_entry_data: dict,
         mock_coordinator_connected,
     ):
-        """Richmat BT6500 should expose head/feet/pillow/lumbar only."""
+        """Richmat BT6500 should expose head/feet/head+feet/pillow/lumbar only."""
         entry = MockConfigEntry(
             domain=DOMAIN,
             title="BedTech BT6500",
@@ -579,10 +614,24 @@ class TestRichmatFeatureDetection:
         assert [spec.key for spec in controller.motor_control_specs] == [
             "head",
             "feet",
+            "head_feet",
             "pillow",
             "lumbar",
         ]
-        assert controller.stale_motor_entity_keys == {"back", "legs", "pillow", "lumbar"}
+        assert controller.stale_motor_entity_keys == {
+            "back",
+            "legs",
+            "pillow",
+            "lumbar",
+            "head_feet",
+        }
+
+    def test_head_only_remote_omits_combined_head_feet_control(self):
+        """The combined step needs both axes, so a head-only remote must not get it."""
+        coordinator = MagicMock()
+        controller = RichmatController(coordinator, is_wilinke=True, remote_code="aarn")
+
+        assert "head_feet" not in [spec.key for spec in controller.motor_control_specs]
 
     def test_qrrm_wilinke_supports_rgb_light_and_timer(self):
         """QRRM WiLinke remotes should expose RGB light and timer controls."""

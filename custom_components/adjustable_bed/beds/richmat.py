@@ -322,11 +322,14 @@ class RichmatController(BedController):
         return bool(self._features & RichmatFeatures.MOTOR_PILLOW)
 
     @property
-    def has_head_feet_support(self) -> bool:
+    def _has_head_feet_support(self) -> bool:
         """Return True when both head and feet motors are present.
 
         The combined command drives both actuators at once, so it only makes
-        sense when the remote profile exposes both of them.
+        sense when the remote profile exposes both of them. This stays a
+        Richmat-local predicate rather than a shared capability flag: no other
+        platform queries it, and `BedController` builds combined steps from the
+        motor layout instead.
         """
         return bool(
             self._features & RichmatFeatures.MOTOR_HEAD
@@ -354,7 +357,7 @@ class RichmatController(BedController):
             ),
         ]
 
-        if self.has_head_feet_support:
+        if self._has_head_feet_support:
             # Richmat drives head and feet together as one hardware step
             # (MOTOR_HEAD_FEET_UP/DOWN), which is what the combined button on
             # the physical remote sends. This is not the same as opening the
@@ -396,8 +399,13 @@ class RichmatController(BedController):
 
     @property
     def stale_motor_entity_keys(self) -> frozenset[str]:
-        """Remove legacy generic motor aliases when Richmat layout changes."""
-        return frozenset({"back", "legs", "pillow", "lumbar"})
+        """Remove legacy generic motor aliases when Richmat layout changes.
+
+        `head_feet` is listed too: correcting a bed to a single-axis remote
+        profile drops the combined step, and without this the old cover lingers
+        in the registry as an unavailable ghost.
+        """
+        return frozenset({"back", "legs", "pillow", "lumbar", "head_feet"})
 
     @property
     def supports_lights(self) -> bool:
