@@ -327,9 +327,9 @@ class RichmatController(BedController):
 
         The combined command drives both actuators at once, so it only makes
         sense when the remote profile exposes both of them. This stays a
-        Richmat-local predicate rather than a shared capability flag: no other
-        platform queries it, and `BedController` builds combined steps from the
-        motor layout instead.
+        Richmat-local predicate rather than a `BedController` capability flag:
+        no entity platform queries it, and the combined step is a protocol
+        detail of this remote family, not a shared motor axis.
         """
         return bool(
             self._features & RichmatFeatures.MOTOR_HEAD
